@@ -1,6 +1,6 @@
 # instagram_monitor
 
-instagram_monitor is an OSINT tool for real-time monitoring of **Instagram users' activities and profile changes**.
+**instagram_monitor** is a powerful, real-time OSINT suite for tracking every activity on Instagram — from story updates and bio changes to follower shifts — providing stunning dashboards and instant alerts to keep you in the loop.
 
 <a id="features"></a>
 ## Features
@@ -12,20 +12,27 @@ instagram_monitor is an OSINT tool for real-time monitoring of **Instagram users
   - changes in **profile visibility** (public to private and vice versa)
 - **Anonymous download** of users' **story images and videos** without leaving view traces
 - **Download** of users' **post images and post / reel videos**
-- **Email notifications** for different events (new posts, reels, stories, changes in followings, followers, bio, profile pictures, visibility and errors)
-- **Attaching changed profile pictures** and **stories/posts/reels images** directly in email notifications
+- **Email and webhook notifications** for different events (new posts, reels, stories, changes in followings, followers, bio, profile pictures, visibility and errors)
+- **Terminal Dashboard** - beautiful, live-updating terminal dashboard with real-time stats and interactive controls
+- **Web Dashboard** - modern, real-time UI on localhost with stats, interactive controls and activity feed
+- **Attaching changed profile pictures** and **stories/posts/reels images** directly in notifications
 - **Displaying the profile picture** and **stories/posts/reels images** right in your terminal (if you have `imgcat` installed)
 - **Saving all user activities and profile changes** with timestamps to a **CSV file**
 - Support for both **public and private profiles**
-- **Two modes of operation**: with or without a logged-in Instagram account
+- **Two session modes**: with or without a logged-in Instagram account
 - **Monitor multiple users** in a single process with automatic request staggering to avoid detection
 - Various mechanisms to **prevent captcha and detection of automated tools**, including **Be Human mode** (simulates random user actions), **Jitter mode** (adds human-like delays and back-off to HTTP requests) and **hour-range checking** (limits fetching updates to specific hours of the day)
 - **Flexible configuration** - support for config files, dotenv files, environment variables and command-line arguments
+- **Configurable color themes** - customizable terminal output colors and styles
 - Possibility to **control the running copy** of the script via signals
 - **Functional, procedural Python** (minimal OOP)
 
 <p align="center">
    <img src="https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor.png" alt="instagram_monitor_screenshot" width="90%"/>
+</p>
+
+<p align="center">
+   <img src="https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor_web_dashboard.png" alt="instagram_monitor_web_dashboard_screenshot" width="90%"/>
 </p>
 
 <a id="table-of-contents"></a>
@@ -39,29 +46,39 @@ instagram_monitor is an OSINT tool for real-time monitoring of **Instagram users
 3. [Quick Start](#quick-start)
 4. [Configuration](#configuration)
    * [Configuration File](#configuration-file)
-   * [Mode 1: Without Logged-In Instagram Account (No Session Login)](#mode-1-without-logged-in-instagram-account-no-session-login)
-   * [Mode 2: With Logged-In Instagram Account (Session Login)](#mode-2-with-logged-in-instagram-account-session-login)
+   * [Session Mode 1: Without Logged-In Instagram Account (No Session Login)](#session-mode-1-without-logged-in-instagram-account-no-session-login)
+   * [Session Mode 2: With Logged-In Instagram Account (Session Login)](#session-mode-2-with-logged-in-instagram-account-session-login)
    * [Time Zone](#time-zone)
    * [SMTP Settings](#smtp-settings)
    * [Storing Secrets](#storing-secrets)
-5. [Usage](#usage)
+5. [View Modes](#view-modes)
+   * [Traditional Text Mode](#traditional-text-mode)
+   * [Terminal Dashboard](#terminal-dashboard-mode)
+   * [Web Dashboard](#web-dashboard-mode)
+   * [Dashboard View Modes](#dashboard-view-modes)
+6. [Usage](#usage)
    * [Monitoring Mode](#monitoring-mode)
    * [Email Notifications](#email-notifications)
+   * [Webhook Notifications](#webhook-notifications)
+   * [Follower Churn Detection](#follower-churn-detection)
+   * [Skipping Follow Changes](#skipping-follow-changes)
    * [CSV Export](#csv-export)
+   * [Output Directory](#output-directory)
    * [Detection of Changed Profile Pictures](#detection-of-changed-profile-pictures)
    * [Displaying Images in Your Terminal](#displaying-images-in-your-terminal)
    * [Check Intervals](#check-intervals)
    * [Signal Controls (macOS/Linux/Unix)](#signal-controls-macoslinuxunix)
    * [Coloring Log Output with GRC](#coloring-log-output-with-grc)
 6. [How to Prevent Getting Challenged and Account Suspension](#how-to-prevent-getting-challenged-and-account-suspension)
-7. [Change Log](#change-log)
-8. [License](#license)
+7. [Troubleshooting](#troubleshooting)
+8. [Change Log](#change-log)
+9. [License](#license)
 
 <a id="requirements"></a>
 ## Requirements
 
 * Python 3.9 or higher
-* Libraries: [instaloader](https://github.com/instaloader/instaloader), `requests`, `python-dateutil`, `pytz`, `tzlocal`, `python-dotenv`, `tqdm`
+* Libraries: [instaloader](https://github.com/instaloader/instaloader), `requests`, `python-dateutil`, `pytz`, `tzlocal`, `python-dotenv`, `tqdm`, `rich` (for Terminal Dashboard), `flask` (for Web Dashboard)
 
 Tested on:
 
@@ -89,8 +106,10 @@ Download the *[instagram_monitor.py](https://raw.githubusercontent.com/misiektoj
 Install dependencies via pip:
 
 ```sh
-pip install instaloader requests python-dateutil pytz tzlocal python-dotenv tqdm
+pip install instaloader requests python-dateutil pytz tzlocal python-dotenv tqdm rich flask
 ```
+
+**Note:** `rich` is required for the Terminal Dashboard, `flask` is required for the Web Dashboard. If Rich or Flask is not installed, the corresponding dashboard is disabled automatically.
 
 Alternatively, from the downloaded *[requirements.txt](https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/requirements.txt)*:
 
@@ -112,7 +131,7 @@ If you installed manually, download the newest *[instagram_monitor.py](https://r
 <a id="quick-start"></a>
 ## Quick Start
 
-- Track the `target_insta_user` in [mode 1](#mode-1-without-logged-in-instagram-account-no-session-login) (no session login):
+- Track the `target_insta_user` in [session mode 1](#session-mode-1-without-logged-in-instagram-account-no-session-login) (no session login - anonymous):
 
 ```sh
 instagram_monitor <target_insta_user>
@@ -124,12 +143,18 @@ Or if you installed [manually](#manual-installation):
 python3 instagram_monitor.py <target_insta_user>
 ```
 
-- Track the `target_insta_user` in [mode 2](#option-3-session-login-using-firefox-cookies-recommended) (with session login via Firefox web browser):
+- Track the `target_insta_user` in [session mode 2](#option-3-session-login-using-firefox-cookies-recommended) (with session login via Firefox web browser):
 
 ```sh
 # log in to the Instagram account (your_insta_user) via Firefox web browser
 instagram_monitor --import-firefox-session
 instagram_monitor -u <your_insta_user> <target_insta_user>
+```
+
+- You can also launch the **[Web Dashboard](#web-dashboard-mode)** along with tracking:
+
+```sh
+instagram_monitor <target_insta_user> --web-dashboard
 ```
 
 To get the list of all supported command-line arguments / flags:
@@ -149,23 +174,30 @@ Most settings can be configured via command-line arguments.
 If you want to have it stored persistently, generate a default config template and save it to a file named `instagram_monitor.conf`:
 
 ```sh
+# On macOS, Linux or Windows Command Prompt (cmd.exe)
 instagram_monitor --generate-config > instagram_monitor.conf
 
+# On Windows PowerShell (recommended to avoid encoding issues)
+instagram_monitor --generate-config instagram_monitor.conf
 ```
+
+> **IMPORTANT**: On **Windows PowerShell**, using redirection (`>`) can cause the file to be encoded in UTF-16, which will lead to "null bytes" errors when running the tool. It is highly recommended to provide the filename directly as an argument to `--generate-config` to ensure UTF-8 encoding.
 
 Edit the `instagram_monitor.conf` file and change any desired configuration options (detailed comments are provided for each).
 
-<a id="mode-1-without-logged-in-instagram-account-no-session-login"></a>
-### Mode 1: Without Logged-In Instagram Account (No Session Login)
+**Note**: Since **v3.0**, you can also change nearly all configuration settings and generate config file via the **[Web Dashboard](#web-dashboard-mode)**.
 
-In this mode, the tool operates without logging in to an Instagram account.
+<a id="session-mode-1-without-logged-in-instagram-account-no-session-login"></a>
+### Session Mode 1: Without Logged-In Instagram Account (No Session Login)
+
+In this mode, the tool operates without logging in to an Instagram account (anonymous).
 
 You can still monitor basic user activity such as new or deleted posts (excluding reels and stories due to Instagram API limitations), bio changes and changes in follower/following counts. However, you won't see which specific followers/followings were added or removed.
 
 This mode requires no setup, is easy to use and is resistant to Instagram's anti-bot mechanisms and CAPTCHA challenges.
 
-<a id="mode-2-with-logged-in-instagram-account-session-login"></a>
-### Mode 2: With Logged-In Instagram Account (Session Login)
+<a id="session-mode-2-with-logged-in-instagram-account-session-login"></a>
+### Session Mode 2: With Logged-In Instagram Account (Session Login)
 
 In this mode, the tool uses an Instagram session login to access additional data. This includes detailed insights into new posts, reels and stories, also about added or removed followers/followings.
 
@@ -202,6 +234,8 @@ Log in to your account (`your_insta_user`) in Firefox, then run:
 instagram_monitor --import-firefox-session
 ```
 
+Since **v3.0**, you can also perform this import easily via the **[Web Dashboard](#web-dashboard-mode)** (no command line required). Simply open the dashboard, go to the **Session** page and click **Detect Firefox Profiles**.
+
 The tool will detect available Firefox profiles with a `cookies.sqlite` file. If multiple profiles are found, it will prompt you to select one, then import the session and save it via Instaloader.
 
 To use a specific Firefox profile path:
@@ -220,7 +254,7 @@ The session login method using Firefox cookies has the added benefit of blending
 It is also recommended to use the exact user agent string from your Firefox web browser:
 - open Firefox and type `about:support` in the address bar
 - find the `User Agent` value under the `Application Basics` section and copy it
-- set this value via the `USER_AGENT` configuration option or by using the `--user-agent` flag
+- set this value via the `USER_AGENT` configuration option or by using the `--user-agent` flag (since **v3.0**, you can also do it easily via the **[Web Dashboard](#web-dashboard-mode)**)
 
 <a id="time-zone"></a>
 ### Time Zone
@@ -237,6 +271,8 @@ You can get the list of all time zones supported by pytz like this:
 python3 -c "import pytz; print('\n'.join(pytz.all_timezones))"
 ```
 
+Since **v3.0** you can also change from the default 24-hour time format to a 12-hour format via the `TIME_FORMAT_12H` config option.
+
 <a id="smtp-settings"></a>
 ### SMTP Settings
 
@@ -251,13 +287,14 @@ instagram_monitor --send-test-email
 <a id="storing-secrets"></a>
 ### Storing Secrets
 
-It is recommended to store secrets like `SESSION_PASSWORD` or `SMTP_PASSWORD` as either an environment variable or in a dotenv file.
+It is recommended to store secrets like `SESSION_PASSWORD`, `SMTP_PASSWORD` or `WEBHOOK_URL` as either an environment variable or in a dotenv file.
 
 Set the needed environment variables using `export` on **Linux/Unix/macOS/WSL** systems:
 
 ```sh
 export SESSION_PASSWORD="your_instagram_session_password"
 export SMTP_PASSWORD="your_smtp_password"
+export WEBHOOK_URL="https://discord.com/api/webhooks/..."
 ```
 
 On **Windows Command Prompt** use `set` instead of `export` and on **Windows PowerShell** use `$env`.
@@ -267,6 +304,7 @@ Alternatively store them persistently in a dotenv file (recommended):
 ```ini
 SESSION_PASSWORD="your_instagram_session_password"
 SMTP_PASSWORD="your_smtp_password"
+WEBHOOK_URL="https://discord.com/api/webhooks/..."
 ```
 
 By default the tool will auto-search for dotenv file named `.env` in current directory and then upward from it.
@@ -285,22 +323,141 @@ instagram_monitor <target_insta_user> --env-file none
 
 As a fallback, you can also store secrets in the configuration file or source code.
 
+
+<a id="view-modes"></a>
+## View Modes
+
+The tool provides three distinct ways to visualize monitoring activity:
+
+1. **Traditional Text Mode**: Standard CLI output, best for logging and background processes.
+2. **Terminal Dashboard**: A rich, interactive terminal interface with real-time stats.
+3. **Web Dashboard**: A modern web interface accessible via your browser.
+
+---
+
+<a id="traditional-text-mode"></a>
+### Traditional Text Mode
+
+This is the classic command-line output. It is characterized by:
+- **Clean, sequential logging**: Every event is printed as it happens with a timestamp.
+- **Persistence**: Ideal for running in the background (e.g., via `nohup` or `tmux`) where you want a full history of events in your terminal scrollback or log files.
+- **Low Overhead**: Minimal resource usage and compatible with any terminal.
+
+It is the default mode of operation.
+
+---
+
+<a id="terminal-dashboard-mode"></a>
+### Terminal Dashboard
+
+The Terminal Dashboard provides a beautiful, live-updating interface directly in your terminal. It requires the `rich` library.
+
+To enable the terminal dashboard, use the `--dashboard` flag (or set `DASHBOARD_ENABLED = True` in your config).
+
+**Key Features:**
+- **Visual Analytics**: Real-time display of tracked targets with number of followers, followings, posts, visibility and story status.
+- **Live Activity Log**: A scrolling view of the last few events.
+- **Interactive Toggles**: Press **'m'** to switch between 'User' and 'Config' views instantly.
+- **Remote Control**: Start, stop or recheck monitoring for all targets directly from the terminal.
+- **Uptime & Status**: Clean header showing tool version, status and total runtime.
+
+**Keyboard Shortcuts:**
+- **'m'**: Toggle dashboard view (User/Config)
+- **'s'**: **Start All** monitoring
+- **'x'**: **Stop All** monitoring
+- **'r'**: **Recheck All** targets
+- **'q'**: **Exit** the tool
+- **'h'**: Show help (lists commands in the activity log)
+
+```sh
+instagram_monitor target1 target2 --dashboard
+```
+
+<p align="center">
+   <img src="https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor_terminal_dashboard.png" alt="instagram_monitor_terminal_dashboard_screenshot" width="100%"/>
+</p>
+
+---
+
+<a id="web-dashboard-mode"></a>
+### Web Dashboard
+
+A modern, real-time web interface running on your local machine (default: `http://127.0.0.1:8000/`).
+
+**Key Features:**
+- **Full Control Panel**: Add or remove monitoring targets directly from the browser.
+- **Visual Analytics**: Real-time display of tracked targets with number of followers, followings, posts, visibility and story status.
+- **Live Activity Log**: A scrolling view of the last few events.
+- **Manual Trigger**: A "Recheck" button to force an immediate update for specific or all users.
+- **Remote Management**: Start or stop monitoring for specific or all targets with a single click.
+- **Synchronization**: Changes made in the web dashboard (like mode toggles) are reflected in the terminal instantly.
+- **Dynamic Configuration**: Configure sessions and settings without touching the terminal or config files.
+
+To enable the web dashboard, use the `--web-dashboard` flag (or set `WEB_DASHBOARD_ENABLED = True` in your config).
+
+**Flexible Usage:**
+- **Standard Monitoring**: Provide targets on the CLI and the dashboard acts as a live mirror and remote management interface.
+- **Control Panel Mode**: Start the tool with **only** the `--web-dashboard` flag (no initial targets). The script will wait for you to add users through the browser.
+
+```sh
+# Starting with initial targets
+instagram_monitor target1 target2 --web-dashboard
+
+# Starting as a pure control panel
+instagram_monitor --web-dashboard
+```
+
+The web dashboard requires `flask`. If flask is missing, it will be disabled while the console output remains active.
+
+<p align="center">
+   <img src="https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor_web_dashboard.png" alt="instagram_monitor_web_dashboard_screenshot" width="90%"/>
+</p>
+
+<p align="center">
+   <img src="https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor_web_dashboard_settings.png" alt="instagram_monitor_web_dashboard_settings_screenshot" width="90%"/>
+</p>
+
+---
+
+<a id="dashboard-view-modes"></a>
+### Dashboard View Modes
+
+Both the Terminal and Web dashboards support two levels of information density:
+
+1. **User Mode** (`user`):
+   - Simple, minimal interface.
+   - Focuses on core stats and latest activity.
+   - Ideal for "always-on" monitoring.
+
+2. **Config Mode** (`config`):
+   - Detailed view showing all internal settings.
+   - Displays User Agent strings, Hour Ranges, Jitter status and more.
+   - Useful for auditing your setup and verifying configuration.
+
+Toggle seamlessly between modes using the **'m'** key or the web dashboard toggle button.
+
 <a id="usage"></a>
 ## Usage
 
 <a id="monitoring-mode"></a>
 ### Monitoring Mode
 
-To monitor specific user activity in [mode 1](#mode-1-without-logged-in-instagram-account-no-session-login) (no session login), just type Instagram username as a command-line argument (`target_insta_user` in the example below):
+To monitor specific user activity in [session mode 1](#session-mode-1-without-logged-in-instagram-account-no-session-login) (no session login - anonymous), just type Instagram username as a command-line argument (`target_insta_user` in the example below):
 
 ```sh
 instagram_monitor <target_insta_user>
 ```
 
-To monitor specific user activity in [mode 2](#mode-2-with-logged-in-instagram-account-session-login) (with session login), you also need to specify your Instagram account name (`your_insta_user` in the example below) via `SESSION_USERNAME` configuration option or `-u` flag:
+To monitor specific user activity in [session mode 2](#session-mode-2-with-logged-in-instagram-account-session-login) (with session login), you also need to specify your Instagram account name (`your_insta_user` in the example below) via `SESSION_USERNAME` configuration option or `-u` flag:
 
 ```sh
 instagram_monitor -u <your_insta_user> <target_insta_user>
+```
+
+Since **v3.0** you can also launch the **[Web Dashboard](#web-dashboard-mode)** along with tracking:
+
+```sh
+instagram_monitor -u <your_insta_user> <target_insta_user> --web-dashboard
 ```
 
 By default, the tool looks for a configuration file named `instagram_monitor.conf` in:
@@ -322,6 +479,8 @@ You can monitor multiple Instagram users in **one process** by passing multiple 
 instagram_monitor target_user_1 target_user_2 target_user_3
 ```
 
+**Note**: You can also add and remove monitoring targets directly via the **[Web Dashboard](#web-dashboard-mode)** without restarting the tool.
+
 To reduce the chance of triggering Instagram anti-bot mechanisms, the tool will **stagger** the start of each target's monitoring loop (auto-spread across your `INSTA_CHECK_INTERVAL` by default). You can override it with:
 
 ```sh
@@ -341,15 +500,16 @@ Thanks to this we do not need to re-fetch it every time the tool is restarted an
 
 When downloading lists of followers or followings, a **progress bar** is displayed showing real-time download progress, including statistics such as names per request, total requests, elapsed time and estimated remaining time. Progress updates are shown in the terminal only (to avoid cluttering log files), with the final completion state written to the log file for reference.
 
-The tool also saves the user profile picture to `instagram_<username>_profile_pic*.jpeg` files.
+The tool also saves the user profile picture to `instagram_<username>_profile_pic*.jpg` files.
 
 It also saves downloaded posts/reels images & videos to:
-- `instagram_<username>_post/reel_YYYYmmdd_HHMMSS.jpeg`
+- `instagram_<username>_post/reel_YYYYmmdd_HHMMSS.jpg`
 - `instagram_<username>_post/reel_YYYYmmdd_HHMMSS.mp4`
 
 And downloaded stories images & videos to:
-- `instagram_<username>_story_YYYYmmdd_HHMMSS.jpeg`
+- `instagram_<username>_story_YYYYmmdd_HHMMSS.jpg`
 - `instagram_<username>_story_YYYYmmdd_HHMMSS.mp4`
+
 
 <a id="email-notifications"></a>
 ### Email Notifications
@@ -357,6 +517,7 @@ And downloaded stories images & videos to:
 To enable email notifications for various events (such as new posts, reels and stories, changes in followings, bio updates, changes in profile picture and visibility):
 - set `STATUS_NOTIFICATION` to `True`
 - or use the `-s` flag
+- or toggle it via the **Settings** menu in the **Web Dashboard**
 
 ```sh
 instagram_monitor <target_insta_user> -s
@@ -365,6 +526,7 @@ instagram_monitor <target_insta_user> -s
 To also get email notifications about changed followers:
 - set `FOLLOWERS_NOTIFICATION` to `True`
 - or use the `-m` flag
+- or toggle it via the **Settings** menu in the **Web Dashboard**
 
 ```sh
 instagram_monitor <target_insta_user> -m
@@ -373,6 +535,7 @@ instagram_monitor <target_insta_user> -m
 To disable sending an email on errors (enabled by default):
 - set `ERROR_NOTIFICATION` to `False`
 - or use the `-e` flag
+- or toggle it via the **Settings** menu in the **Web Dashboard**
 
 ```sh
 instagram_monitor <target_insta_user> -e
@@ -386,6 +549,115 @@ Example email:
    <img src="https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor_email_notifications.png" alt="instagram_monitor_email_notifications" width="80%"/>
 </p>
 
+<a id="webhook-notifications"></a>
+### Webhook Notifications
+
+The tool supports webhook notifications (compatible with **Discord** and other webhook services) for all monitored events (posts, reels, stories, followings, followers, bio, profile visibility, profile picture changes and errors).
+
+<p align="center">
+   <img src="https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor_discord.png" alt="instagram_monitor_discord_screenshot" width="80%"/>
+</p>
+
+#### 1. Configure Discord Webhook
+If you are new to Discord, follow these steps to get your **Webhook URL**:
+
+1.  **Create a Server**: Click the **+** (Plus) icon on the left sidebar ("Add a Server") -> **Create My Own** -> **For me and my friends**.
+2.  **Create/Edit a Channel**: In your new server, find the **#general** channel (or create a new one). Click the **Edit Channel** icon (⚙️ gear) next to the channel name.
+3.  **Create Webhook**: Go to **Integrations** in the left menu -> **Webhooks** -> **New Webhook**.
+4.  **Copy URL**: Click on the new webhook (often named "Spidey Bot", you can rename it) and click **Copy Webhook URL**.
+
+#### 2. Enable in the Tool
+- set `WEBHOOK_ENABLED` to `True` and `WEBHOOK_URL` to your copied URL in `instagram_monitor.conf`
+- or use an [environment variable](#storing-secrets) or a dotenv file for `WEBHOOK_URL`
+- or use the `--webhook-url` flag (alternatively use the `--webhook` flag if URL is already in config)
+- or toggle it via the **Settings** menu in the **Web Dashboard**
+
+```sh
+# Enable with URL
+instagram_monitor <target_insta_user> --webhook-url "https://discord.com/api/webhooks/..."
+
+# Explicitly enable/disable if URL is in config
+instagram_monitor <target_insta_user> --webhook
+instagram_monitor <target_insta_user> --no-webhook
+```
+
+#### 3. Test your settings
+You can verify your configuration by sending a test notification:
+
+```sh
+# Verify settings from configuration file
+instagram_monitor --send-test-webhook
+
+# Verify a specific URL from command line
+instagram_monitor --webhook-url "https://discord.com/api/webhooks/..." --send-test-webhook
+```
+
+#### 4. Advanced Configuration
+By default, all webhook notification types (status, followers, errors) are **disabled**. You must explicitly enable what you want the tool to send:
+
+- Use `--webhook-status` to toggle status notifications (new posts, reels, stories, bio, visibility, profile pic)
+- Use `--webhook-followers` to toggle follower/following change notifications
+- Use `--webhook-errors` to toggle error notifications
+
+Example with explicit control:
+```sh
+# Enable webhooks and specifically choose what to send
+instagram_monitor <target_insta_user> --webhook-url "..." --webhook-status --webhook-followers --webhook-errors
+```
+
+Configuration file options (all disabled by default):
+```ini
+WEBHOOK_ENABLED = False
+WEBHOOK_URL = "https://discord.com/api/webhooks/..."
+WEBHOOK_USERNAME = "Instagram Monitor"
+WEBHOOK_AVATAR_URL = ""
+WEBHOOK_STATUS_NOTIFICATION = False
+WEBHOOK_FOLLOWERS_NOTIFICATION = False
+WEBHOOK_ERROR_NOTIFICATION = False
+```
+
+<a id="follower-churn-detection"></a>
+### Follower Churn Detection
+
+When enabled, the tool fetches the full list of followers and followings on **every check** (not just when counts change) and compares usernames to detect changes. This is useful for scenarios where:
+
+- Someone unfollows and someone else follows at the same time (count stays the same)
+- You want to track exactly who followed/unfollowed even without count changes
+- You need comprehensive monitoring of all follower/following activity
+
+To enable follower churn detection:
+- set `FOLLOWERS_CHURN_DETECTION` to `True`
+- or use the `--followers-churn` flag
+- or toggle it via the **Settings** menu in the **Web Dashboard**
+
+**Note**: This feature is automatically disabled if `SKIP_FOLLOW_CHANGES` is active, as detailed tracking is not possible when follow-related reporting is suppressed. It also requires [Session Mode 2](#session-mode-2-with-logged-in-instagram-account-session-login).
+
+```sh
+instagram_monitor <target_insta_user> --followers-churn
+```
+
+**Note**: This feature requires [Session Mode 2](#session-mode-2-with-logged-in-instagram-account-session-login) (session login) to access the Instagram API and it will increase API calls since it fetches the full follower/following lists every check interval, so the risk of account suspension is higher.
+
+<a id="skipping-follow-changes"></a>
+### Skipping Follow Changes
+
+If you want to track followers/followings counts in the dashboards, but don't want to get any notifications or logs when they change, you can enable the "Skip Follow Changes" mode.
+
+When enabled:
+- **Notifications**: Email and Webhook alerts for follower/following changes are suppressed.
+- **Reporting**: Console prints and activity logs for these changes are disabled.
+- **CSV Export**: No "Followers Count" or "Followings Count" entries are written to the CSV file.
+- **Performance**: High-overhead downloading of full lists is skipped, saving bandwidth and reducing API call volume.
+
+To enable skipping follow changes:
+- set `SKIP_FOLLOW_CHANGES` to `True` in your config
+- or use the `--skip-follow-changes` flag
+- or toggle it via the **Settings** menu in the **Web Dashboard**
+
+```sh
+instagram_monitor <target_insta_user> --skip-follow-changes
+```
+
 <a id="csv-export"></a>
 ### CSV Export
 
@@ -397,10 +669,50 @@ instagram_monitor <target_insta_user> -b instagram_username.csv
 
 The file will be automatically created if it does not exist.
 
-In **multi-target** mode, the tool writes **one CSV per user**. If you pass `-b instagram_data.csv`, it will create:
-- `instagram_data_<user1>.csv`
-- `instagram_data_<user2>.csv`
-... etc.
+The tool uses the following logic for CSV path resolution:
+
+1.  **Absolute Path**:
+    *   **Single-target mode**: The file is saved exactly where specified.
+    *   **Multi-target mode**: The absolute path is used as a base; separate files are created for each user (e.g., `/path/file_user1.csv`). Isolation is preserved.
+2.  **Relative Path + `OUTPUT_DIR`**: If you provide a relative path and have `OUTPUT_DIR` configured, the file is saved in the `csvs/` subdirectory:
+    *   **Single-target mode**: `OUTPUT_DIR/csvs/<filename>` (uses basename of your input)
+    *   **Multi-target mode**: `OUTPUT_DIR/<username>/csvs/<filename>` (uses basename of your input)
+3.  **Relative Path + no `OUTPUT_DIR`**:
+    *   **Single-target mode**: Saved as specified in the current working directory.
+    *   **Multi-target mode**: One file per user is created in the current working directory using a suffix: `<CSV_FILE_basename>_<username>.csv`.
+
+<a id="output-directory"></a>
+### Output Directory
+
+By default, the tool saves all generated files (JSON, images, videos, logs) in the current working directory.
+
+You can specify a custom root directory for all output files using the `-o` / `--output-dir` flag or `OUTPUT_DIR` configuration option:
+
+```sh
+instagram_monitor <target_insta_user> -o /path/to/downloads
+```
+
+The tool will organize files into subdirectories:
+
+- **Output structure**: The layout depends on whether you monitor one or multiple users:
+
+  - **Single-target mode**: All files are organized into subdirectories directly under `OUTPUT_DIR`:
+    - `OUTPUT_DIR/images/`
+    - `OUTPUT_DIR/videos/`
+    - `OUTPUT_DIR/json/`
+    - `OUTPUT_DIR/logs/`
+    - `OUTPUT_DIR/csvs/`
+
+  - **Multi-target mode**: Each user gets their own isolated subdirectory:
+    - `OUTPUT_DIR/<username>/images/`
+    - `OUTPUT_DIR/<username>/videos/`
+    - `OUTPUT_DIR/<username>/json/`
+    - `OUTPUT_DIR/<username>/logs/`
+    - `OUTPUT_DIR/<username>/csvs/`
+
+Common messages (like the summary screen or global errors) are automatically broadcasted to all active log files.
+
+This helps keep your files organized, especially when monitoring multiple users.
 
 <a id="detection-of-changed-profile-pictures"></a>
 ### Detection of Changed Profile Pictures
@@ -411,19 +723,20 @@ This feature is enabled by default. To disable it, either:
 
 - set the `DETECT_CHANGED_PROFILE_PIC` to `False`
 - or use the `-k` flag
+- or toggle it via the **Settings** menu in the **Web Dashboard**
 
 <a id="how-it-works"></a>
 #### How It Works
 
 Since Instagram periodically changes the profile picture URL even when the image is the same, the tool performs a binary comparison of JPEG files to detect actual changes.
 
-On the first run, it saves the current profile picture to `instagram_<username>_profile_pic.jpeg`
+On the first run, it saves the current profile picture to `instagram_<username>_profile_pic.jpg`
 
 On each subsequent check a new image is fetched and it is compared byte-for-byte with the saved image.
 
-If a change is detected, the old picture is moved to `instagram_<username>_profile_pic_old.jpeg` and the new one is saved to:
-- `instagram_<username>_profile_pic.jpeg` (current)
-- `instagram_<username>_profile_pic_YYmmdd_HHMM.jpeg` (for history)
+If a change is detected, the old picture is moved to `instagram_<username>_profile_pic_old.jpg` and the new one is saved to:
+- `instagram_<username>_profile_pic.jpg` (current)
+- `instagram_<username>_profile_pic_YYmmdd_HHMM.jpg` (for history)
 
 <a id="empty-profile-picture-detection"></a>
 #### Empty Profile Picture Detection
@@ -431,8 +744,8 @@ If a change is detected, the old picture is moved to `instagram_<username>_profi
 The tool also has built-in detection of empty profile pictures. Instagram does not indicate an empty user's profile image in their API; that's why the tool detects it by using an empty profile image template (which appears to be identical on a binary level for all users).
 
 To enable this:
-- download the [instagram_profile_pic_empty.jpeg](https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/instagram_profile_pic_empty.jpeg) file
-- place it in the directory where you run the tool (or change the path via `PROFILE_PIC_FILE_EMPTY` configuration option)
+- download the [instagram_profile_pic_empty.jpg](https://raw.githubusercontent.com/misiektoja/instagram_profile_pic_empty.jpg) file
+- place it in the directory where you run the tool. **Note**: If installed via `pip`, this file is already bundled; however, any local file in your working directory will take **priority** over the bundled default.
 
 Without this file, the tool will treat an empty profile picture as a regular image. For example, if a user removes their profile picture, it would be treated as a change rather than a removal.
 
@@ -456,6 +769,8 @@ If you want to customize polling interval, use `-c` flag (or `INSTA_CHECK_INTERV
 instagram_monitor <target_insta_user> -c 3600
 ```
 
+**Note**: You can also adjust check intervals and randomization timers live via the **Settings** menu in the **Web Dashboard**.
+
 It is generally not recommended to use values lower than 1 hour as it will be quickly picked up by Instagram automated tool detection mechanisms.
 
 In order to make the tool's behavior less suspicious for Instagram, by default the polling interval is randomly picked from the range:
@@ -472,7 +787,7 @@ So having the check interval set to 1 hour (-c 3600), `RANDOM_SLEEP_DIFF_LOW` se
 
 That's why the check interval information is printed in the console and email notifications as it is essentially a random number.
 
-On top of that you can also define that fetching updates should be done only in specific hour ranges by setting `CHECK_POSTS_IN_HOURS_RANGE` to `True` and then defining proper values for `MIN/MAX_H1/H2` configuration options (see the comments in the configuration file for more information).
+On top of that you can also define that fetching updates should be done only in specific hour ranges by setting `CHECK_POSTS_IN_HOURS_RANGE` to `True` and then defining proper values for `MIN/MAX_H1/H2` configuration options (see [Use Hour-Range Checking](#use-hour-range-checking) for more information).
 
 <a id="signal-controls-macoslinuxunix"></a>
 ### Signal Controls (macOS/Linux/Unix)
@@ -500,13 +815,13 @@ As Windows supports limited number of signals, this functionality is available o
 <a id="coloring-log-output-with-grc"></a>
 ### Coloring Log Output with GRC
 
-You can use [GRC](https://github.com/garabik/grc) to color logs.
+The tool has native **color output** support for terminal since v3.0 (see `COLORED_OUTPUT` and `COLOR_THEME` config options), but you can also use [GRC](https://github.com/garabik/grc) to color logs.
 
 Add to your GRC config (`~/.grc/grc.conf`):
 
 ```
 # monitoring log file
-.*_monitor_.*\.log
+.*_monitor.*\.log
 conf.monitor_logs
 ```
 
@@ -540,9 +855,9 @@ Always pass the exact web browser user agent string from your Firefox web browse
 
 Since v1.7, the tool includes a new experimental **Be Human** mode that makes it behave more like a real user to reduce bot detection.
 
-It is disabled by default, but you can enable it via `BE_HUMAN` configuration option or `--be-human` flag.
+It is disabled by default, but you can enable it via `BE_HUMAN` configuration option, `--be-human` flag or by toggling it via the **Settings** menu in the **Web Dashboard**.
 
-It is used only with session login (mode 2).
+It is used only with session login (session mode 2).
 
 After each check cycle, the tool will randomly do one or more of these harmless actions:
 - View your explore feed: pulls a single post from Instagram's explore feed
@@ -587,7 +902,11 @@ To enable this feature, set `CHECK_POSTS_IN_HOURS_RANGE` to `True` and configure
 - `MIN_H1` and `MAX_H1` - first range of hours (default: 0-4, i.e., midnight to 4:59 AM)
 - `MIN_H2` and `MAX_H2` - second range of hours (default: 11-23, i.e., 11:00 AM to 11:59 PM / 23:59)
 
-You can define up to two non-overlapping or overlapping ranges. For example, to only allow checks during business hours (9 AM to 5 PM), you could set:
+You can define up to two non-overlapping or overlapping ranges. To disable any range, set both MIN and MAX to 0.
+
+**Note**: You can also enable this feature and configure the allowed hour ranges live via the **Settings** menu in the **Web Dashboard**.
+
+For example, to only allow checks during business hours (9 AM to 5 PM / 17:00), you could set:
 - `MIN_H1 = 9`
 - `MAX_H1 = 17`
 - `MIN_H2 = 0`
@@ -611,6 +930,8 @@ Frequent updates to certain data types, such as new stories or posts/reels, are 
 
 If certain data isn't essential for your use case, consider disabling its retrieval. The tool provides fine-grained control, for example you can skip fetching stories details (`-r`), posts/reels details (`-w`), the list of followings (`-g` flag) and followers (`-f`).
 
+**Note**: All of these fine-grained tracking options can also be toggled live via the **Settings** menu in the **Web Dashboard**.
+
 <a id="use-two-factor-authentication-2fa"></a>
 ### Use Two-Factor Authentication (2FA)
 
@@ -627,6 +948,19 @@ Refrain from logging in via VPNs, especially with IPs in different regions. Sudd
 If you have created a new account for monitoring and you are using [Session Login Using Firefox](#option-3-session-login-using-firefox-cookies-recommended), make sure to behave like a regular user for several days. New accounts are more closely monitored by Instagram's bot detection systems. Watch content, post stories or reels and leave comments - this helps establish a natural activity pattern.
 
 Once you start using the tool, try to blend its actions with normal usage. However, avoid overlapping browser activity with tool activity, as simultaneous actions can trigger suspicious behavior flags.
+
+<a id="troubleshooting"></a>
+## Troubleshooting
+
+In case of issues, run the tool with the `--debug` flag. It shows full HTTP traffic and internal script logic. Create a new issue in Github if you cannot fix it yourself.
+
+### Choosing the Right Logging Level
+
+- **Default Mode**: Silent and clean. Only logs changes (new posts, bio updates, etc.) and critical errors. Best for long-term production use.
+- **Verbose Mode (`--verbose`)**: Recommended for most users. Shows when the next check is scheduled and confirms that the loop is running correctly.
+- **Debug Mode (`--debug`)**: For developers or fixing issues. Shows full HTTP traffic, internal script logic
+
+**Note**: Both **Verbose** and **Debug** modes can be toggled live via the **Settings** menu in the **Web Dashboard**.
 
 <a id="change-log"></a>
 ## Change Log

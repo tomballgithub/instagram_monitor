@@ -1,6 +1,36 @@
 # instagram_monitor release notes
 
-This is a high-level summary of the most important changes.
+# Changes in 3.0 (23 Jan 2026)
+
+Welcome to version **3.0** — our biggest and most ambitious release to date! This update introduces a completely redesigned experience with a powerful new **Dual Dashboard system** (Web and Terminal), **Webhook / Discord notifications**, native **Color support**, custom **Output directory** feature and advanced **Follower Churn detection**.
+
+A huge thank you to our amazing contributors [@Sha-Dox](https://github.com/Sha-Dox), [@tomballgithub](https://github.com/tomballgithub), [@YouveGotMeowxy](https://github.com/YouveGotMeowxy) and [@jl-nr](https://github.com/jl-nr) for their invaluable code, ideas and testing that made this release possible.
+
+![Web dashboard screenshot](https://raw.githubusercontent.com/misiektoja/instagram_monitor/refs/heads/main/assets/instagram_monitor_web_dashboard.png)
+
+**Features and Improvements**:
+
+- **NEW:** Added a comprehensive **dashboard system** accessible in terminal and web, including a Rich-powered **Terminal Dashboard** and a Flask-powered **Web Dashboard** with real-time stats, activity feeds and interactive controls; check the [Terminal Dashboard](https://github.com/misiektoja/instagram_monitor#terminal-dashboard-mode) and [Web Dashboard](https://github.com/misiektoja/instagram_monitor#web-dashboard-mode) for more info
+- **NEW:** Added **webhook notifications** system compatible with **Discord** and other webhook services for all monitored events with support for sending local image files; check the [Webhook Notifications](https://github.com/misiektoja/instagram_monitor#webhook-notifications) for more info
+- **NEW:** Implemented native **color output** support for terminal, enhancing user experience with customizable **color themes** (see `COLORED_OUTPUT` and `COLOR_THEME` config options). You can still use the old **grc** method if you prefer to only color the logs
+- **NEW:** Added **follower churn detection** (`--followers-churn` flag or `FOLLOWERS_CHURN_DETECTION` config option) - forces the tool to download and compare the full list of followers/followings even if the total count hasn't changed, allowing the detection of user handle changes or simultaneous additions and removals; check the [Follower Churn Detection](https://github.com/misiektoja/instagram_monitor#follower-churn-detection) for more info
+- **NEW:** Added **custom output directory** feature to organize all files into target-specific subdirectories (**images**, **videos**, **logs**, **json**, **csvs**) which significantly improves organization for multi-target monitoring; check the [Output Directory](https://github.com/misiektoja/instagram_monitor#output-directory) for more info (closes [#35](https://github.com/misiektoja/instagram_monitor/issues/35))
+- **NEW:** Added **skip follow changes** option (`--skip-follow-changes` flag or `SKIP_FOLLOW_CHANGES` config option) - allows to completely silence and disable follow-related tracking (console prints, activity logs, email/webhook notifications and CSV saving) while still maintaining live statistics in the dashboards; note that enabling this automatically disables **follower churn detection** as detailed tracking is suppressed; check the [Skipping Follow Changes](https://github.com/misiektoja/instagram_monitor#skipping-follow-changes) for more info
+- **NEW:** Implemented **debug mode** (`--debug` flag or `DEBUG_MODE` config option) - provides full technical logging including every API request and internal state changes
+- **NEW:** Introduced **verbose mode** (`--verbose` flag or `VERBOSE_MODE` config option) - provides a middle-ground logging level that shows timing details, next check schedule and loop completion messages without the exhaustive detail of Debug Mode
+- **NEW:** Added support for **12-hour time format** (`TIME_FORMAT_12H` config option) across the entire tool including dashboards, console output, activity logs and email notifications
+- **NEW:** Implemented **HTML formatting** for **email notifications** for better readability
+- **NEW:** Added **dashboard view modes** - toggle between **'User'** and **'Config'** modes across both dashboards with a single keypress ('m') or button click; includes synchronized state throughout the tool
+- **NEW:** Implemented **per-target logging** - in multi-target mode, each user gets their own log file; common messages (like the summary screen) are automatically broadcasted to all active logs
+- **IMPROVE:** Enhanced **CSV path resolution** - CSV files are now automatically placed in a `csvs/` subdirectory when `OUTPUT_DIR` and relative path is used. In **multi-target mode**, the tool always enforces **per-user files** (even with absolute paths) to ensure data isolation
+- **IMPROVE:** Enhanced `CHECK_POSTS_IN_HOURS_RANGE` logic to support **disabling hour ranges** and updated status message (to disable any range, set both `MIN` and `MAX`to 0);
+
+... and many other improvements (check the list of commits for the release if you are interested)
+
+**Bug fixes**:
+
+- **BUGFIX:** Fixed recent post detection logic in anonymous mode (fixes [#34](https://github.com/misiektoja/instagram_monitor/issues/34))
+- **BUGFIX:** Expanded tabs to spaces in log files for consistent alignment
 
 # Changes in 2.0.4 (04 Jan 2026)
 
@@ -198,8 +228,8 @@ This is a high-level summary of the most important changes.
 - **NEW:** Support for **detecting multiple stories** (if session login is used)
 - **NEW:** **Fully anonymous download of user's story images & videos** (thumbnail image will be also attached in email notifications and displayed in the terminal if imgcat is installed); yes, user won't know you watched their stories 😉
 - **NEW:** **Download of user's post images & videos** (thumbnail image will be also attached in email notifications and displayed in the terminal if imgcat is installed)
-- **NEW:** **Detection of changed profile pictures**; since Instagram user's profile picture URL seems to change from time to time, the tool detects changed profile picture by doing binary comparison of saved jpeg files; initially it saves the profile pic to *instagram_{user}_profile_pic.jpeg* file after the tool is started; then during every check the new picture is fetched and the tool does binary comparison if it has changed or not; in case of changes the old profile picture is moved to *instagram_{user}_profile_pic_old.jpeg* file and the new one is saved to *instagram_{user}_profile_pic.jpeg* and also to file named *instagram_{user}_profile_pic_YYmmdd_HHMM.jpeg* (so we can have history of all profile pictures); in order to control the feature there is a new **DETECT_CHANGED_PROFILE_PIC** variable set to True by default; the feature can be disabled by setting it to *False* or by enabling **-k** / **--do_not_detect_changed_profile_pic** parameter
-- **NEW:** **Detection of empty profile pictures**; Instagram does not signal the fact of empty user's profile image in their API, that's why we can detect it by using empty profile image template (which seems to be the same on binary level for all users); to use this feature put [instagram_profile_pic_empty.jpeg](instagram_profile_pic_empty.jpeg) file in the dir from which you run the script; this way the tool will be able to detect when user does not have profile image set; it is not mandatory, but highly recommended as otherwise the tool will treat empty profile pic as regular one, so for example user's removal of profile picture will be detected as changed profile picture
+- **NEW:** **Detection of changed profile pictures**; since Instagram user's profile picture URL seems to change from time to time, the tool detects changed profile picture by doing binary comparison of saved jpg files; initially it saves the profile pic to *instagram_{user}_profile_pic.jpg* file after the tool is started; then during every check the new picture is fetched and the tool does binary comparison if it has changed or not; in case of changes the old profile picture is moved to *instagram_{user}_profile_pic_old.jpg* file and the new one is saved to *instagram_{user}_profile_pic.jpg* and also to file named *instagram_{user}_profile_pic_YYmmdd_HHMM.jpg* (so we can have history of all profile pictures); in order to control the feature there is a new **DETECT_CHANGED_PROFILE_PIC** variable set to True by default; the feature can be disabled by setting it to *False* or by enabling **-k** / **--do_not_detect_changed_profile_pic** parameter
+- **NEW:** **Detection of empty profile pictures**; Instagram does not signal the fact of empty user's profile image in their API, that's why we can detect it by using empty profile image template (which seems to be the same on binary level for all users); to use this feature put [instagram_profile_pic_empty.jpg](instagram_profile_pic_empty.jpg) file in the dir from which you run the script; this way the tool will be able to detect when user does not have profile image set; it is not mandatory, but highly recommended as otherwise the tool will treat empty profile pic as regular one, so for example user's removal of profile picture will be detected as changed profile picture
 - **NEW:** **Attaching changed profile pics and stories/posts images directly in email notifications** (when **-s** parameter is used)
 - **NEW:** Feature allowing to **display the profile picture and stories/posts images right in your terminal** (if you have *imgcat* installed); put path to your *imgcat* binary in **IMGCAT_PATH** variable (or leave it empty to disable this functionality)
 - **IMPROVE:** Improvements for running the code in **Python under Windows**

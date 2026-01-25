@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "instagram_monitor"
-version = "2.0.4"
-description = "Tool implementing real-time tracking of Instagram users activities and profile changes"
+version = "3.0"
+description = "Track Instagram users' activities, profile changes and capture content with beautiful dashboards and instant notifications"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 license-files = ["LICEN[CS]E*"]
@@ -19,6 +19,9 @@ dependencies = [
   "tzlocal>=4.0",
   "python-dotenv>=0.19",
   "tqdm>=4.0",
+  "flask>=2.0",
+  "rich>=12.0",
+  "colorama>=0.4.6; platform_system == 'Windows'",
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -40,3 +43,7 @@ instagram_monitor = "instagram_monitor:main"
 [tool.setuptools]
 py-modules = ["instagram_monitor"]
 include-package-data = true
+
+[tool.setuptools.data-files]
+"instagram_monitor_data/templates" = ["templates/*.html"]
+"instagram_monitor_data" = ["instagram_profile_pic_empty.jpg"]
