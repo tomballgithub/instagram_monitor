@@ -13,6 +13,7 @@
 # 2025/01/16, latest code base with web browser and RICH interface
 # 2025/02/01, random changes and fixes
 # 2025/02/28, latest code base with web browser and RICH interface
+# 2025/02/28, fix pbar wrapping issue if RDP stopped while pbar is updated and after testing for screen size
 
 # if first X are new, and that matches # new, stop
 # Instagram stop after x mode or calculate once you've found Lal. Test this mode
@@ -5685,9 +5686,10 @@ def setup_pbar(total_expected, title):
             # Non-Windows or fallback: shutil is reliable on Linux/Mac
             return shutil.get_terminal_size(fallback=(fallback, 24)).columns
 
+        MAX_PBAR_WIDTH = 101 #jmk
         actual_width = _get_actual_console_width()
         debug_print(f"Actual terminal width is {actual_width}") #jmk
-        safe_ncols = max(20, min(HORIZONTAL_LINE, actual_width - 1))
+        safe_ncols = max(20, min(HORIZONTAL_LINE, actual_width - 1, MAX_PBAR_WIDTH)) #jmk
         debug_print(f"Safe terminal width is {safe_ncols}") #jmk
 
         custom_bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{unit}]"
