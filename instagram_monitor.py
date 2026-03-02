@@ -14,6 +14,7 @@
 # 2025/02/01, random changes and fixes
 # 2025/02/28, latest code base with web browser and RICH interface
 # 2025/02/28, fix pbar wrapping issue if RDP stopped while pbar is updated and after testing for screen size
+# 2025/02/28, added debug messages of last follower/following counts rather than just current
 
 # if first X are new, and that matches # new, stop
 # Instagram stop after x mode or calculate once you've found Lal. Test this mode
@@ -7561,6 +7562,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 posts_count = profile.mediacount
 
                 debug_print(f"Profile loaded: followers={followers_count}, following={followings_count}, posts={posts_count}")
+                debug_print(f"Previous load : followers={followers_old_count}, following={followings_old_count}, posts={posts_count_old}")
                 consecutive_main_errors = 0
 
                 # JMK commented out #jmk
