@@ -1361,13 +1361,15 @@ def create_web_dashboard_app():
             log_activity(msg, user=target)
         else:
             # Trigger all
-            recheck_all_targets()
-            if CHECK_POSTS_IN_HOURS_RANGE:
-                msg = "Recheck all triggered (will override hours range for the next cycle)"
+            success = recheck_all_targets()
+            if success:
+                if CHECK_POSTS_IN_HOURS_RANGE:
+                    msg = "Recheck all triggered (will override hours range for the next cycle)"
+                else:
+                    msg = "Recheck all triggered"
+                log_activity(msg)
             else:
-                msg = "Recheck all triggered"
-            success = True
-            log_activity(msg)
+                msg = "Recheck failed: requires at least 1 monitored user"
 
         return jsonify({'success': success, 'message': msg})  # type: ignore
 
@@ -2209,7 +2211,7 @@ def recheck_all_targets():
     if not targets:
         log_activity("Recheck All: Recheck requires at least 1 monitored user")
         update_ui_data(config={'status_msg': "Recheck requires at least 1 monitored user"})
-        return
+        return False
 
     stagger = MULTI_TARGET_STAGGER
     jitter = MULTI_TARGET_STAGGER_JITTER
@@ -2263,6 +2265,7 @@ def recheck_all_targets():
             threading.Thread(target=_single_rechecker, args=(u, delay), daemon=True, name=f"rechecker:{u}").start()
 
     threading.Thread(target=_staggered_rechecker_thread, daemon=True, name="recheck_all_launcher").start()
+    return True
 
 
 # Starts the Flask web server in a background thread
@@ -7635,18 +7638,18 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 debug_print(f"Full exception: {type(e).__name__}: {e}")
 
                 consecutive_main_errors += 1
-                if ERROR_NOTIFICATION and consecutive_main_errors >= ERROR_FAILURE_THRESHOLD:
-                    alert_subject = f"instagram_monitor: error for {user} ({consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD})"
-                    alert_body = f"An error occurred for user {user} (attempt {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD}):\n{error_msg}\n\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
-                    alert_body_html = f"An error occurred for user <b>{user}</b> (attempt {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD}):<br><br><b>{error_msg}</b><br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
+                if ERROR_NOTIFICATION and consecutive_main_errors == ERROR_FAILURE_THRESHOLD:
+                    alert_subject = f"instagram_monitor: error for {user} (failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD})"
+                    alert_body = f"An error occurred for user {user} (failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD}):\n{error_msg}\n\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
+                    alert_body_html = f"An error occurred for user <b>{user}</b> (failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD}):<br><br><b>{error_msg}</b><br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
 
-                    print(f"* Sending error notification to {RECEIVER_EMAIL} (failure {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD})")
+                    print(f"* Sending error notification to {RECEIVER_EMAIL} (failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD})")
                     send_email(alert_subject, alert_body, alert_body_html, SMTP_SSL)
 
                     if WEBHOOK_ENABLED and WEBHOOK_ERROR_NOTIFICATION:
                         send_webhook(
                             title=f"Error for {user}",
-                            description=f"{error_msg}\n(failure {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD})",
+                            description=f"{error_msg}\n(failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD})",
                             color=0xFF0000,
                             notification_type="error"
                         )
@@ -8738,19 +8741,19 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
             consecutive_behuman_errors += 1
             print(f"* Warning: It is not easy to be a human, our simulation failed: {e}")
-            if ERROR_NOTIFICATION and consecutive_behuman_errors >= ERROR_FAILURE_THRESHOLD:
+            if ERROR_NOTIFICATION and consecutive_behuman_errors == ERROR_FAILURE_THRESHOLD:
                 error_msg = format_error_message(e)
-                alert_subject = f"instagram_monitor: BeHuman mode error for {user} ({consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD})"
-                alert_body = f"A BeHuman simulation error occurred for user {user} (attempt {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD}):\n{error_msg}\n\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
-                alert_body_html = f"A BeHuman simulation error occurred for user <b>{user}</b> (attempt {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD}):<br><br><b>{error_msg}</b><br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
+                alert_subject = f"instagram_monitor: BeHuman mode error for {user} (failure #{consecutive_behuman_errors}, threshold: {ERROR_FAILURE_THRESHOLD})"
+                alert_body = f"A BeHuman simulation error occurred for user {user} (failure #{consecutive_behuman_errors}, threshold: {ERROR_FAILURE_THRESHOLD}):\n{error_msg}\n\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
+                alert_body_html = f"A BeHuman simulation error occurred for user <b>{user}</b> (failure #{consecutive_behuman_errors}, threshold: {ERROR_FAILURE_THRESHOLD}):<br><br><b>{error_msg}</b><br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
 
-                print(f"* Sending BeHuman error notification to {RECEIVER_EMAIL} (failure {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD})")
+                print(f"* Sending BeHuman error notification to {RECEIVER_EMAIL} (failure #{consecutive_behuman_errors}, threshold: {ERROR_FAILURE_THRESHOLD})")
                 send_email(alert_subject, alert_body, alert_body_html, SMTP_SSL)
 
                 if WEBHOOK_ENABLED and WEBHOOK_ERROR_NOTIFICATION:
                     send_webhook(
                         title=f"BeHuman Error for {user}",
-                        description=f"{error_msg}\n(failure {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD})",
+                        description=f"{error_msg}\n(failure #{consecutive_behuman_errors}, threshold: {ERROR_FAILURE_THRESHOLD})",
                         color=0xFF0000,
                         notification_type="error"
                     )
@@ -9521,7 +9524,7 @@ def run_main():
     seen = set()
     normalized: List[str] = []
     for u in targets:
-        u = u.strip()
+        u = u.strip().lower()
         if not u:
             continue
         if u not in seen:
@@ -9989,10 +9992,21 @@ def run_main():
     elif len(targets) == 1:
         # Integrated Mode Stop Event registration
         stop_event = threading.Event()
+        user = targets[0]
         if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
-            WEB_DASHBOARD_STOP_EVENTS[targets[0]] = stop_event
+            with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
+                WEB_DASHBOARD_STOP_EVENTS[user] = stop_event
+                WEB_DASHBOARD_RECHECK_EVENTS[user] = threading.Event()
+                WEB_DASHBOARD_MONITOR_THREADS[user] = threading.current_thread()
 
-        instagram_monitor_user(targets[0], csv_files_by_user.get(targets[0], CSV_FILE), SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, user_root_path=OUTPUT_DIR, stop_event=stop_event, skip_follow_changes=SKIP_FOLLOW_CHANGES)
+        try:
+            instagram_monitor_user(user, csv_files_by_user.get(user, CSV_FILE), SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, user_root_path=OUTPUT_DIR, stop_event=stop_event, skip_follow_changes=SKIP_FOLLOW_CHANGES)
+        finally:
+            if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
+                with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
+                    WEB_DASHBOARD_STOP_EVENTS.pop(user, None)
+                    WEB_DASHBOARD_RECHECK_EVENTS.pop(user, None)
+                    WEB_DASHBOARD_MONITOR_THREADS.pop(user, None)
     else:
         stagger = args.targets_stagger if args.targets_stagger is not None else MULTI_TARGET_STAGGER
         jitter = args.targets_stagger_jitter if args.targets_stagger_jitter is not None else MULTI_TARGET_STAGGER_JITTER
