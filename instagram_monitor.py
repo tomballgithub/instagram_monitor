@@ -11,6 +11,8 @@
 # 2025/12/28, upgraded to latest code base
 # 2025/12/31, progress bar for fetching followers/followings
 # 2025/01/16, latest code base with web browser and RICH interface
+# 2025/02/01, random changes and fixes
+# 2025/02/28, latest code base with web browser and RICH interface
 
 # if first X are new, and that matches # new, stop
 # Instagram stop after x mode or calculate once you've found Lal. Test this mode
@@ -27,7 +29,7 @@
 #!/usr/bin/env python3
 """
 Author: Michal Szymanski <misiektoja-github@rm-rf.ninja>
-v3.0
+v3.2
 
 OSINT tool implementing real-time tracking of Instagram users activities and profile changes:
 https://github.com/misiektoja/instagram_monitor/
@@ -46,7 +48,7 @@ flask (optional - for web dashboard)
 rich (optional - for terminal dashboard)
 """
 
-VERSION = "3.0"
+VERSION = "3.2"
 
 # ---------------------------
 # CONFIGURATION SECTION START
@@ -101,6 +103,11 @@ FOLLOWERS_NOTIFICATION = False
 # Whether to send an email on errors
 # Can also be disabled via the -e flag
 ERROR_NOTIFICATION = True
+
+# Number of consecutive errors required before triggering an alert
+# Useful to avoid spamming on transient network glitches
+# Can also be set via the --error-threshold flag
+ERROR_FAILURE_THRESHOLD = 2
 
 # How often to check for user activity; in seconds
 # Can also be set using the -c flag
@@ -447,7 +454,7 @@ WEBHOOK_TEMPLATE = {
     "embeds": [{
         "title": "{title}",
         "description": "{description}",
-        "color": 7506394,
+        "color": "{color}",
         "fields": "{fields}",
         "footer": {
             "text": "Instagram Monitor v{version}"
@@ -458,7 +465,7 @@ WEBHOOK_TEMPLATE = {
     }]
 }
 
-# Webhook request headers as a dictionary, but it can be empty. 
+# Webhook request headers as a dictionary, but it can be empty.
 # Some examples:
 #   {
 #       "Content-Type": "application/json",
@@ -614,6 +621,7 @@ RECEIVER_EMAIL: str = ""
 STATUS_NOTIFICATION = False
 FOLLOWERS_NOTIFICATION = False
 ERROR_NOTIFICATION = False
+ERROR_FAILURE_THRESHOLD = 0
 INSTA_CHECK_INTERVAL = 0
 RANDOM_SLEEP_DIFF_LOW = 0
 RANDOM_SLEEP_DIFF_HIGH = 0
@@ -685,16 +693,6 @@ THUMBNAILS_FORCED_BY_WEB = False
 FOLLOWERS_CHURN_DETECTION = False
 TIME_FORMAT_12H = False
 mode_of_the_tool = "Unknown"
-
-                    
-             
-                              
-                              
-                          
-                          
-                            
-                            
-                            
 
 exec(CONFIG_BLOCK, globals())
 
@@ -791,7 +789,6 @@ from dateutil.parser import isoparse, parse
 import calendar
 import requests as req
 import shutil
-             
 import smtplib
 import ssl
 from email.header import Header
@@ -975,7 +972,9 @@ def _peek_web_dashboard_template_dir_autodetect() -> Optional[str]:
 
 
 # Global lock to avoid interleaved output when using multi-target threading
-STDOUT_LOCK = threading.Lock()
+# Must be re-entrant because close_pbar() can call tqdm.close() (which writes via _LockedStream
+# acquiring this lock) and then acquire it again for logging to files
+STDOUT_LOCK = threading.RLock()
 
 # Global lock for serializing HTTP calls (used by multi-target mode / optional)
 # Must be re-entrant because requests' request() calls send() internally and we may wrap both
@@ -1003,8 +1002,6 @@ _thread_local = threading.local()
 
 # Helper function to run Flask app with suppressed startup messages
 def run_flask_quietly(app, host, port, debug=False, use_reloader=False, threaded=True):
-    import sys
-
     # Filter class that suppresses Flask startup messages but allows errors through
     class FilteredWriter:
         def __init__(self, original_stream):
@@ -1025,6 +1022,9 @@ def run_flask_quietly(app, host, port, debug=False, use_reloader=False, threaded
                     return  # Suppress these messages
                 # Suppress Flask's port-in-use message, but not our formatted version (which contains asterisks)
                 if "is in use by another program" in s and "*" not in s:
+                    return
+                # Suppress noisy TLS-to-HTTP handshake parse errors
+                if ("code 400, message Bad request version" in s or "code 400, message Bad request syntax" in s):
                     return
                 # Allow everything else (errors, warnings, etc.) through
             self.original.write(s)
@@ -1500,8 +1500,13 @@ def create_web_dashboard_app():
                     if processed_val < 300:
                         processed_val = 300
                         note = " (min 300s limit)"
+                    elif processed_val > 86400:  # Max 1 day to prevent excessive sleep
+                        processed_val = 86400
+                        note = " (max 86400s limit)"
                 elif key in ['random_low', 'random_high']:
-                    processed_val = max(0, processed_val)
+                    processed_val = max(0, min(processed_val, 3600))  # Max 1 hour to prevent excessive randomization
+                    if processed_val == 3600:
+                        note = " (max 3600s limit)"
                 elif key == 'webhook_url':
                     if processed_val and not validate_webhook_url(processed_val):
                         return current_val
@@ -1591,7 +1596,7 @@ def create_web_dashboard_app():
     def api_settings():  # type: ignore[return]
         global INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH
         global STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, WEBHOOK_ENABLED, WEBHOOK_URL
-        global DETAILED_FOLLOWER_LOGGING, DEBUG_MODE, SESSION_USERNAME
+        global FOLLOWERS_CHURN_DETECTION, DEBUG_MODE, SESSION_USERNAME, VERBOSE_MODE
         global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_SSL, SENDER_EMAIL, RECEIVER_EMAIL
         global SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS
         global ENABLE_JITTER, DETECT_CHANGED_PROFILE_PIC, SKIP_SESSION, CLI_CONFIG_PATH
@@ -1659,30 +1664,6 @@ def create_web_dashboard_app():
             if not ok:
                 return jsonify({'success': False, 'error': err}), code  # type: ignore
             return jsonify({'success': True, 'changes': changes})  # type: ignore
-                        
-
-                                                                          
-                                
-                                   
-                                      
-
-                    
-                                                                                    
-                                               
-                                      
-
-                                                
-                                                        
-                             
-                                               
-                                               
-                                               
-                                                      
-                                                              
-                                                             
-                                              
-                                                                                     
-                                              
 
     @app.route('/api/generate-config', methods=['POST'])  # type: ignore[misc]
     def api_generate_config():  # type: ignore[return]
@@ -1697,38 +1678,13 @@ def create_web_dashboard_app():
             return jsonify({'success': False, 'error': 'Invalid filename (paths are not allowed)'}), 400  # type: ignore
         if len(filename) > 255:
             return jsonify({'success': False, 'error': 'Filename too long'}), 400  # type: ignore
-                                                                                                       
-                                                                                                                                               
-                                                                                                                                                           
-                                                                                                                                             
-                                                                                                                                               
-                                                                                                             
-                                                                                                     
-                                                                                             
-                                                                                                                     
-                                                                                                                         
-                                                                                                                                         
-                                                                                                                                     
-                                                                                                                                                 
-                                                                                                                                                       
-                                                                                                                         
-                                                                                                                                                       
-                                                                                                                                 
 
         if not isinstance(settings_payload, dict):
             return jsonify({'success': False, 'error': 'Invalid settings payload'}), 400  # type: ignore
-                                                                                               
-                                                                                             
-                                                                                                           
-                                                                                                                   
 
         ok, changes, err, code = apply_settings_update(settings_payload)
-                                                                 
         if not ok:
             return jsonify({'success': False, 'error': err}), code  # type: ignore
-                                                              
-                                                                 
-                                                             
 
         cfg_text = generate_config_with_current_values()
         out_path = os.path.abspath(os.path.join(os.getcwd(), filename))
@@ -1739,7 +1695,6 @@ def create_web_dashboard_app():
             return jsonify({'success': False, 'error': f'Failed to write config: {e}'}), 500  # type: ignore
 
         try:
-                                                               
             log_activity(f"Generated config file: {out_path}")
         except Exception:
             pass
@@ -1749,8 +1704,6 @@ def create_web_dashboard_app():
         except Exception:
             pass
 
-                                             
-                                               
         return jsonify({'success': True, 'path': out_path, 'filename': filename, 'changes': changes})  # type: ignore
 
     @app.route('/api/session', methods=['GET', 'POST'])  # type: ignore[misc]
@@ -2036,7 +1989,7 @@ def create_web_dashboard_app():
         global SMTP_SSL
         print("* Sending test email notification (triggered via web dashboard) ...")
         m_subject = "instagram_monitor: test email"
-        m_body = "This is a test email - your SMTP settings seems to be correct !"
+        m_body = "This is test email - your SMTP settings seems to be correct !"
         m_body_html = "This is <b>test email</b> - your SMTP settings seems to be <b>correct</b> !"
         res = send_email(m_subject, m_body, m_body_html, SMTP_SSL, smtp_timeout=5)
         if res == 0:
@@ -2057,7 +2010,7 @@ def create_web_dashboard_app():
         # Temporarily enable if we are testing
         old_webhook_enabled = WEBHOOK_ENABLED
         WEBHOOK_ENABLED = True
-        res = send_webhook("instagram_monitor: test webhook", "This is a **test webhook** - your settings seems to be **correct** !", color=0x7289DA)
+        res = send_webhook("instagram_monitor: test webhook", "This is **test webhook** - your settings seems to be **correct** !", color=0x7289DA)
         WEBHOOK_ENABLED = old_webhook_enabled
 
         if res == 0:
@@ -2162,8 +2115,11 @@ def stop_monitoring_for_target(username):
             log_activity(f"Stopping monitoring", user=username, level='warning')
         update_ui_data(targets={username: {'status': 'Stopped'}})
 
-    # Clean up thread reference
+    # Clean up thread reference - wait for thread to finish with timeout
     if username in WEB_DASHBOARD_MONITOR_THREADS:
+        thread = WEB_DASHBOARD_MONITOR_THREADS[username]
+        if thread.is_alive():
+            thread.join(timeout=5.0)  # Wait up to 5 seconds for clean shutdown
         del WEB_DASHBOARD_MONITOR_THREADS[username]
     if username in WEB_DASHBOARD_STOP_EVENTS:
         del WEB_DASHBOARD_STOP_EVENTS[username]
@@ -2930,6 +2886,7 @@ class Logger(object):
         global last_output
         with STDOUT_LOCK:
             # Apply color for terminal
+            message = process_message(message) #jmk
             colorized_message = apply_color_to_text(message)
 
             if message != '\n':
@@ -2941,8 +2898,10 @@ class Logger(object):
                 LAST_OUTPUT_BY_THREAD[tid].append(message)
 
             if not (DASHBOARD_ENABLED and RICH_AVAILABLE):
-                self.terminal.write(colorized_message)
-                self.terminal.flush()
+                # Suppress terminal writes only for the thread that currently owns a progress bar
+                if getattr(_thread_local, 'pbar', None) is None:
+                    self.terminal.write(colorized_message)
+                    self.terminal.flush()
 
             # Expand tabs for file output and ensure ANSI codes are stripped
             clean_message = ANSI_ESCAPE_RE.sub("", colorized_message).expandtabs(8)
@@ -3236,12 +3195,12 @@ def send_email(subject, body, body_html, use_ssl, image_file="", image_name="ima
 def validate_webhook_url(url):
     if not url:
         return False
-    if not url.startswith('https://'):
+    if not (url.startswith('https://') or url.startswith('http://')):
         return False
     try:
         from urllib.parse import urlparse
         parsed = urlparse(url)
-        if not parsed.netloc or not parsed.scheme == 'https':
+        if not parsed.netloc or parsed.scheme not in ('https', 'http'):
             return False
         return True
     except Exception:
@@ -3382,7 +3341,13 @@ def format_payload(template, payload):
     elif isinstance(template, str):
         if template == "{fields}":
             return payload.get("fields", [])
-        return template.format(**payload)
+        if template == "{color}":
+            return payload.get("color", 0x7289DA)
+        try:
+            return template.format(**payload)
+        except KeyError:
+            # Return template as-is if placeholder key is missing from payload
+            return template
     return template
 
 
@@ -3390,98 +3355,160 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
     if not WEBHOOK_ENABLED or not WEBHOOK_URL:
         return 1
 
-    try:
-        # Load all possible items into payload for use in formatting the WEBHOOK_TEMPLATE and WEBHOOK_HEADERS
-        payload = {
-            "title": title[:WEBHOOK_EMBED_TITLE_LIMIT] if title else "Instagram Monitor",  # type: ignore
-            "description": description[:WEBHOOK_EMBED_DESCRIPTION_LIMIT] if description else "",  # type: ignore
-            "version": VERSION,
-            "image_url": image_url if image_url else "",
-            "fields": fields if fields else [],
-            "fields_str": "\n".join([f"{f['name']}: {f['value']}" for f in fields]) if fields else "",
-            "color": color,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "footer": {
-                "text": f"Instagram Monitor v{VERSION}"
-			}
-        }
-
-        if fields:
-            payload["fields"] = []
-            for field in fields[:WEBHOOK_MAX_FIELDS]:  # type: ignore
-                payload["fields"].append({
-                    "name": str(field.get("name", ""))[:WEBHOOK_FIELD_NAME_LIMIT],  # type: ignore
-                    "value": str(field.get("value", ""))[:WEBHOOK_FIELD_VALUE_LIMIT],  # type: ignore
-                    "inline": field.get("inline", False)
-                })
-
-        if image_url:
-            payload["image"] = {"url": image_url}
-        elif local_image_file and os.path.isfile(local_image_file):
-            # If using local file, use attachment:// syntax
-            filename = os.path.basename(local_image_file)
-            payload["image"] = {"url": f"attachment://{filename}"}
-
-        if WEBHOOK_USERNAME:
-            payload["username"] = WEBHOOK_USERNAME
-
-        if WEBHOOK_AVATAR_URL:
-            payload["avatar_url"] = WEBHOOK_AVATAR_URL
-
-        # Apply optional transformations to payload, primarily the title and description
-        for transform in WEBHOOK_TRANSFORMS:
-            field = transform[0]
-            method_name = transform[1]
-            args = transform[2:] # Remaining items are method arguments
-
-            if field in payload and isinstance(payload[field], str):
-                try:
-                    # Get the method (e.g., .replace) from the string object
-                    method = getattr(payload[field], method_name)
-                    # Call it with the provided arguments
-                    payload[field] = method(*args)
-                except (AttributeError, TypeError) as e:
-                    print(f"* Transformation error on {field}.{method_name}: {e}")
-
-        # Apply substitutions to WEBHOOK_TEMPLATE and WEBHOOK_HEADERS
-        final_payload = format_payload(WEBHOOK_TEMPLATE, payload)
-        final_headers = format_payload(WEBHOOK_HEADERS, payload)
-
-        # Handle Discord-style Local Files
-        if local_image_file and os.path.isfile(local_image_file) and isinstance(final_payload, dict) and "embeds" in final_payload:
-            filename = os.path.basename(local_image_file)
-            final_payload["embeds"][0]["image"]["url"] = f"attachment://{filename}"
-            with open(local_image_file, 'rb') as f:
-                files = {
-                    "file": (filename, f, "image/jpeg"), 
-                    "payload_json": (None, json.dumps(final_payload))
-				}              
-                response = req.post(str(WEBHOOK_URL), headers=final_headers, files=files, timeout=10)
-        # Handle other types
-        else:
-            if isinstance(final_payload, str):
-                response = req.post(WEBHOOK_URL, headers=final_headers, data=final_payload, timeout=10)
-            else:
-                response = req.post(WEBHOOK_URL, headers=final_headers, json=final_payload, timeout=10)
-
-        if response.status_code in (200, 204):
-            print("* Webhook notification sent successfully")
-            return 0
-        else:
-            print(f"* Webhook error: HTTP {response.status_code} - {response.text[:200]}")
-            return 1
-
-    except Exception as e:
-        print(f"* Error sending webhook: {e}")
+    # Validate webhook URL
+    if not validate_webhook_url(WEBHOOK_URL):
+        debug_print("* Webhook error: Invalid webhook URL format")
         return 1
 
+    # Check if this notification type is enabled
+    if notification_type == "status" and not WEBHOOK_STATUS_NOTIFICATION:
+        return 1
+    elif notification_type == "followers" and not WEBHOOK_FOLLOWERS_NOTIFICATION:
+        return 1
+    elif notification_type == "error" and not WEBHOOK_ERROR_NOTIFICATION:
+        return 1
 
+    max_retries = 3
+    retry_delay = 30 #jmk
+                     
+
+    for attempt in range(max_retries):
+        try:
+            # Load all possible items into payload for use in formatting the WEBHOOK_TEMPLATE and WEBHOOK_HEADERS
+            payload = {
+                "title": title[:WEBHOOK_EMBED_TITLE_LIMIT] if title else "Instagram Monitor",  # type: ignore
+                "description": description[:WEBHOOK_EMBED_DESCRIPTION_LIMIT] if description else "",  # type: ignore
+                "version": VERSION,
+                "image_url": image_url if image_url else "",
+                "fields": fields if fields else [],
+                "fields_str": "\n".join([f"{f['name']}: {f['value']}" for f in fields]) if fields else "",
+                "color": color,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+            if fields:
+                payload["fields"] = []
+                for field in fields[:WEBHOOK_MAX_FIELDS]:  # type: ignore
+                    payload["fields"].append({
+                        "name": str(field.get("name", ""))[:WEBHOOK_FIELD_NAME_LIMIT],  # type: ignore
+                        "value": str(field.get("value", ""))[:WEBHOOK_FIELD_VALUE_LIMIT],  # type: ignore
+                        "inline": field.get("inline", False)
+                    })
+
+            if image_url:
+                payload["image"] = {"url": image_url}
+            elif local_image_file and os.path.isfile(local_image_file):
+                # If using local file, use attachment:// syntax
+                filename = os.path.basename(local_image_file)
+                payload["image"] = {"url": f"attachment://{filename}"}
+
+            if WEBHOOK_USERNAME:
+                payload["username"] = WEBHOOK_USERNAME
+
+            if WEBHOOK_AVATAR_URL:
+                payload["avatar_url"] = WEBHOOK_AVATAR_URL
+
+            # Apply optional transformations to payload, primarily the title and description
+            for transform in WEBHOOK_TRANSFORMS:  # type: ignore
+                field = transform[0]
+                method_name = transform[1]
+                args = transform[2:]  # Remaining items are method arguments
+
+                if field in payload and isinstance(payload[field], str):
+                    try:
+                        # Get the method (e.g. .replace) from the string object
+                        method = getattr(payload[field], method_name)
+                        # Call it with the provided arguments
+                        payload[field] = method(*args)
+                    except (AttributeError, TypeError) as e:
+                        print(f"* Transformation error on {field}.{method_name}: {e}")
+
+            # Apply substitutions to WEBHOOK_TEMPLATE and WEBHOOK_HEADERS
+            final_payload = format_payload(WEBHOOK_TEMPLATE, payload)  # type: ignore
+            final_headers: dict = format_payload(WEBHOOK_HEADERS, payload)  # type: ignore
+
+            # Ensure we have a proper User-Agent to avoid being blocked by some services
+            if 'User-Agent' not in final_headers:
+                final_headers['User-Agent'] = f"InstagramMonitor/{VERSION}"
+
+            # Handle Discord-style Local Files (embeds with image attachment)
+            if local_image_file and os.path.isfile(local_image_file) and isinstance(final_payload, dict) and "embeds" in final_payload:
+                filename = os.path.basename(local_image_file)
+                try:
+                    final_payload["embeds"][0]["image"]["url"] = f"attachment://{filename}"  # type: ignore
+                except (KeyError, IndexError, TypeError):
+                    # Template doesn't have expected Discord embed structure, skip image attachment
+                    pass
+                with open(local_image_file, 'rb') as f:
+                    files = {
+                        "file": (filename, f, "image/jpeg"),
+                        "payload_json": (None, json.dumps(final_payload))
+                    }
+                    response = req.post(str(WEBHOOK_URL), headers=final_headers, files=files, timeout=10)
+            # Handle other types
+            else:
+                if isinstance(final_payload, str):
+                    response = req.post(WEBHOOK_URL, headers=final_headers, data=final_payload, timeout=10)
+                else:
+                    response = req.post(WEBHOOK_URL, headers=final_headers, json=final_payload, timeout=10)
+
+            if response.status_code in (200, 204):
+                print("* Webhook notification sent successfully")
+                return 0
+            else:
+                print(f"* Webhook error: HTTP {response.status_code} - {response.text[:200]}")
+                # Don't retry on client errors (4xx) unless it's 429
+                if response.status_code != 429:
+                    return 1
+
+        except (req.exceptions.RequestException, req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
+            if attempt < max_retries - 1:
+                debug_print(f"* Webhook attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                print(f"* Error sending webhook: {e}")
+                return 1
+        except Exception as e:
+            print(f"* Unexpected error sending webhook: {e}")
+            return 1
+
+    return 1
+
+
+# Global variable - list of (search, replace) tuples
+MSG_REPLACE = [
+    ("kara.elaine.long", "KK"),
+    ("kara_elaine_long", "KK"),
+    ("jkrontz@gmail.com", "JMK"),
+    ("jeoff", "JMK"),
+]
+
+def process_message(message: str) -> str:
+    """
+    Perform search/replace on a message using the MSG_REPLACE global variable.
+    MSG_REPLACE should be a list of (search, replace) tuples.
+    Returns the original message if MSG_REPLACE doesn't exist or is empty.
+    """
+    try:
+        if not MSG_REPLACE:
+            return message
+    except NameError:
+        return message
+
+    for search, replace in MSG_REPLACE:
+        message = message.replace(search, replace)
+
+    return message
+
+   
 # Debug print helper - only prints if DEBUG_MODE is enabled
 def debug_print(message):
     if DEBUG_MODE:
-        timestamp = get_hour_min_from_ts(now_local_naive(), show_seconds=True)
+        message = process_message(message) #jmk
+        timestamp = get_hour_min_from_ts(now_local(), show_seconds=True)
         user = getattr(_thread_local, 'user', None)
-        user_prefix = f" [{user}]" if user else ""
+        user_prefix = f" [{process_message(user)}]" if user else "" #jmk
 
         # If we just printed a partial line (no newline), add one before the debug message to avoid clobbering
         if getattr(_thread_local, 'in_partial_line', False):
@@ -3707,7 +3734,7 @@ def get_short_date_from_ts(ts, show_year=False, show_hour=True, show_weekday=Tru
     weekday_str = f"{calendar.day_abbr[ts_new.weekday()]} " if show_weekday else ""
 
     if (show_year and ts_new.year != datetime.now(tz).year) or always_show_year:
-        hour_prefix = " " if show_hour else ""
+        hour_prefix = "," if show_hour else "" #jmk
         return f'{weekday_str}{ts_new.strftime(f"%d %b %y{hour_prefix}{hour_strftime}")}'
     else:
         return f'{weekday_str}{ts_new.strftime(f"%d %b{hour_strftime}")}'
@@ -4211,7 +4238,23 @@ def latest_post_mobile(user: str, bot: instaloader.Instaloader):
         mediaid: str
 
     data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={user}", {})
-    edges = data["data"]["user"].get("edge_owner_to_timeline_media", {}).get("edges", [])
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Instagram returned unexpected response type: {type(data).__name__}")
+
+    if data.get("status") == "fail":
+        ig_message = data.get("message", "unknown error")
+        hint = " (try using Firefox session login with --import-firefox-session)" if not bot.context.is_logged_in else ""
+        raise RuntimeError(f"Instagram API error: {ig_message}{hint}")
+
+    if "data" not in data or not isinstance(data.get("data"), dict):
+        raise RuntimeError(f"Instagram returned malformed response (missing 'data' field)")
+
+    user_data = data["data"].get("user")
+    if not user_data:
+        raise RuntimeError(f"Instagram returned empty user data for '{user}' (profile may be unavailable or blocked)")
+
+    edges = user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
 
     if not edges:
         return None
@@ -4232,15 +4275,27 @@ def latest_post_mobile(user: str, bot: instaloader.Instaloader):
     if not best_node:
         return None
 
+    if DEBUG_MODE:
+        debug_print(f"[{user}] latest_post_mobile raw data keys: {list(data.keys())}")
+        if "data" in data and isinstance(data["data"], dict) and "user" in data["data"]:
+            debug_print(f"[{user}] latest_post_mobile user keys: {list(data['data']['user'].keys())}")
+
     p = P()
     p.mediaid = best_node.get("id", "")
-    p.date_utc = datetime.fromtimestamp(best_node["taken_at_timestamp"], timezone.utc)
-    p.likes = best_node["edge_liked_by"]["count"]
-    p.comments = best_node["edge_media_to_comment"]["count"]
-    p.caption = best_node.get("edge_media_to_caption", {}).get("edges", [{}])[0].get("node", {}).get("text", "")
+    p.date_utc = datetime.fromtimestamp(best_node.get("taken_at_timestamp", 0), timezone.utc)
+    p.likes = best_node.get("edge_liked_by", {}).get("count", 0)
+    p.comments = best_node.get("edge_media_to_comment", {}).get("count", 0)
+
+    # Safely get caption
+    caption_edges = best_node.get("edge_media_to_caption", {}).get("edges", [])
+    if caption_edges and len(caption_edges) > 0 and "node" in caption_edges[0]:
+        p.caption = caption_edges[0]["node"].get("text", "")
+    else:
+        p.caption = ""
+
     p.pcaption = ""
     p.tagged_users = []
-    p.shortcode = best_node["shortcode"]
+    p.shortcode = best_node.get("shortcode", "")
     p.url = best_node.get("display_url", "")
     p.video_url = best_node.get("video_url")
 
@@ -4381,12 +4436,26 @@ def get_real_reel_code(bot: instaloader.Instaloader, username: str) -> Optional[
         ctx: Any = bot.context  # type: ignore
 
         data = ctx.get_iphone_json(f"api/v1/users/web_profile_info/?username={username}", {})
-        user = data["data"]["user"]
+
+        if isinstance(data, dict) and data.get("status") == "fail":
+            debug_print(f"[{username}] get_real_reel_code failed: Instagram API error - {data.get('message', 'unknown')}")
+            return None
+
+        if not isinstance(data, dict) or "data" not in data:
+            debug_print(f"[{username}] get_real_reel_code failed: malformed response")
+            return None
+
+        user = data["data"].get("user")
+        if not user:
+            debug_print(f"[{username}] get_real_reel_code failed: empty user data")
+            return None
+
         edges = user.get("edge_reels_media", {}).get("edges", [])
         if not edges:
             return None
         return edges[0]["node"].get("shortcode")
-    except Exception:
+    except Exception as e:
+        debug_print(f"[{username}] get_real_reel_code exception: {e}")
         return None
 
 
@@ -4673,103 +4742,11 @@ def extract_usernames_safely(data_dict):
     return usernames
 
 
-                                                                                
-                                             
-              
-
-                                                       
-
-        
-                                             
-                    
-                 
-
-                
-                             
-                            
-                
-                                               
-                     
-                            
-                        
-
-                                                    
-                 
-
-                      
-            
-                               
-                         
-                                                     
-                                              
-                                                       
-                                                                   
-                                                              
-                                                           
-             
-                                     
-                                       
-                                     
-                    
-
-                
-
-
-                                                 
-                                                                         
-                                              
-                                                                                   
-                                          
-         
-                                                                  
-                                                          
-                                                           
-             
-                                  
-                                         
-
-        
-                                                                              
-                                                        
-                                                                    
-                   
-                          
-                                                     
-                    
-
-
-                                                   
-                                      
-        
-                                                        
-                               
-
-                                     
-                           
-
-                       
-                       
-
-                                                                                   
-                                                
-                                                                
-                                                              
-                                                                                 
-             
-                           
-                                     
-
-                          
-                                                       
-                             
-
-
 # Dashboard input handler thread function - handles mode toggle and debug commands
 def dashboard_input_handler():
     # This toggles the dashboard mode for both the Terminal Dashboard and the Web-based dashboard
     global MANUAL_CHECK_TRIGGERED, DASHBOARD_MODE
 
-    import sys
     is_windows = platform.system() == "Windows"
 
     if is_windows:
@@ -4935,7 +4912,6 @@ def update_check_times(last_time=None, next_time=None, user=None, increment_coun
 
     # Format the timestamps for display
     last_str = get_squeezed_date_from_ts(last_time.timestamp(), show_seconds=DASHBOARD_SHOW_CHECK_SECONDS) if last_time else None
-                                                                                      
 
     if isinstance(next_time, str):
         next_str = next_time
@@ -5198,26 +5174,10 @@ def generate_user_dashboard(target_data):
 
     # Last Fetched Panel
     last_fetched_text = Text()
-                                                                     
-                        
-                 
-                      
 
     def get_update_sort_ts(update):
         ts_val = update.get('timestamp_ts')
         return ts_val if isinstance(ts_val, (int, float)) else 0
-                                                
-                              
-                 
-                                   
-                                                            
-                                               
-                              
-                                                                      
-                                    
-                                                
-                              
-                 
 
     def append_update_entry(update, fallback_user):
         user_label = update.get('user') or fallback_user or "Unknown"
@@ -5450,7 +5410,6 @@ def generate_config_dashboard(target_data, config_data):
     stats_panel = generate_global_stats_panel()
 
     # Dynamic height calculation to prevent cutoff
-                                            
     config_height = max(len(left_items), len(right_items)) + 4
 
     # Build layout
@@ -5706,12 +5665,34 @@ def setup_pbar(total_expected, title):
             def __getattr__(self, name):
                 return getattr(self._stream, name)
 
+        def _get_actual_console_width(fallback=80):
+            try:
+                if sys.platform == 'win32':
+                    import ctypes
+                    import struct
+                    handle = ctypes.windll.kernel32.GetStdHandle(-11)
+                    csbi = ctypes.create_string_buffer(22)
+                    if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, csbi):
+                        left, top, right, bottom = struct.unpack_from('hhhh', csbi.raw, 10)
+                        width = right - left + 1
+                        if width > 0:
+                            return width
+            except Exception:
+                pass
+            # Non-Windows or fallback: shutil is reliable on Linux/Mac
+            return shutil.get_terminal_size(fallback=(fallback, 24)).columns
+
+        actual_width = _get_actual_console_width()
+        debug_print(f"Actual terminal width is {actual_width}") #jmk
+        safe_ncols = max(20, min(HORIZONTAL_LINE, actual_width - 1))
+        debug_print(f"Safe terminal width is {safe_ncols}") #jmk
+
         custom_bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{unit}]"
         # Write progress bar updates to terminal only (not log file) to avoid cluttering logs
         terminal_out = stdout_bck if stdout_bck is not None else sys.stdout
         locked_terminal_out = _LockedStream(terminal_out, STDOUT_LOCK)
         # Use HORIZONTAL_LINE (default 113) as the fixed width for consistent behavior across environments
-        _thread_local.pbar = tqdm(total=total_expected, bar_format=custom_bar_format, unit="Initializing...", desc=title, file=locked_terminal_out, ncols=HORIZONTAL_LINE)  # type: ignore[misc]
+        _thread_local.pbar = tqdm(total=total_expected, bar_format=custom_bar_format, unit="Initializing...", desc=title, file=locked_terminal_out, ncols=safe_ncols)  # type: ignore[misc]
 
         # Also set global for backward compatibility (single-threaded mode)
         pbar = _thread_local.pbar
@@ -5750,7 +5731,6 @@ def close_pbar():
                 if total > 0:
                     # Calculate available space for bar:
                     # Total width (HORIZONTAL_LINE) - desc - stats - separators - percentage
-
                     overhead = 0
                     if desc:
                         overhead += len(desc) + 2  # ": "
@@ -5806,7 +5786,7 @@ def close_pbar():
                         # We want to write to logs but NOT the terminal again (pbar.close already did that), so we strip colors and
                         # write to main/target logs manually
                         clean_final = ANSI_ESCAPE_RE.sub("", final_str).expandtabs(8) + "\n"
-                        debug_print(f"[close_pbar] clean_final: {clean_final.strip()}")
+                        # debug_print(f"[close_pbar] clean_final: {clean_final.strip()}")
 
                         with STDOUT_LOCK:
                             if logger_instance.main_log:
@@ -5839,7 +5819,6 @@ def close_pbar():
 
             # Always clear pbar references (best effort)
             _thread_local.pbar = None  # type: ignore[misc]
-                                                      
             pbar = None
     except Exception as e:
         # Ultimate safety net: close_pbar must never raise
@@ -5860,9 +5839,13 @@ def instagram_wrap_request(orig_request):
     def wrapper(*args, **kwargs):
         global NAME_COUNT, START_TIME, WRAPPER_COUNT, pbar
         method = kwargs.get("method") or (args[1] if len(args) > 1 else None)
+        if method and isinstance(method, str):
+            method = method.upper()
         url = kwargs.get("url") or (args[2] if len(args) > 2 else None)
-        if JITTER_VERBOSE or DEBUG_MODE:
-            debug_print(f"[WRAP-REQ] {method} {url[:120]}") #jmk
+        #jmk if DEBUG_MODE:
+        #jmk     debug_print(f"[WRAP-REQ] {method} {url}")
+        #jmk elif JITTER_VERBOSE:
+        #jmk     print(f"* [WRAP-REQ] {method} {url}")
 
         def _do_request():
             # If jitter is disabled, just perform the request (but still optionally serialized by the outer lock)
@@ -5873,7 +5856,12 @@ def instagram_wrap_request(orig_request):
                 return resp
 
             # Human-like jitter + back-off on checkpoint/429
-            time.sleep(random.uniform(0.8, 3.0))
+            # Use exponential distribution for sleep time (more natural), capped at 6s
+            sleep_time = min(random.expovariate(0.6), 6.0)
+            if sleep_time < 0.8:
+                sleep_time = 0.8 + random.uniform(0, 1.0)
+            time.sleep(sleep_time)
+
             attempt = 0
             backoff = 60
             while True:
@@ -5882,7 +5870,8 @@ def instagram_wrap_request(orig_request):
                 # Update progress bar for follower/following requests
                 _update_progress_bar(resp)
 
-                if resp.status_code in (429, 400) and "checkpoint" in resp.text:
+                # Back-off on any 429 (Too Many Requests) or 400 with "checkpoint"
+                if resp.status_code == 429 or (resp.status_code == 400 and "checkpoint" in resp.text):
                     attempt += 1
                     if attempt > 3:
                         thread_pbar = getattr(_thread_local, 'pbar', None)
@@ -5896,9 +5885,10 @@ def instagram_wrap_request(orig_request):
                         thread_pbar = getattr(_thread_local, 'pbar', None)
                         if thread_pbar:
                             tqdm.write(f"* Back-off {wait:.0f}s after {resp.status_code}")
+                        if DEBUG_MODE:
                             debug_print(f"* Back-off {wait:.0f}s after {resp.status_code}")
-                        else:
-                            debug_print(f"* Back-off {wait:.0f}s after {resp.status_code}")
+                        elif JITTER_VERBOSE and not thread_pbar:
+                            print(f"* Back-off {wait:.0f}s after {resp.status_code}")
                     time.sleep(wait)
                     backoff *= 2
                     continue
@@ -5948,7 +5938,7 @@ def instagram_wrap_request(orig_request):
                 # Calculate Remaining Minutes
                 d = thread_pbar.format_dict
                 rate = d['rate'] if d['rate'] else 0
-                remaining_items = d['total'] - d['n']
+                remaining_items = d['total'] - (d['n'] + increment)
 
                 # Calculate remaining seconds, then minutes
                 rem_s = remaining_items / rate if rate > 0 else 0
@@ -5957,7 +5947,12 @@ def instagram_wrap_request(orig_request):
                 elapsed_m = d['elapsed'] / 60
 
                 # Update Stats - use float division for precision
-                names_per_req = d['n'] / thread_wrapper_count if thread_wrapper_count > 0 else 0
+                names_per_req = (d['n'] + increment) / thread_wrapper_count if thread_wrapper_count > 0 else 0
+                total_reqs = d['n'] + increment
+                if not rate and (total_reqs and names_per_req):  # intended only for first iteration where rate = 0, or an error condition where rate is 0
+                    mins_per_req = elapsed_m / total_reqs
+                    rem_m = remaining_items * mins_per_req
+
                 stats_string = f"{names_per_req:.1f} names/req, reqs={thread_wrapper_count:d}, mins={elapsed_m:.1f}, remain={rem_m:.1f}"
                 thread_pbar.unit = stats_string
                 thread_pbar.update(increment)
@@ -5975,9 +5970,13 @@ def instagram_wrap_send(orig_send):
     def wrapper(*args, **kwargs):
         req_obj = args[1] if len(args) > 1 else kwargs.get("request")
         method = getattr(req_obj, "method", None)
+        if method and isinstance(method, str):
+            method = method.upper()
         url = getattr(req_obj, "url", None)
-        if JITTER_VERBOSE or DEBUG_MODE:
-            debug_print(f"[WRAP-SEND] {method} {url[:120]}") #jmk
+        #jmk if DEBUG_MODE:
+        #jmk     debug_print(f"[WRAP-SEND] {method} {url}")
+        #jmk elif JITTER_VERBOSE:
+        #jmk     print(f"* [WRAP-SEND] {method} {url}")
 
         def _do_send():
             if ENABLE_JITTER:
@@ -6233,7 +6232,7 @@ def probability_for_cycle(sleep_seconds: int) -> float:
         day_seconds = 3600 * allowed_hours
     else:
         day_seconds = 86400  # 1 day
-
+    debug_print(f"Probability Calculation: {DAILY_HUMAN_HITS * sleep_seconds / day_seconds}") #jmk
     return min(1.0, DAILY_HUMAN_HITS * sleep_seconds / day_seconds)
 
 
@@ -6242,68 +6241,101 @@ def simulate_human_actions(bot: instaloader.Instaloader, sleep_seconds: int) -> 
     ctx = bot.context
     prob = probability_for_cycle(sleep_seconds)
 
-    if BE_HUMAN_VERBOSE or DEBUG_MODE:
-        debug_print("BeHuman: simulation start")
+    if DEBUG_MODE:
+        debug_print(f"BeHuman: simulation start with probability {prob} for sleep_seconds of {sleep_seconds}") #jmk
+    elif BE_HUMAN_VERBOSE:
+        print("* BeHuman: simulation start")
 
     # Explore feed
     if ctx.is_logged_in and random.random() < prob:
         try:
             posts = bot.get_explore_posts()
             post = next(posts)
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
+            if DEBUG_MODE:
                 debug_print("BeHuman #1: explore feed peek OK")
+            elif BE_HUMAN_VERBOSE:
+                print("* BeHuman #1: explore feed peek OK")
             time.sleep(random.uniform(2, 6))
         except Exception as e:
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
+            if "429" in str(e) or "checkpoint" in str(e) or "challenge" in str(e):
+                raise e
+            if DEBUG_MODE:
                 debug_print(f"BeHuman #1 error: explore peek failed ({e})")
+            elif BE_HUMAN_VERBOSE:
+                print(f"* BeHuman #1 error: explore peek failed ({e})")
 
     # View your own profile
     if ctx.is_logged_in and random.random() < prob:
         try:
             _ = instaloader.Profile.own_profile(ctx)
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
+            if DEBUG_MODE:
                 debug_print("BeHuman #2: viewed own profile OK")
+            elif BE_HUMAN_VERBOSE:
+                print("* BeHuman #2: viewed own profile OK")
             time.sleep(random.uniform(1, 4))
         except Exception as e:
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
+            if "429" in str(e) or "checkpoint" in str(e) or "challenge" in str(e):
+                raise e
+            if DEBUG_MODE:
                 debug_print(f"BeHuman #2 error: cannot view own profile: {e}")
+            elif BE_HUMAN_VERBOSE:
+                print(f"* BeHuman #2 error: cannot view own profile: {e})")
 
     # Browse a random hashtag
     # if random.random() < prob / 2: #jmk
-    if random.random() < prob: #jmk
-        tag = random.choice(MY_HASHTAGS)
-        try:
-            posts = bot.get_hashtag_posts(tag)
-            post = next(posts)
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
-                debug_print(f"BeHuman #3: browsed one post from #{tag} OK")
-            time.sleep(random.uniform(2, 5))
-        except StopIteration:
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
-                debug_print(f"BeHuman #3 warning: no posts for #{tag}")
-        except Exception as e:
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
-                debug_print(f"BeHuman #3 error: cannot browse #{tag}: {e}")
+    # if random.random() < prob: #jmk
+        # tag = random.choice(MY_HASHTAGS)
+        # try:
+            # posts = bot.get_hashtag_posts(tag)
+            # post = next(posts)
+            # if DEBUG_MODE:
+                # debug_print(f"BeHuman #3: browsed one post from #{tag} OK")
+            # elif BE_HUMAN_VERBOSE:
+                # print(f"* BeHuman #3: browsed one post from #{tag} OK")
+            # time.sleep(random.uniform(2, 5))
+        # except StopIteration:
+            # if DEBUG_MODE:
+                # debug_print(f"BeHuman #3 warning: no posts for #{tag}")
+            # elif BE_HUMAN_VERBOSE:
+                # print(f"* BeHuman #3 warning: no posts for #{tag}")
+        # except Exception as e:
+            # if "429" in str(e) or "checkpoint" in str(e) or "challenge" in str(e):
+                # raise e
+            # if DEBUG_MODE:
+                # debug_print(f"BeHuman #3 error: cannot browse #{tag}: {e}")
+            # elif BE_HUMAN_VERBOSE:
+                # print(f"* BeHuman #3 error: cannot browse #{tag}: {e}")
 
     # Visit a random followee profile
     if ctx.is_logged_in and random.random() < prob / 2:
         try:
             me = instaloader.Profile.own_profile(ctx)
             followees = list(me.get_followees())
-            if not followees and (BE_HUMAN_VERBOSE or DEBUG_MODE):
-                debug_print("BeHuman #4 warning: you follow 0 accounts, skipping visit")
+            if not followees:
+                if DEBUG_MODE:
+                    debug_print("BeHuman #4 warning: you follow 0 accounts, skipping visit")
+                elif BE_HUMAN_VERBOSE:
+                    print("* BeHuman #4 warning: you follow 0 accounts, skipping visit")
             else:
                 someone = random.choice(followees)
                 _ = instaloader.Profile.from_username(ctx, someone.username)
-                if BE_HUMAN_VERBOSE or DEBUG_MODE:
+                if DEBUG_MODE:
                     debug_print(f"BeHuman #4: visited followee {someone.username} OK")
+                elif BE_HUMAN_VERBOSE:
+                    print(f"* BeHuman #4: visited followee {someone.username} OK")
                 time.sleep(random.uniform(2, 5))
         except Exception as e:
-            if BE_HUMAN_VERBOSE or DEBUG_MODE:
+            if "429" in str(e) or "checkpoint" in str(e) or "challenge" in str(e):
+                raise e
+            if DEBUG_MODE:
                 debug_print(f"BeHuman #4 error: cannot visit followee: {e}")
+            elif BE_HUMAN_VERBOSE:
+                print(f"* BeHuman #4 error: cannot visit followee: {e}")
 
-    if BE_HUMAN_VERBOSE or DEBUG_MODE:
+    if DEBUG_MODE:
         debug_print("BeHuman: simulation stop")
+    elif BE_HUMAN_VERBOSE:
+        print("* BeHuman: simulation stop")
 
 
 # Monitors activity of the specified Instagram user
@@ -6325,7 +6357,6 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
     # Only print if Dashboard is not enabled (Dashboard will show this information)
     print(f"Target:\t\t\t\t\t{user}")
-                                         
 
     # Resolve output directory for this user
     user_root_dir = ""
@@ -6363,7 +6394,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             REQUESTS_PATCHED = True
 
         # bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=True, quiet=True) #jmk
-        bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=True, quiet=True, download_videos=False, download_pictures=False, download_video_thumbnails=False, download_geotags=False, download_comments=False) #jmk
+        # bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=False, quiet=True, download_videos=False, download_pictures=False, download_video_thumbnails=False, download_geotags=False, download_comments=False, max_connection_attempts=1, request_timeout=30, fatal_status_codes=[302,400,401,429]) #jmk
+        bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=False, quiet=True, download_videos=False, download_pictures=False, download_video_thumbnails=False, download_geotags=False, download_comments=False, max_connection_attempts=2, request_timeout=30, fatal_status_codes=[302,400,401,429]) #jmk
 
         ctx = bot.context
 
@@ -6465,7 +6497,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         # If hour-range gating is enabled and we're currently outside allowed hours, wait until the next allowed window
         # before fetching any target data, manual rechecks (manual_override_active) bypass this gating
-        if not CHECK_POSTS_IN_HOURS_RANGE and not manual_override_active:
+        if not CHECK_POSTS_IN_HOURS_RANGE and not manual_override_active: #jmk
             allowed = hours_to_check()
             if not allowed:
                 update_check_times(next_time="No allowed hours (hour ranges disabled or misconfigured)", user=user, increment_count=False)
@@ -6511,7 +6543,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         log_activity(f"Loading profile: {user}", user=user)
         update_ui_data(targets={user: {'status': 'Loading Profile'}})
 
-        profile = instaloader.Profile.from_username(bot.context, user)
+        #jmk
+        import contextlib, io
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            profile = instaloader.Profile.from_username(bot.context, user)
+        stderr_output = captured.getvalue()
+        if stderr_output and "JSON Query to graphql/query" not in stderr_output:
+            print(stderr_output, file=sys.stderr, end="")
+        # profile = instaloader.Profile.from_username(bot.context, user)
 
         time.sleep(NEXT_OPERATION_DELAY)
         insta_username = profile.username
@@ -6756,16 +6796,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     if ((followers_count != followers_old_count) or (followers_count > 0 and not followers) or FOLLOWERS_CHURN_DETECTION) and not skip_session and not skip_followers and can_view:
         # Fetch followers if count changed, list is empty or detailed logging is enabled
         if FOLLOWERS_CHURN_DETECTION and followers_count > 5000:
-                                                                        
-                                      
             warning = f"High follower count ({followers_count})! This may increase rate limit risk with detailed logging."
             log_activity(warning, user=user, level='system')
             print(f"* Warning: {warning}")
-                          
-                                    
-                 
-                                     
-                                                    
         followers_followings_fetched = True
 
         try:
@@ -6898,16 +6931,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     if ((followings_count != followings_old_count) or (followings_count > 0 and not followings) or FOLLOWERS_CHURN_DETECTION) and not skip_session and not skip_followings and can_view:
         # Fetch followings if count changed, list is empty or detailed logging is enabled
         if FOLLOWERS_CHURN_DETECTION and followings_count > 5000:
-                                                                           
-                                       
             warning = f"High following count ({followings_count})! This may increase rate limit risk with detailed logging."
             log_activity(warning, user=user, level='system')
             print(f"* Warning: {warning}")
-                          
-                                    
-                 
-                                     
-                                                    
         followers_followings_fetched = True
 
         try:
@@ -7420,13 +7446,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
     print_cur_ts("Timestamp:\t\t\t\t")
 
-                                                          
     if HOURS_VERBOSE or DEBUG_MODE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE):
         sleep_message(r_sleep_time, user)
         debug_print(f"Next check scheduled for: {get_date_from_ts(NEXT_CHECK_TIME)}")
-
-                                                                        
-                                          
 
     # Use interruptible sleep if stop_event is provided (allows immediate stop)
     if stop_event or DEBUG_MODE or WEB_DASHBOARD_ENABLED:
@@ -7470,6 +7492,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     email_sent = False
 
     # Primary loop
+    consecutive_main_errors = 0
+    consecutive_behuman_errors = 0
     while True:
         # Check stop event at the start of each loop iteration
         if stop_event and stop_event.is_set():
@@ -7511,7 +7535,16 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             debug_print(f"Fetching profile data from Instagram API...")
 
             try:
-                profile = instaloader.Profile.from_username(bot.context, user)
+                #jmk
+                import contextlib, io
+                captured = io.StringIO()
+                with contextlib.redirect_stderr(captured):
+                    profile = instaloader.Profile.from_username(bot.context, user)
+                stderr_output = captured.getvalue()
+                if stderr_output and "JSON Query to graphql/query" not in stderr_output:
+                    print(stderr_output, file=sys.stderr, end="")
+                # profile = instaloader.Profile.from_username(bot.context, user)
+
                 time.sleep(NEXT_OPERATION_DELAY)
                 new_post = False
                 followers_count = profile.followers
@@ -7523,6 +7556,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 posts_count = profile.mediacount
 
                 debug_print(f"Profile loaded: followers={followers_count}, following={followings_count}, posts={posts_count}")
+                consecutive_main_errors = 0
 
                 # JMK commented out #jmk
                 # if not skip_session and can_view:
@@ -7552,7 +7586,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         'followers': followers_count,
                         'following': followings_count,
                         'posts': posts_count,
-                        'reels': reels_count if 'reels_count' in dir() else 0,
+                        'reels': reels_count if ('reels_count' in dir() and reels_count is not None) else 0,
                         'has_story': has_story,
                         'is_private': is_private,
                         'bio_changed': False
@@ -7599,6 +7633,23 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 print(f"* Error, retrying in {display_time(r_sleep_time)}: {error_msg}")
                 log_activity(f"Error: {error_msg}", user=user)
                 debug_print(f"Full exception: {type(e).__name__}: {e}")
+
+                consecutive_main_errors += 1
+                if ERROR_NOTIFICATION and consecutive_main_errors >= ERROR_FAILURE_THRESHOLD:
+                    alert_subject = f"instagram_monitor: error for {user} ({consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD})"
+                    alert_body = f"An error occurred for user {user} (attempt {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD}):\n{error_msg}\n\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
+                    alert_body_html = f"An error occurred for user <b>{user}</b> (attempt {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD}):<br><br><b>{error_msg}</b><br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
+
+                    print(f"* Sending error notification to {RECEIVER_EMAIL} (failure {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD})")
+                    send_email(alert_subject, alert_body, alert_body_html, SMTP_SSL)
+
+                    if WEBHOOK_ENABLED and WEBHOOK_ERROR_NOTIFICATION:
+                        send_webhook(
+                            title=f"Error for {user}",
+                            description=f"{error_msg}\n(failure {consecutive_main_errors}/{ERROR_FAILURE_THRESHOLD})",
+                            color=0xFF0000,
+                            notification_type="error"
+                        )
 
                 if "detected automated checks" in error_msg and WEB_DASHBOARD_ENABLED:
                     update_ui_data(targets={user: {'status': 'Paused: Session re-login required'}})
@@ -7746,7 +7797,17 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         duration_dl = end_time_dl - start_time_dl
                         log_activity(f"Finished downloading followings: {len(followings)}, fetched in {display_time(duration_dl)}", user=user)
                         # Refresh profile to get current reported counts for comparison
-                        profile = instaloader.Profile.from_username(bot.context, user)
+
+                        #jmk
+                        import contextlib, io
+                        captured = io.StringIO()
+                        with contextlib.redirect_stderr(captured):
+                            profile = instaloader.Profile.from_username(bot.context, user)
+                        stderr_output = captured.getvalue()
+                        if stderr_output and "JSON Query to graphql/query" not in stderr_output:
+                            print(stderr_output, file=sys.stderr, end="")
+                        # profile = instaloader.Profile.from_username(bot.context, user)
+
                         followings_count = profile.followees
                         followers_count_reported = profile.followers
                         if not FOLLOWERS_CHURN_DETECTION:
@@ -7878,7 +7939,17 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         duration_dl = end_time_dl - start_time_dl
                         log_activity(f"Finished downloading followers: {len(followers)}, fetched in {display_time(duration_dl)}", user=user)
                         # Refresh profile to get current reported counts for comparison
-                        profile = instaloader.Profile.from_username(bot.context, user)
+                        
+                        #jmk
+                        import contextlib, io
+                        captured = io.StringIO()
+                        with contextlib.redirect_stderr(captured):
+                            profile = instaloader.Profile.from_username(bot.context, user)
+                        stderr_output = captured.getvalue()
+                        if stderr_output and "JSON Query to graphql/query" not in stderr_output:
+                            print(stderr_output, file=sys.stderr, end="")
+                        # profile = instaloader.Profile.from_username(bot.context, user)
+
                         followers_count = profile.followers
                         followings_count_reported = profile.followees
                         if not FOLLOWERS_CHURN_DETECTION:
@@ -8648,8 +8719,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             update_ui_data(targets={user: {'status': 'OK'}})
 
         now = now_local_naive()
-        r_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
-        r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time)
+        target_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
+        r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, target_sleep_time)
 
         # Update next check time tracking (don't increment count, already done at check start)
         update_check_times(next_time=next_check_val, user=user, increment_count=False)
@@ -8661,9 +8732,28 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         # Be human please
         try:
             if BE_HUMAN and in_allowed_hours:
-                simulate_human_actions(bot, r_sleep_time)
+                simulate_human_actions(bot, target_sleep_time)
+                consecutive_behuman_errors = 0
         except Exception as e:
+
+            consecutive_behuman_errors += 1
             print(f"* Warning: It is not easy to be a human, our simulation failed: {e}")
+            if ERROR_NOTIFICATION and consecutive_behuman_errors >= ERROR_FAILURE_THRESHOLD:
+                error_msg = format_error_message(e)
+                alert_subject = f"instagram_monitor: BeHuman mode error for {user} ({consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD})"
+                alert_body = f"A BeHuman simulation error occurred for user {user} (attempt {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD}):\n{error_msg}\n\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
+                alert_body_html = f"A BeHuman simulation error occurred for user <b>{user}</b> (attempt {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD}):<br><br><b>{error_msg}</b><br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
+
+                print(f"* Sending BeHuman error notification to {RECEIVER_EMAIL} (failure {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD})")
+                send_email(alert_subject, alert_body, alert_body_html, SMTP_SSL)
+
+                if WEBHOOK_ENABLED and WEBHOOK_ERROR_NOTIFICATION:
+                    send_webhook(
+                        title=f"BeHuman Error for {user}",
+                        description=f"{error_msg}\n(failure {consecutive_behuman_errors}/{ERROR_FAILURE_THRESHOLD})",
+                        color=0xFF0000,
+                        notification_type="error"
+                    )
             print_cur_ts("\nTimestamp:\t\t\t\t")
 
         if HOURS_VERBOSE or DEBUG_MODE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE):
@@ -9043,13 +9133,6 @@ def run_main():
         help="Disable detection of changed profile picture"
     )
     opts.add_argument(
-                               
-                                         
-                            
-                     
-                                                                                               
-     
-                      
         "-b", "--csv-file",
         dest="csv_file",
         metavar="CSV_FILENAME",
@@ -9089,6 +9172,14 @@ def run_main():
         action="store_true",
         default=None,
         help="Enable debug mode (full API traces, internal logic logs)"
+    )
+    opts.add_argument(
+        "--error-threshold",
+        dest="error_threshold",
+        metavar="NUM",
+        type=int,
+        default=None,
+        help="Number of consecutive errors required to trigger an alert (default: 2)"
     )
 
     # Terminal dashboard options
@@ -9353,6 +9444,12 @@ def run_main():
     if args.skip_follow_changes is True:
         SKIP_FOLLOW_CHANGES = True
 
+    if args.error_threshold is not None:
+        ERROR_FAILURE_THRESHOLD = int(args.error_threshold)
+        if ERROR_FAILURE_THRESHOLD < 1:
+            print("* Warning: Error threshold must be at least 1, setting to 1")
+            ERROR_FAILURE_THRESHOLD = 1
+
     # Webhook configuration
     if args.webhook_url:
         if not validate_webhook_url(args.webhook_url):
@@ -9379,7 +9476,7 @@ def run_main():
     if args.send_test_email:
         print("* Sending test email notification ...\n")
         m_subject = "instagram_monitor: test email"
-        m_body = "This is a test email - your SMTP settings seems to be correct !"
+        m_body = "This is test email - your SMTP settings seems to be correct !"
         m_body_html = "This is <b>test email</b> - your SMTP settings seems to be <b>correct</b> !"
         if send_email(m_subject, m_body, m_body_html, SMTP_SSL, smtp_timeout=5) == 0:
             print("* Email sent successfully !")
@@ -9398,13 +9495,6 @@ def run_main():
         old_webhook_enabled = WEBHOOK_ENABLED
         WEBHOOK_ENABLED = True
 
-                          
-                                                                
-                                                                
-                                                              
-         
-    
-                                                                                                                                                                                                 
         if send_webhook("instagram_monitor: test webhook", "This is **test webhook** - your settings seems to be **correct** !", color=0x7289DA) == 0:
             print("* Webhook sent successfully !")
         else:
@@ -9621,10 +9711,6 @@ def run_main():
         except Exception:
             pass
 
-                                                                                  
-                                                  
-                                                        
-
     if args.csv_file:
         CSV_FILE = os.path.expanduser(args.csv_file)
     else:
@@ -9705,7 +9791,7 @@ def run_main():
     print("* Hours for fetching updates:\t\t" + hours_ranges_str)
     print(f"* Email notifications:\t\t\t[new posts/reels/stories/followings/bio/profile picture/visibility = {STATUS_NOTIFICATION}]\n*\t\t\t\t\t[followers = {FOLLOWERS_NOTIFICATION}] [errors = {ERROR_NOTIFICATION}]")
     print(f"* Session Mode:\t\t\t\t{mode_of_the_tool}")
-    print(f"* Human mode:\t\t\t\t{BE_HUMAN}")
+    print(f"* Human mode:\t\t\t\t{BE_HUMAN}" + (f" (Verbose)" if BE_HUMAN_VERBOSE else ""))
     print(f"* Skip session login:\t\t\t{SKIP_SESSION}")
     print(f"* Skip fetching followers:\t\t{SKIP_FOLLOWERS}")
     print(f"* Skip fetching followings:\t\t{SKIP_FOLLOWINGS}")
@@ -9773,7 +9859,6 @@ def run_main():
         print(f"*   Webhook on errors:\t\t\t{WEBHOOK_ERROR_NOTIFICATION}")
     print(f"* Verbose mode:\t\t\t\t{VERBOSE_MODE}")
     print(f"* Debug mode:\t\t\t\t{DEBUG_MODE}")
-
     print(f"* Local timezone:\t\t\t{LOCAL_TIMEZONE}")
     print(f"* 12h time format:\t\t\t{TIME_FORMAT_12H}")
 
@@ -9868,9 +9953,6 @@ def run_main():
         signal.signal(signal.SIGTRAP, increase_check_signal_handler)
         signal.signal(signal.SIGABRT, decrease_check_signal_handler)
         signal.signal(signal.SIGHUP, reload_secrets_signal_handler)
-
-                                                                                                                                                     
-                     
 
     # Print monitoring message after all setup is complete
     # Note: If Dashboard is enabled, this will be shown in the dashboard instead
@@ -10040,9 +10122,6 @@ def run_main():
 
         threads = []
         for idx, (u, delay, _planned) in enumerate(planned_actions):
-                                      
-                                                                        
-                                           
             stop_event = threading.Event()
             if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
                 WEB_DASHBOARD_STOP_EVENTS[u] = stop_event
