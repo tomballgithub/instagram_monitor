@@ -15,6 +15,8 @@
 # 2025/02/28, latest code base with web browser and RICH interface
 # 2025/02/28, fix pbar wrapping issue if RDP stopped while pbar is updated and after testing for screen size
 # 2025/02/28, added debug messages of last follower/following counts rather than just current
+# 2025/03/22, added process_message feature to generate friendly text for screen messages
+# 2025/03/22, use process_message for email and ntfy messaging
 
 # if first X are new, and that matches # new, stop
 # Instagram stop after x mode or calculate once you've found Lal. Test this mode
@@ -3129,6 +3131,9 @@ def send_email(subject, body, body_html, use_ssl, image_file="", image_name="ima
     fqdn_re = re.compile(r'(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{1,63}(?<!-)\.)+[a-zA-Z]{2,63}\.?$)')
     email_re = re.compile(r'[^@]+@[^@]+\.[^@]+')
 
+    subject = process_message(subject) #jmk 3/22/2026
+    body = process_message(body)       #jmk 3/22/2026
+
     try:
         ipaddress.ip_address(str(SMTP_HOST))
     except ValueError:
@@ -3360,6 +3365,9 @@ def format_payload(template, payload):
 def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None, local_image_file=None, notification_type="status"):
     if not WEBHOOK_ENABLED or not WEBHOOK_URL:
         return 1
+
+    title = process_message(title)              #jmk 3/22/2026
+    description = process_message(description)  #jmk 3/22/2026
 
     # Validate webhook URL
     if not validate_webhook_url(WEBHOOK_URL):
