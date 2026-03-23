@@ -3133,6 +3133,7 @@ def send_email(subject, body, body_html, use_ssl, image_file="", image_name="ima
 
     subject = process_message(subject) #jmk 3/22/2026
     body = process_message(body)       #jmk 3/22/2026
+    body_html = process_message(body_html) #jmk 3/22/2026
 
     try:
         ipaddress.ip_address(str(SMTP_HOST))
