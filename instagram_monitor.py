@@ -900,6 +900,19 @@ except ImportError:
     FLASK_AVAILABLE = False
 
 
+#jmk for stderror workaround
+import io 
+class _FilteredStderr(io.TextIOBase):
+    def __init__(self, original):
+        self._original = original
+    def write(self, s):
+        if s and "JSON Query to graphql/query" in s: #jmkdebug
+            return len(s)
+        return self._original.write(s)
+    def flush(self):
+        self._original.flush()
+#jmk for stderror workaround
+
 # Locates installed data files (wheel / pip)
 def _locate_installed_dist_file(target_filename: str) -> Optional[str]:
     try:
@@ -6586,15 +6599,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         log_activity(f"Loading profile: {user}", user=user)
         update_ui_data(targets={user: {'status': 'Loading Profile'}})
 
-        #jmk
-        import contextlib, io
-        captured = io.StringIO()
-        with contextlib.redirect_stderr(captured):
+        #jmk to filter network errors
+        _orig_stderr = sys.stderr
+        sys.stderr = _FilteredStderr(_orig_stderr)
+        try:
             profile = instaloader.Profile.from_username(bot.context, user)
-        stderr_output = captured.getvalue()
-        if stderr_output and "JSON Query to graphql/query" not in stderr_output:
-            print(stderr_output, file=sys.stderr, end="")
+        finally:
+            sys.stderr = _orig_stderr
         # profile = instaloader.Profile.from_username(bot.context, user)
+        #jmk to filter network errors
 
         time.sleep(NEXT_OPERATION_DELAY)
         insta_username = profile.username
@@ -7578,15 +7591,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             debug_print(f"Fetching profile data from Instagram API...")
 
             try:
-                #jmk
-                import contextlib, io
-                captured = io.StringIO()
-                with contextlib.redirect_stderr(captured):
+                #jmk to filter network errors
+                _orig_stderr = sys.stderr
+                sys.stderr = _FilteredStderr(_orig_stderr)
+                try:
                     profile = instaloader.Profile.from_username(bot.context, user)
-                stderr_output = captured.getvalue()
-                if stderr_output and "JSON Query to graphql/query" not in stderr_output:
-                    print(stderr_output, file=sys.stderr, end="")
+                finally:
+                    sys.stderr = _orig_stderr
                 # profile = instaloader.Profile.from_username(bot.context, user)
+                #jmk to filter network errors
 
                 time.sleep(NEXT_OPERATION_DELAY)
                 new_post = False
@@ -7842,15 +7855,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         log_activity(f"Finished downloading followings: {len(followings)}, fetched in {display_time(duration_dl)}", user=user)
                         # Refresh profile to get current reported counts for comparison
 
-                        #jmk
-                        import contextlib, io
-                        captured = io.StringIO()
-                        with contextlib.redirect_stderr(captured):
+                        #jmk to filter network errors
+                        _orig_stderr = sys.stderr
+                        sys.stderr = _FilteredStderr(_orig_stderr)
+                        try:
                             profile = instaloader.Profile.from_username(bot.context, user)
-                        stderr_output = captured.getvalue()
-                        if stderr_output and "JSON Query to graphql/query" not in stderr_output:
-                            print(stderr_output, file=sys.stderr, end="")
+                        finally:
+                            sys.stderr = _orig_stderr
                         # profile = instaloader.Profile.from_username(bot.context, user)
+                        #jmk to filter network errors
 
                         followings_count = profile.followees
                         followers_count_reported = profile.followers
@@ -7984,15 +7997,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         log_activity(f"Finished downloading followers: {len(followers)}, fetched in {display_time(duration_dl)}", user=user)
                         # Refresh profile to get current reported counts for comparison
                         
-                        #jmk
-                        import contextlib, io
-                        captured = io.StringIO()
-                        with contextlib.redirect_stderr(captured):
+                        #jmk to filter network errors
+                        _orig_stderr = sys.stderr
+                        sys.stderr = _FilteredStderr(_orig_stderr)
+                        try:
                             profile = instaloader.Profile.from_username(bot.context, user)
-                        stderr_output = captured.getvalue()
-                        if stderr_output and "JSON Query to graphql/query" not in stderr_output:
-                            print(stderr_output, file=sys.stderr, end="")
+                        finally:
+                            sys.stderr = _orig_stderr
                         # profile = instaloader.Profile.from_username(bot.context, user)
+                        #jmk to filter network errors
 
                         followers_count = profile.followers
                         followings_count_reported = profile.followees
