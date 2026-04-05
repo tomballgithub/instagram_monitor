@@ -1014,6 +1014,9 @@ PROGRESS_BAR_LOCK = threading.RLock()
 # Global lock for session file load/save (Instaloader session file is shared across targets)
 SESSION_FILE_LOCK = threading.Lock()
 
+# Global lock to guard one-time requests monkey-patching across threads
+REQUESTS_PATCH_LOCK = threading.Lock()
+
 # Whether requests Session methods have already been monkey-patched
 REQUESTS_PATCHED = False
 
@@ -4243,9 +4246,43 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
             print_cur_ts("\nTimestamp:\t\t\t\t")
 
 
+# Builds a Profile object from the mobile web_profile_info response
+def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) -> Optional[instaloader.Profile]:
+    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={username}", {})
+    if not isinstance(data, dict):
+        return None
+
+    user_data = data.get("data", {}).get("user")
+    if not isinstance(user_data, dict):
+        return None
+
+    normalized = dict(user_data)
+    if "username" not in normalized:
+        normalized["username"] = username
+    if "id" not in normalized and "pk" in normalized:
+        normalized["id"] = str(normalized["pk"])
+    if "pk" not in normalized and "id" in normalized:
+        normalized["pk"] = str(normalized["id"])
+    if "id" not in normalized and "pk" not in normalized:
+        return None
+
+    return instaloader.Profile(bot.context, normalized)
+
+
+# Resolves a profile by username by trying web_profile_info first in anonymous mode then Instaloader
+def profile_from_username_resilient(bot: instaloader.Instaloader, username: str) -> instaloader.Profile:
+    ctx = bot.context
+    if not ctx.is_logged_in:
+        fallback_profile = _profile_from_web_profile_info(bot, username)
+        if fallback_profile is not None:
+            return fallback_profile
+
+    return instaloader.Profile.from_username(ctx, username)
+
+
 # Return the most recent post and/or reel for the user (GraphQL helper when logged in)
 def latest_post_reel(user: str, bot: instaloader.Instaloader) -> Optional[Tuple[instaloader.Post, str]]:
-    profile = instaloader.Profile.from_username(bot.context, user)
+    profile = profile_from_username_resilient(bot, user)
 
     # Max 3 pinned posts + the latest one
     posts = [(p, "post") for p in islice(profile.get_posts(), 4)]
@@ -4343,7 +4380,7 @@ def latest_post_mobile(user: str, bot: instaloader.Instaloader):
 
 # Returns reels count by using Instaloader's iPhone API (requires session login)
 def get_reels_count_mobile(user: str, bot: instaloader.Instaloader):
-    profile = instaloader.Profile.from_username(bot.context, user)
+    profile = profile_from_username_resilient(bot, user)
     user_id = profile.userid
 
     # Fetch mobile JSON
@@ -4371,7 +4408,7 @@ def get_total_reels_count(user: str, bot: instaloader.Instaloader, skip_session=
 
     # Anonymous fallback: count every reel in the feed, might be API intensive
     try:
-        profile = instaloader.Profile.from_username(bot.context, user)
+        profile = profile_from_username_resilient(bot, user)
         count = 0
         for _ in profile.get_reels():
             count += 1
@@ -5513,17 +5550,17 @@ def update_dashboard():
         else:
             loading_text.append("⏳ Initializing and fetching profile data...\n\n", style="yellow")
             loading_text.append("This may take a moment while we:\n", style="dim")
-            loading_text.append("  • Load Instagram session\n", style="dim")
-            loading_text.append("  • Fetch profile information\n", style="dim")
-            loading_text.append("  • Count posts, reels, and stories\n", style="dim")
-            loading_text.append("  • Retrieve follower/following data\n\n", style="dim")
+            loading_text.append("  - Load Instagram session\n", style="dim")
+            loading_text.append("  - Fetch profile information\n", style="dim")
+            loading_text.append("  - Count posts, reels, and stories\n", style="dim")
+            loading_text.append("  - Retrieve follower/following data\n\n", style="dim")
 
             # Show which users are being monitored
             targets_list = DASHBOARD_DATA.get('targets_list', [])
             if targets_list:
                 loading_text.append("Monitored targets:\n", style="bold cyan")
                 for target in targets_list:
-                    loading_text.append(f"  • {target}\n", style="cyan")
+                    loading_text.append(f"  - {target}\n", style="cyan")
 
             loading_text.append("\n💡 Please wait patiently...\n\n", style="italic green")
 
@@ -5576,17 +5613,17 @@ def init_dashboard():
     else:
         loading_text.append("⏳ Initializing and fetching profile data...\n\n", style="yellow")
         loading_text.append("This may take a moment while we:\n", style="dim")
-        loading_text.append("  • Load Instagram session\n", style="dim")
-        loading_text.append("  • Fetch profile information\n", style="dim")
-        loading_text.append("  • Count posts, reels, and stories\n", style="dim")
-        loading_text.append("  • Retrieve follower/following data\n\n", style="dim")
+        loading_text.append("  - Load Instagram session\n", style="dim")
+        loading_text.append("  - Fetch profile information\n", style="dim")
+        loading_text.append("  - Count posts, reels, and stories\n", style="dim")
+        loading_text.append("  - Retrieve follower/following data\n\n", style="dim")
 
         # Show which users are being monitored
         targets_list = DASHBOARD_DATA.get('targets_list', [])
         if targets_list:
             loading_text.append("Monitored targets:\n", style="bold cyan")
             for target in targets_list:
-                loading_text.append(f"  • {target}\n", style="cyan")
+                loading_text.append(f"  - {target}\n", style="cyan")
 
         loading_text.append("\n💡 Please wait patiently...", style="italic green")
 
@@ -5662,6 +5699,9 @@ def print_check_timing(r_sleep_time, prefix="", user=None):
 # Initializes and sets up a progress bar for displaying download progress
 def setup_pbar(total_expected, title):
     global START_TIME, NAME_COUNT, WRAPPER_COUNT, pbar
+
+    # Ensure request hooks are active so progress updates are tracked even without jitter or serialization
+    ensure_requests_monkey_patched()
 
     # Use thread-local storage for multi-target safety
     if not hasattr(_thread_local, 'pbar'):
@@ -6030,6 +6070,19 @@ def instagram_wrap_send(orig_send):
     return wrapper
 
 
+# Ensures requests Session monkey-patch is applied once in a thread-safe way
+def ensure_requests_monkey_patched():
+    global REQUESTS_PATCHED
+    if REQUESTS_PATCHED:
+        return
+    with REQUESTS_PATCH_LOCK:
+        if REQUESTS_PATCHED:
+            return
+        req.Session.request = instagram_wrap_request(req.Session.request)
+        req.Session.send = instagram_wrap_send(req.Session.send)
+        REQUESTS_PATCHED = True
+
+
 # Returns a dictionary containing all current configuration settings
 def get_dashboard_config_data(final_log_path=None, imgcat_exe=None, profile_pic_file_exists=None, cfg_path=None, env_path=None, check_interval_low=None, targets=None):
     # Prepare hours/ranges string
@@ -6358,7 +6411,7 @@ def simulate_human_actions(bot: instaloader.Instaloader, sleep_seconds: int) -> 
                     print("* BeHuman #4 warning: you follow 0 accounts, skipping visit")
             else:
                 someone = random.choice(followees)
-                _ = instaloader.Profile.from_username(ctx, someone.username)
+                _ = profile_from_username_resilient(bot, someone.username)
                 if DEBUG_MODE:
                     debug_print(f"BeHuman #4: visited followee {someone.username} OK")
                 elif BE_HUMAN_VERBOSE:
@@ -6426,12 +6479,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     reels_count = 0
 
     try:
-        global REQUESTS_PATCHED
-        # Monkey-patch requests only once (it is global), even if we run multi-target threads
-        if (ENABLE_JITTER or MULTI_TARGET_SERIALIZE_HTTP) and not REQUESTS_PATCHED:
-            req.Session.request = instagram_wrap_request(req.Session.request)
-            req.Session.send = instagram_wrap_send(req.Session.send)
-            REQUESTS_PATCHED = True
+        # Apply request monkey-patch for jitter or serialized HTTP mode even when no progress bar is created
+        if ENABLE_JITTER or MULTI_TARGET_SERIALIZE_HTTP:
+            ensure_requests_monkey_patched()
 
         # bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=True, quiet=True) #jmk
         # bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=False, quiet=True, download_videos=False, download_pictures=False, download_video_thumbnails=False, download_geotags=False, download_comments=False, max_connection_attempts=1, request_timeout=30, fatal_status_codes=[302,400,401,429]) #jmk
@@ -6603,7 +6653,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         _orig_stderr = sys.stderr
         sys.stderr = _FilteredStderr(_orig_stderr)
         try:
-            profile = instaloader.Profile.from_username(bot.context, user)
+            profile = profile_from_username_resilient(bot, user)
         finally:
             sys.stderr = _orig_stderr
         # profile = instaloader.Profile.from_username(bot.context, user)
@@ -7595,7 +7645,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 _orig_stderr = sys.stderr
                 sys.stderr = _FilteredStderr(_orig_stderr)
                 try:
-                    profile = instaloader.Profile.from_username(bot.context, user)
+                    profile = profile_from_username_resilient(bot, user)
                 finally:
                     sys.stderr = _orig_stderr
                 # profile = instaloader.Profile.from_username(bot.context, user)
@@ -7859,7 +7909,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         _orig_stderr = sys.stderr
                         sys.stderr = _FilteredStderr(_orig_stderr)
                         try:
-                            profile = instaloader.Profile.from_username(bot.context, user)
+                            profile = profile_from_username_resilient(bot, user)
                         finally:
                             sys.stderr = _orig_stderr
                         # profile = instaloader.Profile.from_username(bot.context, user)
@@ -8001,7 +8051,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         _orig_stderr = sys.stderr
                         sys.stderr = _FilteredStderr(_orig_stderr)
                         try:
-                            profile = instaloader.Profile.from_username(bot.context, user)
+                            profile = profile_from_username_resilient(bot, user)
                         finally:
                             sys.stderr = _orig_stderr
                         # profile = instaloader.Profile.from_username(bot.context, user)
@@ -9093,8 +9143,8 @@ def run_main():
         help="Random jitter (seconds) added to each target start time"
     )
 
-    # Session‐related options
-    session_opts = parser.add_argument_group("Session‐related options")
+    # Session-related options
+    session_opts = parser.add_argument_group("Session-related options")
     session_opts.add_argument(
         "-l", "--skip-session",
         dest="skip_session",
