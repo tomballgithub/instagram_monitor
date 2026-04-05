@@ -17,6 +17,7 @@
 # 2025/02/28, added debug messages of last follower/following counts rather than just current
 # 2025/03/22, added process_message feature to generate friendly text for screen messages
 # 2025/03/22, use process_message for email and ntfy messaging
+# 2025/03/30, added proxy support
 
 # if first X are new, and that matches # new, stop
 # Instagram stop after x mode or calculate once you've found Lal. Test this mode
@@ -212,6 +213,11 @@ ENABLE_JITTER = False
 
 # Set to True to enable verbose output for HTTP jitter/back-off wrappers
 JITTER_VERBOSE = False
+
+# Whether to enable proxy support
+ENABLE_PROXY = False
+PROXY_URL = ""
+PROXY_CERT_PATH = ""
 
 # Optional: specify web browser user agent manually
 #
@@ -650,6 +656,11 @@ DAILY_HUMAN_HITS = 0
 MY_HASHTAGS = []
 BE_HUMAN_VERBOSE = False
 ENABLE_JITTER = False
+ENABLE_PROXY = False
+PROXY_URL = ""
+PROXY_CERT_PATH = ""
+PROXIES = {}
+SSL_VERIFY = True
 JITTER_VERBOSE = False
 LIVENESS_CHECK_INTERVAL = 0
 CHECK_INTERNET_URL = ""
@@ -791,7 +802,7 @@ from datetime import datetime, timezone, timedelta
 from dateutil import relativedelta
 from dateutil.parser import isoparse, parse
 import calendar
-import requests as req
+import niquests as req #jmk
 import shutil
 import smtplib
 import ssl
@@ -2994,7 +3005,7 @@ def signal_handler(sig, frame, message=None):
 # Checks internet connectivity
 def check_internet(url=CHECK_INTERNET_URL, timeout=CHECK_INTERNET_TIMEOUT):
     try:
-        _ = req.get(url, headers={'User-Agent': USER_AGENT}, timeout=timeout)
+        _ = req.get(url, headers={'User-Agent': USER_AGENT}, timeout=timeout, verify=SSL_VERIFY, proxies=PROXIES)
         return True
     except req.RequestException as e:
         print(f"* No connectivity, please check your network:\n\n{e}")
@@ -3969,7 +3980,7 @@ def reload_secrets_signal_handler(sig, frame):
 # Saves user's image / video to selected file name
 def save_pic_video(image_video_url, image_video_file_name, custom_mdate_ts=0):
     try:
-        image_video_response = req.get(image_video_url, headers={'User-Agent': USER_AGENT}, timeout=FUNCTION_TIMEOUT, stream=True)
+        image_video_response = req.get(image_video_url, headers={'User-Agent': USER_AGENT}, timeout=FUNCTION_TIMEOUT, stream=True, verify=SSL_VERIFY, proxies=PROXIES)
         image_video_response.raise_for_status()
         url_time = image_video_response.headers.get('last-modified')
         url_time_in_tz_ts = 0
@@ -6413,6 +6424,22 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         # bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=False, quiet=True, download_videos=False, download_pictures=False, download_video_thumbnails=False, download_geotags=False, download_comments=False, max_connection_attempts=1, request_timeout=30, fatal_status_codes=[302,400,401,429]) #jmk
         bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=False, quiet=True, download_videos=False, download_pictures=False, download_video_thumbnails=False, download_geotags=False, download_comments=False, max_connection_attempts=2, request_timeout=30, fatal_status_codes=[302,400,401,429]) #jmk
 
+        # ── Inject proxy and cert into Instaloader's session ───────────
+        bot.context._session.proxies.update(PROXIES)
+        bot.context._session.verify = SSL_VERIFY
+
+        # # ── Verify injection worked ────────────────────────────────────
+        # print("=== Session Config ===")
+        # print(f"Proxies:    {bot.context._session.proxies}")
+        # print(f"SSL Verify: {bot.context._session.verify}")
+
+        # # ── Make a test request through Instaloader's session ──────────
+        # print("\n=== Test Request via Instaloader Session ===")
+        # response = bot.context._session.get('https://httpbin.org/ip', timeout=10)
+        # print(f"Status:  {response.status_code}")
+        # print(f"Origin:  {response.json()}")
+        # print("Proxy is working!" if response.status_code == 200 else "Something went wrong!")
+        
         ctx = bot.context
 
         orig_request = ctx._session.request
@@ -8865,7 +8892,7 @@ def get_target_paths(user):
 
 
 def run_main():
-    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER
+    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER, ENABLE_PROXY, PROXIES, SSL_VERIFY
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H
 
@@ -9138,6 +9165,13 @@ def run_main():
         action="store_true",
         default=None,
         help="Enable human-like HTTP jitter and back-off wrapper"
+    )
+    session_opts.add_argument(
+        "--enable-proxy",
+        dest="enable_proxy",
+        action="store_true",
+        default=None,
+        help="Enables proxy if configured in .conf file"
     )
 
     # Features & output
@@ -9607,6 +9641,24 @@ def run_main():
     if args.enable_jitter is True:
         ENABLE_JITTER = True
 
+    if args.enable_proxy is True:
+        ENABLE_PROXY = True
+
+    if ENABLE_PROXY and PROXY_URL:
+        # os.environ['https_proxy'] = PROXY_URL
+        # os.environ['http_proxy'] = PROXY_URL
+        # if PROXY_CERT_PATH:
+            # os.environ['REQUESTS_CA_BUNDLE'] = PROXY_CERT_PATH
+            # os.environ['CURL_CA_BUNDLE'] = PROXY_CERT_PATH
+        PROXIES = {'http': PROXY_URL, 'https': PROXY_URL}
+        if PROXY_CERT_PATH:
+            SSL_VERIFY = PROXY_CERT_PATH
+        else:
+            SSL_VERIFY = True
+    else:
+        PROXIES = {}
+        SSL_VERIFY = True
+    
     if args.check_interval:
         if args.check_interval <= 0:
             print("* Error: Check interval must be greater than 0")
@@ -9823,6 +9875,10 @@ def run_main():
     print(f"* Browser user agent:\t\t\t{USER_AGENT}")
     print(f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}")
     print(f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}")
+    print(f"* Proxy URL:\t\t\t\t" + (f"{PROXY_URL[:25]}" if ENABLE_PROXY else ""))
+    print(f"* Proxy Certificate:\t\t\t" + (f"{PROXY_CERT_PATH}" if ENABLE_PROXY else ""))
+    response = req.get('https://httpbin.org/ip', timeout=10, verify=SSL_VERIFY, proxies=PROXIES)
+    print(f"* IP Address:\t\t\t\t{response.json()['origin']}")
     print(f"* Liveness check:\t\t\t{bool(LIVENESS_CHECK_INTERVAL)}" + (f" ({display_time(LIVENESS_CHECK_INTERVAL)})" if LIVENESS_CHECK_INTERVAL else ""))
     print(f"* Profile pic changes:\t\t\t{DETECT_CHANGED_PROFILE_PIC}")
     print(f"* Display profile pics:\t\t\t{bool(imgcat_exe)}" + (f" (via {imgcat_exe})" if imgcat_exe else ""))
