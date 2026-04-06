@@ -2624,7 +2624,7 @@ _URL_RE = re.compile(r"(https?://[^\s\]]+)")
 _ONLINE_WORD_RE = re.compile(r"(\b(?!stop\s+)(?:online|Yes)\b)", re.IGNORECASE)
 _OFFLINE_WORD_RE = re.compile(r"(\b(?:offline|No)\b)", re.IGNORECASE)
 _BOOLEAN_TRUE_RE = re.compile(r"\bTrue\b")
-_BOOLEAN_FALSE_RE = re.compile(r"\bFalse\b")
+_BOOLEAN_FALSE_RE = re.compile(r"\bFalse\b|\bDisabled\b", re.IGNORECASE)
 _STORY_URL_RE = re.compile(r"(https?://\S+)")
 _QUOTED_CONTENT_RE = re.compile(r"(['\"])((?![^'\"]*[._/])[^'\"]+)\1")
 _STATUS_CHANGE_RE = re.compile(r"^(.*? changed (?:status|mode|bio|followers|followings|profile picture) from\s+)(.+?)(\s+to\s+)(.+?)(.*)$")
@@ -8955,7 +8955,7 @@ def get_target_paths(user):
 
 
 def run_main():
-    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER, ENABLE_PROXY, PROXIES, SSL_VERIFY
+    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER, ENABLE_PROXY, PROXY_URL, PROXY_CERT_PATH, PROXIES, SSL_VERIFY
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H
 
@@ -9707,21 +9707,20 @@ def run_main():
     if args.enable_proxy is True:
         ENABLE_PROXY = True
 
-    if ENABLE_PROXY and PROXY_URL:
-        # os.environ['https_proxy'] = PROXY_URL
-        # os.environ['http_proxy'] = PROXY_URL
-        # if PROXY_CERT_PATH:
-            # os.environ['REQUESTS_CA_BUNDLE'] = PROXY_CERT_PATH
-            # os.environ['CURL_CA_BUNDLE'] = PROXY_CERT_PATH
+    if ENABLE_PROXY:
+        if not PROXY_URL:
+            print(f"* Error: Proxies are enabled but PROXY_URL is missing! Please set it in config file or via --proxy-url flag")
+            sys.exit(1)
+        if not PROXY_CERT_PATH:
+            print(f"* Error: Proxies are enabled but PROXY_CERT_PATH is missing! Please set it in config file or via --proxy-cert flag")
+            sys.exit(1)
         PROXIES = {'http': PROXY_URL, 'https': PROXY_URL}
-        if PROXY_CERT_PATH:
-            SSL_VERIFY = PROXY_CERT_PATH
-        else:
-            SSL_VERIFY = True
+        SSL_VERIFY = PROXY_CERT_PATH
     else:
-        PROXIES = {}
-        SSL_VERIFY = True
-    
+        # Since disabled, clear out settings possibly read in from config file
+        PROXY_URL = ""
+        PROXY_CERT_PATH = ""
+
     if args.check_interval:
         if args.check_interval <= 0:
             print("* Error: Check interval must be greater than 0")
@@ -9938,8 +9937,8 @@ def run_main():
     print(f"* Browser user agent:\t\t\t{USER_AGENT}")
     print(f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}")
     print(f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}")
-    print(f"* Proxy URL:\t\t\t\t" + (f"{PROXY_URL[:25]}" if ENABLE_PROXY else ""))
-    print(f"* Proxy Certificate:\t\t\t" + (f"{PROXY_CERT_PATH}" if ENABLE_PROXY else ""))
+    print(f"* Proxy URL:\t\t\t\t" + (f"{PROXY_URL}" if ENABLE_PROXY else "Disabled"))
+    print(f"* Proxy Certificate:\t\t\t" + (f"{PROXY_CERT_PATH}" if ENABLE_PROXY else "Disabled"))
     response = req.get('https://httpbin.org/ip', timeout=10, verify=SSL_VERIFY, proxies=PROXIES)
     print(f"* IP Address:\t\t\t\t{response.json()['origin']}")
     print(f"* Liveness check:\t\t\t{bool(LIVENESS_CHECK_INTERVAL)}" + (f" ({display_time(LIVENESS_CHECK_INTERVAL)})" if LIVENESS_CHECK_INTERVAL else ""))
