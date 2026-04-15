@@ -255,6 +255,9 @@ CHECK_INTERNET_URL = 'https://www.instagram.com/'
 # Timeout used when checking initial internet connectivity; in seconds
 CHECK_INTERNET_TIMEOUT = 5
 
+# URL used to determine IP address
+IP_ADDRESS_URL = 'https://httpbin.org/ip'
+
 # Limit fetching updates to specific hours of the day?
 # If True, the tool will only fetch updates within the defined hour ranges below
 #
@@ -6512,7 +6515,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         # # ── Make a test request through Instaloader's session ──────────
         # print("\n=== Test Request via Instaloader Session ===")
-        # response = bot.context._session.get('https://httpbin.org/ip', timeout=10)
+        # response = bot.context._session.get(IP_ADDRESS_URL, timeout=10)
         # print(f"Status:  {response.status_code}")
         # print(f"Origin:  {response.json()}")
         # print("Proxy is working!" if response.status_code == 200 else "Something went wrong!")
@@ -7635,6 +7638,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             print_cur_ts("\nTimestamp:\t\t\t\t")
         elif DEBUG_MODE:
             debug_print(f"Starting check #{CHECK_COUNT}")
+            if ENABLE_PROXY:
+                response = req.get(IP_ADDRESS_URL, timeout=10, verify=SSL_VERIFY, proxies=PROXIES)
+                debug_print(f"Proxy IP Address is: {response.json()['origin']}")
 
         cur_h = now_local_naive().strftime("%H")
 
@@ -9253,7 +9259,7 @@ def run_main():
     session_opts.add_argument(
         "--proxy-url",
         dest="proxy_url",
-        metavar="PROXY_URL"
+        metavar="PROXY_URL",
         type=str,
         help="Set URL to be used for proxy"
     )
@@ -9742,9 +9748,6 @@ def run_main():
     if args.enable_proxy is True:
         ENABLE_PROXY = True
 
-    if args.proxy_post_disable is True:
-        PROXY_POST_DISABLE = True
-
     if ENABLE_PROXY:
         if not PROXY_URL:
             print(f"* Error: Proxies are enabled but PROXY_URL is missing! Please set it in config file or via --proxy-url flag")
@@ -9752,10 +9755,13 @@ def run_main():
         if PROXY_CERT_PATH:
             SSL_VERIFY = PROXY_CERT_PATH
         PROXIES = {'http': PROXY_URL, 'https': PROXY_URL}
+        if args.proxy_post_disable is True:
+            PROXY_POST_DISABLE = True
     else:
         # Since disabled, clear out settings possibly read in from config file
         PROXY_URL = ""
         PROXY_CERT_PATH = ""
+        PROXY_POST_DISABLE = False
 
     if args.check_interval:
         if args.check_interval <= 0:
@@ -9975,7 +9981,7 @@ def run_main():
     print(f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}")
     if ENABLE_PROXY:
         print(f"* Proxy URL:\t\t\t\t" + (f"{PROXY_URL}" if ENABLE_PROXY else "Disabled"))
-        print(f"* Proxy Certificate:\t\t\t" + (f"{PROXY_CERT_PATH}" if ENABLE_PROXY else "Disabled"))
+    response = req.get(IP_ADDRESS_URL, timeout=10, verify=SSL_VERIFY, proxies=PROXIES)
         response = req.get('https://httpbin.org/ip', timeout=10, verify=SSL_VERIFY, proxies=PROXIES)
         print(f"* IP Address:\t\t\t\t{response.json()['origin']}")
     print(f"* Liveness check:\t\t\t{bool(LIVENESS_CHECK_INTERVAL)}" + (f" ({display_time(LIVENESS_CHECK_INTERVAL)})" if LIVENESS_CHECK_INTERVAL else ""))
