@@ -695,6 +695,8 @@ DAILY_HUMAN_HITS = 0
 MY_HASHTAGS = []
 BE_HUMAN_VERBOSE = False
 ENABLE_JITTER = False
+MAX_FOLLOWERS = 0
+MAX_FOLLOWEES = 0
 JITTER_VERBOSE = False
 LIVENESS_CHECK_INTERVAL = 0
 CHECK_INTERNET_URL = ""
@@ -7129,7 +7131,10 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             log_activity(f"Started downloading followers", user=user)
             setup_pbar(total_expected=followers_count, title="* Downloading Followers")
             start_time_dl = time.time()
-            followers = [follower.username for follower in profile.get_followers()]
+            if MAX_FOLLOWERS:
+                followers = [follower.username for follower in islice(profile.get_followers(), MAX_FOLLOWERS)]
+            else:
+                followers = [follower.username for follower in profile.get_followers()]
             end_time_dl = time.time()
             close_pbar()
             duration_dl = end_time_dl - start_time_dl
@@ -7264,7 +7269,10 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             log_activity(f"Started downloading followings", user=user)
             setup_pbar(total_expected=followings_count, title="* Downloading Followings")
             start_time_dl = time.time()
-            followings = [followee.username for followee in profile.get_followees()]
+            if MAX_FOLLOWEES:
+                followings = [followee.username for followee in islice(profile.get_followees(), MAX_FOLLOWEES)]
+            else:
+                followings = [followee.username for followee in profile.get_followees()]
             end_time_dl = time.time()
             close_pbar()
             duration_dl = end_time_dl - start_time_dl
@@ -8131,7 +8139,10 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         setup_pbar(total_expected=followings_count, title="* Downloading Followings")
                         start_time_dl = time.time()
                         followings = []
-                        followings = [followee.username for followee in profile.get_followees()]
+                        if MAX_FOLLOWEES:
+                            followings = [followee.username for followee in islice(profile.get_followees(), MAX_FOLLOWEES)]
+                        else:
+                            followings = [followee.username for followee in profile.get_followees()]
                         followings_to_save = []
                         end_time_dl = time.time()
                         close_pbar()
@@ -8273,7 +8284,10 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         setup_pbar(total_expected=followers_count, title="* Downloading Followers")
                         start_time_dl = time.time()
                         followers = []
-                        followers = [follower.username for follower in profile.get_followers()]
+                        if MAX_FOLLOWERS:
+                            followers = [follower.username for follower in islice(profile.get_followers(), MAX_FOLLOWERS)]
+                        else:
+                            followers = [follower.username for follower in profile.get_followers()]
                         followers_to_save = []
                         end_time_dl = time.time()
                         close_pbar()
