@@ -6819,7 +6819,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         # If hour-range gating is enabled and we're currently outside allowed hours, wait until the next allowed window
         # before fetching any target data, manual rechecks (manual_override_active) bypass this gating
-        if not CHECK_POSTS_IN_HOURS_RANGE and not manual_override_active: #jmk
+        if CHECK_POSTS_IN_HOURS_RANGE and not manual_override_active:
             allowed = hours_to_check()
             if not allowed:
                 update_check_times(next_time="No allowed hours (hour ranges disabled or misconfigured)", user=user, increment_count=False)
