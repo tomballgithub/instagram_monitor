@@ -7840,6 +7840,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     consecutive_behuman_errors = 0
     debug_print("Entering primary loop")
     while True:
+        debug_print("Top of primary loop")
         # Check stop event at the start of each loop iteration
         if stop_event and stop_event.is_set():
             print(f"* Monitoring stopped for {user}\n")
