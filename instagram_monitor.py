@@ -675,12 +675,6 @@ DAILY_HUMAN_HITS = 0
 MY_HASHTAGS = []
 BE_HUMAN_VERBOSE = False
 ENABLE_JITTER = False
-ENABLE_PROXY = False
-PROXY_URL = ""
-PROXY_CERT_PATH = ""
-PROXY_POST_DISABLE = False
-PROXIES = {}
-SSL_VERIFY = True
 JITTER_VERBOSE = False
 LIVENESS_CHECK_INTERVAL = 0
 CHECK_INTERNET_URL = ""
@@ -2702,6 +2696,8 @@ _QUOTED_CONTENT_RE = re.compile(r"(['\"])((?![^'\"]*[._/])[^'\"]+)\1")
 _STATUS_CHANGE_RE = re.compile(r"^(.*? changed (?:status|mode|bio|followers|followings|profile picture) from\s+)(.+?)(\s+to\s+)(.+?)(.*)$")
 _ACTIVITY_HEADER_RE = re.compile(r"(?i).*(story for user|Newest post|Followers number changed|Followings number changed|Bio changed for|New post for user|number changed|number of|Followings changed|Followers changed|name changed to|has changed for user|has been updated for user|changed profile picture|removed profile picture|set profile picture|update date changed|has new story item|has\s+\d+\s+story\s+items?|story items:|disappeared)(er|ing)?s?.*", re.IGNORECASE)
 _CHECK_INTERVAL_RE = re.compile(r"^(\s*\*?\s*Check interval:\s+)(.*?)(\s+\(.*?\)\s*)$")
+_PROXY_IP_RE = re.compile(r"proxy IP address of [\d.]+", re.IGNORECASE)
+_IP_ADDRESS_RE = re.compile(r"(?<!://)\b(\d{1,3}\.){3}\d{1,3}\b(?!:\d+/?)")
 
 
 # Builds ANSI escape sequence from a style description string
@@ -3574,10 +3570,13 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
                         "file": (filename, f, "image/jpeg"),
                         "payload_json": (None, json.dumps(final_payload))
                     }
+                    response = req.post(str(WEBHOOK_URL), headers=final_headers, files=files, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
             # Handle other types
             else:
                 if isinstance(final_payload, str):
+                    response = req.post(WEBHOOK_URL, headers=final_headers, data=final_payload, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
                 else:
+                    response = req.post(WEBHOOK_URL, headers=final_headers, json=final_payload, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
 
             if response.status_code in (200, 204):
                 print("* Webhook notification sent successfully")
@@ -9143,7 +9142,7 @@ def get_target_paths(user):
 
 
 def run_main():
-    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER, ENABLE_PROXY, PROXY_URL, PROXY_CERT_PATH, PROXY_POST_DISABLE, PROXIES, SSL_VERIFY
+    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H
     global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS
@@ -9938,24 +9937,6 @@ def run_main():
 
     if args.enable_jitter is True:
         ENABLE_JITTER = True
-
-    if args.enable_proxy is True:
-        ENABLE_PROXY = True
-
-    if ENABLE_PROXY:
-        if not PROXY_URL:
-            print(f"* Error: Proxies are enabled but PROXY_URL is missing! Please set it in config file or via --proxy-url flag")
-            sys.exit(1)
-        if PROXY_CERT_PATH:
-            SSL_VERIFY = PROXY_CERT_PATH
-        PROXIES = {'http': PROXY_URL, 'https': PROXY_URL}
-        if args.proxy_post_disable is True:
-            PROXY_POST_DISABLE = True
-    else:
-        # Since disabled, clear out settings possibly read in from config file
-        PROXY_URL = ""
-        PROXY_CERT_PATH = ""
-        PROXY_POST_DISABLE = False
 
     if args.check_interval:
         if args.check_interval <= 0:
