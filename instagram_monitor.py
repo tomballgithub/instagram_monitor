@@ -214,6 +214,17 @@ ENABLE_JITTER = False
 # Set to True to enable verbose output for HTTP jitter/back-off wrappers
 JITTER_VERBOSE = False
 
+# Optional Privacy Substitutions
+# This allows you to substitute any string for another in all messaging, logging, webhooks, and emails.
+# For instance, you may want to change a particular Instagram username to a more friendly name, or you could mask a name.
+# 
+# Provide a list of (search, replace) tuples. Any search term will be substituted with the replace term.
+#
+# Example:
+# PRIVACY_SUBSTITIONS = [ ("a.username", "XXX"), ("sdfsdf747475475", "Bobby") ]
+#
+PRIVACY_SUBSTITIONS = [ ]
+
 # Optional: Enable proxy support for networking traffic
 #
 # Note: even when PROXY_ENABLED is False, the underlying 'requests' library still
@@ -726,6 +737,7 @@ DASHBOARD_SHOW_CHECK_SECONDS = True
 THUMBNAILS_FORCED_BY_WEB = False
 FOLLOWERS_CHURN_DETECTION = False
 TIME_FORMAT_12H = False
+PRIVACY_SUBSTITIONS = []
 mode_of_the_tool = "Unknown"
 
 exec(CONFIG_BLOCK, globals())
@@ -2999,7 +3011,7 @@ class Logger(object):
         global last_output
         with STDOUT_LOCK:
             # Apply color for terminal
-            message = process_message(message) #jmk
+            message = process_message_substitutions(message)
             colorized_message = apply_color_to_text(message)
 
             if message != '\n':
@@ -3236,9 +3248,9 @@ def send_email(subject, body, body_html, use_ssl, image_file="", image_name="ima
     fqdn_re = re.compile(r'(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{1,63}(?<!-)\.)+[a-zA-Z]{2,63}\.?$)')
     email_re = re.compile(r'[^@]+@[^@]+\.[^@]+')
 
-    subject = process_message(subject) #jmk 3/22/2026
-    body = process_message(body)       #jmk 3/22/2026
-    body_html = process_message(body_html) #jmk 3/22/2026
+    subject = process_message_substitutions(subject)
+    body = process_message_substitutions(body)
+    body_html = process_message_substitutions(body_html)
 
     try:
         ipaddress.ip_address(str(SMTP_HOST))
@@ -3472,8 +3484,8 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
     if not WEBHOOK_ENABLED or not WEBHOOK_URL:
         return 1
 
-    title = process_message(title)              #jmk 3/22/2026
-    description = process_message(description)  #jmk 3/22/2026
+    title = process_message_substitutions(title)
+    description = process_message_substitutions(description)
 
     # Validate webhook URL
     if not validate_webhook_url(WEBHOOK_URL):
@@ -3688,27 +3700,20 @@ def refresh_proxy_if_needed(bot, user):
                 print(f"* Error refreshing proxies for {user}: {error_msg}")
                 log_activity(f"Proxy refresh failed: {error_msg}", user=user, level='error')
 
-# Global variable - list of (search, replace) tuples
-MSG_REPLACE = [
-    ("kara.elaine.long", "KK"),
-    ("kara_elaine_long", "KK"),
-    ("jkrontz@gmail.com", "JMK"),
-    ("jeoff", "JMK"),
-]
 
-def process_message(message: str) -> str:
+def process_message_substitutions(message: str) -> str:
     """
-    Perform search/replace on a message using the MSG_REPLACE global variable.
-    MSG_REPLACE should be a list of (search, replace) tuples.
-    Returns the original message if MSG_REPLACE doesn't exist or is empty.
+    Perform search/replace on a message using the PRIVACY_SUBSTITIONS global variable.
+    PRIVACY_SUBSTITIONS should be a list of (search, replace) tuples.
+    Returns the original message if PRIVACY_SUBSTITIONS doesn't exist or is empty.
     """
     try:
-        if not MSG_REPLACE:
+        if not PRIVACY_SUBSTITIONS:
             return message
     except NameError:
         return message
 
-    for search, replace in MSG_REPLACE:
+    for search, replace in PRIVACY_SUBSTITIONS:
         message = message.replace(search, replace)
 
     return message
@@ -3717,10 +3722,10 @@ def process_message(message: str) -> str:
 # Debug print helper - only prints if DEBUG_MODE is enabled
 def debug_print(message):
     if DEBUG_MODE:
-        message = process_message(message) #jmk
+        message = process_message_substitutions(message)
         timestamp = get_hour_min_from_ts(now_local(), show_seconds=True)
         user = getattr(_thread_local, 'user', None)
-        user_prefix = f" [{process_message(user)}]" if user else "" #jmk
+        user_prefix = f" [{process_message_substitutions(user)}]" if user else ""
 
         # If we just printed a partial line (no newline), add one before the debug message to avoid clobbering
         if getattr(_thread_local, 'in_partial_line', False):
