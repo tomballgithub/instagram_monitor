@@ -15,9 +15,18 @@
 # 2025/02/28, latest code base with web browser and RICH interface
 # 2025/02/28, fix pbar wrapping issue if RDP stopped while pbar is updated and after testing for screen size
 # 2025/02/28, added debug messages of last follower/following counts rather than just current
-# 2025/03/22, added process_message feature to generate friendly text for screen messages
-# 2025/03/22, use process_message for email and ntfy messaging
+# 2025/03/22, added process_message_substitutions feature to generate friendly text for screen messages
+# 2025/03/22, use process_message_substitutions for email and ntfy messaging
 # 2025/03/30, added proxy support
+# 2025/04/10, added elapsed time to timestamp updates
+# 2025/04/10, added showing metadata when loading profile (followers, followings, # posts)
+# 2025/04/11, if using proxy, show IP address for each loop if in DEBUG or VERBOSE modes
+# 2025/04/11, improved debug messaging for 'UI Data Update's
+# 2025/04/11, fix hours_to_check() if CHECK_POSTS_IN_HOURS_RANGE disabled 
+# 2025/04/12, color IP address messages in yellow
+# 2025/04/17, updated proxy support for web dashboard
+# 2025/04/17, proxy cleanup before submitting PR
+# 2025/04/17, move ip address fetching into function with try/exception
 
 # if first X are new, and that matches # new, stop
 # Instagram stop after x mode or calculate once you've found Lal. Test this mode
