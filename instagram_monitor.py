@@ -6874,21 +6874,26 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         sys.stderr = _FilteredStderr(_orig_stderr)
         try:
             profile = profile_from_username_resilient(bot, user)
+
+            time.sleep(NEXT_OPERATION_DELAY)
+            insta_username = profile.username
+            insta_userid = profile.userid
+
+            debug_print(f"Profile loaded: ID {insta_userid}")
+            debug_print(f"Metadata: followers={profile.followers}, followees={profile.followees}, posts={profile.mediacount}, private={profile.is_private}")
+
+            print(f"     OK: {insta_username} (followers={profile.followers}, followees={profile.followees}, posts={profile.mediacount})")
+            _thread_local.in_partial_line = False
+            log_activity(f"Profile loaded: {insta_username}", user=user)
+        except Exception as e:
+            _thread_local.in_partial_line = False
+            error_msg = format_error_message(e)
+            print(f"* Error: {error_msg}")
+            print_cur_ts("\nTimestamp:\t\t\t\t")
+            log_activity(f"Error: {error_msg}", user=user)
         finally:
             sys.stderr = _orig_stderr
-        # profile = instaloader.Profile.from_username(bot.context, user)
         #jmk to filter network errors
-
-        time.sleep(NEXT_OPERATION_DELAY)
-        insta_username = profile.username
-        insta_userid = profile.userid
-
-        debug_print(f"Profile loaded: ID {insta_userid}")
-        debug_print(f"Metadata: followers={profile.followers}, followees={profile.followees}, posts={profile.mediacount}, private={profile.is_private}")
-
-        print(f"     OK: {insta_username}")
-        _thread_local.in_partial_line = False
-        log_activity(f"Profile loaded: {insta_username}", user=user)
 
         followers_count = profile.followers
         followings_count = profile.followees
@@ -7887,20 +7892,24 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 sys.stderr = _FilteredStderr(_orig_stderr)
                 try:
                     profile = profile_from_username_resilient(bot, user)
+                    time.sleep(NEXT_OPERATION_DELAY)
+                    new_post = False
+                    followers_count = profile.followers
+                    followings_count = profile.followees
+                    bio = profile.biography
+                    is_private = profile.is_private
+                    followed_by_viewer = profile.followed_by_viewer
+                    can_view = (not is_private) or followed_by_viewer
+                    posts_count = profile.mediacount
+                except Exception as e:
+                    _thread_local.in_partial_line = False
+                    error_msg = format_error_message(e)
+                    print(f"* Error: {error_msg}")
+                    print_cur_ts("\nTimestamp:\t\t\t\t")
+                    log_activity(f"Error: {error_msg}", user=user)
                 finally:
                     sys.stderr = _orig_stderr
-                # profile = instaloader.Profile.from_username(bot.context, user)
                 #jmk to filter network errors
-
-                time.sleep(NEXT_OPERATION_DELAY)
-                new_post = False
-                followers_count = profile.followers
-                followings_count = profile.followees
-                bio = profile.biography
-                is_private = profile.is_private
-                followed_by_viewer = profile.followed_by_viewer
-                can_view = (not is_private) or followed_by_viewer
-                posts_count = profile.mediacount
 
                 debug_print(f"Profile loaded: followers={followers_count}, following={followings_count}, posts={posts_count}")
                 debug_print(f"Previous load : followers={followers_old_count}, following={followings_old_count}, posts={posts_count_old}")
@@ -8155,13 +8164,18 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         sys.stderr = _FilteredStderr(_orig_stderr)
                         try:
                             profile = profile_from_username_resilient(bot, user)
+                            followings_count = profile.followees
+                            followers_count_reported = profile.followers
+                        except Exception as e:
+                            _thread_local.in_partial_line = False
+                            error_msg = format_error_message(e)
+                            print(f"* Error: {error_msg}")
+                            print_cur_ts("\nTimestamp:\t\t\t\t")
+                            log_activity(f"Error: {error_msg}", user=user)
                         finally:
                             sys.stderr = _orig_stderr
-                        # profile = instaloader.Profile.from_username(bot.context, user)
                         #jmk to filter network errors
 
-                        followings_count = profile.followees
-                        followers_count_reported = profile.followers
                         if not FOLLOWERS_CHURN_DETECTION:
                             show_follow_info(followers_count_reported, len(followers), followings_count, len(followings))
                         if not followings and followings_count > 0:
@@ -8300,13 +8314,18 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         sys.stderr = _FilteredStderr(_orig_stderr)
                         try:
                             profile = profile_from_username_resilient(bot, user)
+                            followers_count = profile.followers
+                            followings_count_reported = profile.followees
+                        except Exception as e:
+                            _thread_local.in_partial_line = False
+                            error_msg = format_error_message(e)
+                            print(f"* Error: {error_msg}")
+                            print_cur_ts("\nTimestamp:\t\t\t\t")
+                            log_activity(f"Error: {error_msg}", user=user)
                         finally:
                             sys.stderr = _orig_stderr
-                        # profile = instaloader.Profile.from_username(bot.context, user)
                         #jmk to filter network errors
 
-                        followers_count = profile.followers
-                        followings_count_reported = profile.followees
                         if not FOLLOWERS_CHURN_DETECTION:
                             show_follow_info(followers_count, len(followers), followings_count_reported, len(followings))
                         if not followers and followers_count > 0:
