@@ -981,7 +981,9 @@ class _FilteredStderr(io.TextIOBase):
     def __init__(self, original):
         self._original = original
     def write(self, s):
-        if s and "JSON Query to graphql/query" in s: #jmkdebug
+        if not s or not s.strip():
+            return len(s) if s else 0
+        if "JSON Query to graphql/query" in s:
             return len(s)
         return self._original.write(s)
     def flush(self):
