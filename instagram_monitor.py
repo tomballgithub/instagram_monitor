@@ -3807,6 +3807,46 @@ def refresh_proxy_if_needed(bot, user):
                 log_activity(f"Proxy refresh failed: {error_msg}", user=user, level='error')
 
 
+TPrivacyContent = TypeVar("TPrivacyContent")
+
+
+# Apply PRIVACY_SUBSTITIONS to any content type
+def apply_privacy_substitutions(content: TPrivacyContent) -> TPrivacyContent:
+    """
+    - Recurses into dict values and list items
+    - For strings, performs search/replace using PRIVACY_SUBSTITIONS
+    - Preserves dictionary keys to keep API object identity stable
+    - Ignores invalid substitution entries to avoid runtime crashes
+    - Non-string primitives are returned unchanged
+    """
+    global PRIVACY_SUBSTITIONS_INVALID_WARNED
+    if not PRIVACY_SUBSTITIONS:
+        return content
+    if isinstance(content, str):
+        content_str = content
+        for item in PRIVACY_SUBSTITIONS:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                if not PRIVACY_SUBSTITIONS_INVALID_WARNED:
+                    if sys.__stderr__ is not None:
+                        sys.__stderr__.write("* Warning: Ignoring invalid PRIVACY_SUBSTITIONS entry, expected (search, replace) with both values as strings\n")
+                    PRIVACY_SUBSTITIONS_INVALID_WARNED = True
+                continue
+            search, replace = item
+            if not isinstance(search, str) or not isinstance(replace, str) or not search:
+                if not PRIVACY_SUBSTITIONS_INVALID_WARNED:
+                    if sys.__stderr__ is not None:
+                        sys.__stderr__.write("* Warning: Ignoring invalid PRIVACY_SUBSTITIONS entry, expected non-empty string search and string replace values\n")
+                    PRIVACY_SUBSTITIONS_INVALID_WARNED = True
+                continue
+            content_str = content_str.replace(search, replace)
+        return cast(TPrivacyContent, content_str)
+    if isinstance(content, dict):
+        return cast(TPrivacyContent, {k: apply_privacy_substitutions(v) for k, v in content.items()})
+    if isinstance(content, list):
+        return cast(TPrivacyContent, [apply_privacy_substitutions(item) for item in content])
+    return content
+
+
 # Debug print helper - only prints if DEBUG_MODE is enabled
 def debug_print(message):
     if DEBUG_MODE:
