@@ -777,6 +777,7 @@ TIME_FORMAT_12H = False
 PRIVACY_SUBSTITIONS = []
 mode_of_the_tool = "Unknown"
 SKIP_WRAP_MESSAGES = False
+HIDE_403_ERRORS = False
 
 exec(CONFIG_BLOCK, globals())
 
@@ -986,7 +987,6 @@ except ImportError:
     FLASK_AVAILABLE = False
 
 
-#jmk for stderror workaround
 import io 
 class _FilteredStderr(io.TextIOBase):
     def __init__(self, original):
@@ -994,12 +994,13 @@ class _FilteredStderr(io.TextIOBase):
     def write(self, s):
         if not s or not s.strip():
             return len(s) if s else 0
-        if "JSON Query to graphql/query" in s:
-            return len(s)
+        if HIDE_403_ERRORS:
+            if "JSON Query to graphql/query" in s:
+                return len(s)
         return self._original.write(s)
     def flush(self):
         self._original.flush()
-#jmk for stderror workaround
+
 
 # Locates installed data files (wheel / pip)
 def _locate_installed_dist_file(target_filename: str) -> Optional[str]:
@@ -7044,9 +7045,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         log_activity(f"Loading profile: {user}", user=user)
         update_ui_data(targets={user: {'status': 'Loading Profile'}})
 
-        #jmk to filter network errors
-        _orig_stderr = sys.stderr
-        sys.stderr = _FilteredStderr(_orig_stderr)
+        if HIDE_403_ERRORS:
+            _orig_stderr = sys.stderr
+            sys.stderr = _FilteredStderr(_orig_stderr)
         try:
             profile = profile_from_username_resilient(bot, user)
 
@@ -7067,8 +7068,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             print_cur_ts("\nTimestamp:\t\t\t\t")
             log_activity(f"Error: {error_msg}", user=user)
         finally:
-            sys.stderr = _orig_stderr
-        #jmk to filter network errors
+            if HIDE_403_ERRORS:
+                sys.stderr = _orig_stderr
 
         followers_count = profile.followers
         followings_count = profile.followees
@@ -8079,9 +8080,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             debug_print(f"Fetching profile data from Instagram API...")
 
             try:
-                #jmk to filter network errors
-                _orig_stderr = sys.stderr
-                sys.stderr = _FilteredStderr(_orig_stderr)
+                if HIDE_403_ERRORS:
+                    _orig_stderr = sys.stderr
+                    sys.stderr = _FilteredStderr(_orig_stderr)
                 try:
                     profile = profile_from_username_resilient(bot, user)
                     time.sleep(NEXT_OPERATION_DELAY)
@@ -8100,8 +8101,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     print_cur_ts("\nTimestamp:\t\t\t\t")
                     log_activity(f"Error: {error_msg}", user=user)
                 finally:
-                    sys.stderr = _orig_stderr
-                #jmk to filter network errors
+                    if HIDE_403_ERRORS:
+                        sys.stderr = _orig_stderr
 
                 debug_print(f"Profile loaded: followers={followers_count}, following={followings_count}, posts={posts_count}")
                 debug_print(f"Previous load : followers={followers_old_count}, following={followings_old_count}, posts={posts_count_old}")
@@ -8358,9 +8359,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         log_activity(f"Finished downloading followings: {len(followings)}, fetched in {display_time(duration_dl)}", user=user)
                         # Refresh profile to get current reported counts for comparison
 
-                        #jmk to filter network errors
-                        _orig_stderr = sys.stderr
-                        sys.stderr = _FilteredStderr(_orig_stderr)
+                        if HIDE_403_ERRORS:
+                            _orig_stderr = sys.stderr
+                            sys.stderr = _FilteredStderr(_orig_stderr)
                         try:
                             profile = profile_from_username_resilient(bot, user)
                             followings_count = profile.followees
@@ -8372,8 +8373,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             print_cur_ts("\nTimestamp:\t\t\t\t")
                             log_activity(f"Error: {error_msg}", user=user)
                         finally:
-                            sys.stderr = _orig_stderr
-                        #jmk to filter network errors
+                            if HIDE_403_ERRORS:
+                                sys.stderr = _orig_stderr
 
                         if not FOLLOWERS_CHURN_DETECTION:
                             show_follow_info(followers_count_reported, len(followers), followings_count, len(followings))
@@ -8515,9 +8516,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         log_activity(f"Finished downloading followers: {len(followers)}, fetched in {display_time(duration_dl)}", user=user)
                         # Refresh profile to get current reported counts for comparison
                         
-                        #jmk to filter network errors
-                        _orig_stderr = sys.stderr
-                        sys.stderr = _FilteredStderr(_orig_stderr)
+                        if HIDE_403_ERRORS:
+                            _orig_stderr = sys.stderr
+                            sys.stderr = _FilteredStderr(_orig_stderr)
                         try:
                             profile = profile_from_username_resilient(bot, user)
                             followers_count = profile.followers
@@ -8529,8 +8530,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             print_cur_ts("\nTimestamp:\t\t\t\t")
                             log_activity(f"Error: {error_msg}", user=user)
                         finally:
-                            sys.stderr = _orig_stderr
-                        #jmk to filter network errors
+                            if HIDE_403_ERRORS:
+                                sys.stderr = _orig_stderr
 
                         if not FOLLOWERS_CHURN_DETECTION:
                             show_follow_info(followers_count, len(followers), followings_count_reported, len(followings))
