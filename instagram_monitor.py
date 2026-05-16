@@ -715,6 +715,7 @@ DAILY_HUMAN_HITS = 0
 MY_HASHTAGS = []
 BE_HUMAN_VERBOSE = False
 ENABLE_JITTER = False
+JITTER_VERBOSE = False
 FOLLOWERS_PER_BATCH = 0
 FOLLOWEES_PER_BATCH = 0
 FOLLOWER_LIMIT_TO_FETCH = 0
@@ -723,7 +724,6 @@ FOLLOWER_DELAY_PER_BATCH = 0
 FOLLOWEE_DELAY_PER_BATCH = 0
 ADVANCED_FOLLOWER_FETCH = False
 ADVANCED_FOLLOWEE_FETCH = False
-JITTER_VERBOSE = False
 LIVENESS_CHECK_INTERVAL = 0
 CHECK_INTERNET_URL = ""
 CHECK_INTERNET_TIMEOUT = 0
@@ -2647,6 +2647,7 @@ def log_activity(message, user=None, level='system', details=None, to_web=True):
     # Format message with user if provided
     display_message = f"[{user}] {message}" if user else message
     display_message = apply_privacy_substitutions(display_message)
+    debug_print(f"Dashboard Update: {display_message}")
 
     activity_item_rich = {
         'time': timestamp_str,
@@ -6044,12 +6045,9 @@ def setup_pbar(total_expected, title):
             # Non-Windows or fallback: shutil is reliable on Linux/Mac
             return shutil.get_terminal_size(fallback=(fallback, 24)).columns
 
-        # MAX_PBAR_WIDTH = 101 #jmk
-        MAX_PBAR_WIDTH = 150 #jmk
         actual_width = _get_actual_console_width()
-        debug_print(f"Actual terminal width is {actual_width}") #jmk
-        safe_ncols = max(20, min(actual_width - 1, MAX_PBAR_WIDTH)) #jmk
-        debug_print(f"Safe terminal width is {safe_ncols}") #jmk
+        safe_ncols = max(20, min(HORIZONTAL_LINE, actual_width - 1))
+        # print(f"DEBUG: terminal width is {safe_ncols}")
 
         custom_bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{unit}]"
         # Write progress bar updates to terminal only (not log file) to avoid cluttering logs
