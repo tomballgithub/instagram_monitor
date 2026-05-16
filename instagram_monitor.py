@@ -4870,6 +4870,16 @@ def import_session(cookiefile, sessionfile):
     else:
         instaloader.save_session_to_file()
 
+    # The sequence is: \033[ + {code} + m
+    RED = f"\033[{_STYLE_CODES['red']}m"
+    RESET = "\033[0m"
+
+    print("")
+    print(f"{RED}******************************************************************{RESET}")
+    print(f"{RED} Log out of Instagram in Firefox now to avoid duplicate activity. {RESET}")
+    print(f"{RED} Otherwise, the main account may get flagged by Instagram.        {RESET}")
+    print(f"{RED}******************************************************************{RESET}")
+
 
 # Finds an optional config file
 def find_config_file(cli_path=None):
