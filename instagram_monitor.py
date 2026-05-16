@@ -874,7 +874,17 @@ from datetime import datetime, timezone, timedelta
 from dateutil import relativedelta
 from dateutil.parser import isoparse, parse
 import calendar
-import niquests as req #jmk
+
+# swap niquests for requests AND patch instaloader
+#import requests as req
+import niquests as req
+import urllib3
+sys.modules["requests"] = req
+sys.modules["requests.exceptions"] = req.exceptions # instaloader
+sys.modules["requests.api"] = req.api # instaloader
+sys.modules["requests.utils"] = req.utils  # instaloader
+sys.modules["requests.packages"] = urllib3
+sys.modules["requests.packages.urllib3"] = urllib3
 import shutil
 import smtplib
 import ssl
