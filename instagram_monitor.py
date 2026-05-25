@@ -8543,13 +8543,13 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             m_body_html = f"Followings number changed by user <b>{user}</b> from <b>{followings_old_count}</b> to <b>{followings_count}</b> ({followings_diff_str})<br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
                         send_email(m_subject, m_body, m_body_html, SMTP_SSL)
 
-                    # Send webhook notification for followings change
-                    webhook_result = send_follower_change_webhook(
-                        user, "followings", followings_old_count, followings_count,
-                        added_followings_list_webhook, removed_followings_list_webhook
-                    )
-                    if webhook_result != 0 and DEBUG_MODE:
-                        print(f"* Warning: Webhook notification for followings change failed")
+                        # Send webhook notification for followings change
+                        webhook_result = send_follower_change_webhook(
+                            user, "followings", followings_old_count, followings_count,
+                            added_followings_list_webhook, removed_followings_list_webhook
+                        )
+                        if webhook_result != 0 and DEBUG_MODE:
+                            print(f"* Warning: Webhook notification for followings change failed")
 
                 followings_old_count = followings_count
 
@@ -8702,13 +8702,13 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             m_body_html = f"Followers number changed for user <b>{user}</b> from <b>{followers_old_count}</b> to <b>{followers_count}</b> ({followers_diff_str})<br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
                         send_email(m_subject, m_body, m_body_html, SMTP_SSL)
 
-                    # Send webhook notification for followers change
-                    webhook_result = send_follower_change_webhook(
-                        user, "followers", followers_old_count, followers_count,
-                        added_followers_list_webhook, removed_followers_list_webhook
-                    )
-                    if webhook_result != 0 and DEBUG_MODE:
-                        print(f"* Warning: Webhook notification for followers change failed")
+                        # Send webhook notification for followers change
+                        webhook_result = send_follower_change_webhook(
+                            user, "followers", followers_old_count, followers_count,
+                            added_followers_list_webhook, removed_followers_list_webhook
+                        )
+                        if webhook_result != 0 and DEBUG_MODE:
+                            print(f"* Warning: Webhook notification for followers change failed")
 
                 followers_old_count = followers_count
 
@@ -10558,6 +10558,7 @@ def run_main():
     print(f"* Browser user agent:\t\t\t{USER_AGENT}")
     print(f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}")
     print(f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}")
+    print(f"* Requests Library:\t\t\t" + ("Niquests" if USE_NIQUESTS else "Requests"))
     print(f"* Proxies:\t\t\t\t" + ("Enabled" if PROXY_ENABLED else "Disabled"))
     if PROXY_ENABLED:
         ipaddr = get_ip_address()
