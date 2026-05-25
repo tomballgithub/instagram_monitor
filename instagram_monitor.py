@@ -778,6 +778,7 @@ PRIVACY_SUBSTITIONS = []
 mode_of_the_tool = "Unknown"
 SKIP_WRAP_MESSAGES = False
 HIDE_403_ERRORS = False
+USE_NIQUESTS = False
 
 exec(CONFIG_BLOCK, globals())
 
@@ -879,9 +880,11 @@ from dateutil import relativedelta
 from dateutil.parser import isoparse, parse
 import calendar
 
-# swap niquests for requests AND patch instaloader
-#import requests as req
-import niquests as req
+# optional swap niquests of for requests for this script AND for instaloader
+if USE_NIQUESTS:
+    import niquests as req
+else:
+    import requests as req
 import urllib3
 sys.modules["requests"] = req
 sys.modules["requests.exceptions"] = req.exceptions # instaloader
