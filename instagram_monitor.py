@@ -3618,32 +3618,32 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
                         "inline": field.get("inline", False)
                     })
 
-            sanitized_image_url = apply_privacy_substitutions(str(image_url)) if image_url else ""
+            webhook_image_url = str(image_url) if image_url else ""
 
             # Load all possible items into payload for use in formatting the WEBHOOK_TEMPLATE and WEBHOOK_HEADERS
             payload = {
                 "title": title[:WEBHOOK_EMBED_TITLE_LIMIT] if title else "Instagram Monitor",  # type: ignore
                 "description": description[:WEBHOOK_EMBED_DESCRIPTION_LIMIT] if description else "",  # type: ignore
                 "version": VERSION,
-                "image_url": sanitized_image_url,
+                "image_url": webhook_image_url,
                 "fields": sanitized_fields,
                 "fields_str": "\n".join([f"{f['name']}: {f['value']}" for f in sanitized_fields]) if sanitized_fields else "",
                 "color": color,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
-            if sanitized_image_url:
-                payload["image"] = {"url": sanitized_image_url}
+            if webhook_image_url:
+                payload["image"] = {"url": webhook_image_url}
             elif local_image_file and os.path.isfile(local_image_file):
                 # If using local file, use attachment:// syntax
                 filename = os.path.basename(local_image_file)
                 payload["image"] = {"url": f"attachment://{filename}"}
 
             if WEBHOOK_USERNAME:
-                payload["username"] = apply_privacy_substitutions(str(WEBHOOK_USERNAME))
+                payload["username"] = WEBHOOK_USERNAME
 
             if WEBHOOK_AVATAR_URL:
-                payload["avatar_url"] = apply_privacy_substitutions(str(WEBHOOK_AVATAR_URL))
+                payload["avatar_url"] = WEBHOOK_AVATAR_URL
 
             # Apply optional transformations to payload, primarily the title and description
             for transform in WEBHOOK_TRANSFORMS:  # type: ignore
@@ -6318,19 +6318,19 @@ def instagram_wrap_request(orig_request):
             thread_wrapper_count = getattr(_thread_local, 'WRAPPER_COUNT', 0)
 
             # Determine which config vars to use based on fetch type and advanced fetch flags
-            fetch_type = getattr(_thread_local, 'FETCH_TYPE', 'none')
+            # If no FETCH_TYPE is set (e.g. a future setup_pbar caller that does not flag a fetch kind),
+            # fall back to non-batched defaults so the wrapper still updates the bar via tqdm's rate
+            fetch_type = getattr(_thread_local, 'FETCH_TYPE', None)
             if fetch_type == 'followee':
-                per_batch      = FOLLOWEES_PER_BATCH       if ADVANCED_FOLLOWEE_FETCH else 0
-                batch_delay    = FOLLOWEE_DELAY_PER_BATCH  if ADVANCED_FOLLOWEE_FETCH else 0
-                limit          = FOLLOWEE_LIMIT_TO_FETCH   if ADVANCED_FOLLOWEE_FETCH else 0
+                per_batch = FOLLOWEES_PER_BATCH if ADVANCED_FOLLOWEE_FETCH else 0
+                batch_delay = FOLLOWEE_DELAY_PER_BATCH if ADVANCED_FOLLOWEE_FETCH else 0
                 advanced_fetch = ADVANCED_FOLLOWEE_FETCH
             elif fetch_type == 'follower':
-                per_batch    = FOLLOWERS_PER_BATCH       if ADVANCED_FOLLOWER_FETCH else 0
-                batch_delay  = FOLLOWER_DELAY_PER_BATCH  if ADVANCED_FOLLOWER_FETCH else 0
-                limit        = FOLLOWER_LIMIT_TO_FETCH   if ADVANCED_FOLLOWER_FETCH else 0
+                per_batch = FOLLOWERS_PER_BATCH if ADVANCED_FOLLOWER_FETCH else 0
+                batch_delay = FOLLOWER_DELAY_PER_BATCH if ADVANCED_FOLLOWER_FETCH else 0
                 advanced_fetch = ADVANCED_FOLLOWER_FETCH
             else:
-                return
+                per_batch, batch_delay, advanced_fetch = 0, 0, False
             # Only process and count requests that are likely follower/following related
             # Check if response is successful and JSON before processing
             user_list = []
@@ -6408,10 +6408,7 @@ def instagram_wrap_request(orig_request):
                 else:
                     elapsed_str = f"{elapsed_m:.1f}"
 
-                # batch_info = f", fetch={limit}/{per_batch}/{batch_delay}s" if advanced_fetch else ""
-                # stats_string = f"{names_per_req:.1f} names/req, reqs={thread_wrapper_count:d}, mins={elapsed_m:.1f}, remain={rem_m:.1f}{batch_info}"
                 stats_string = f"{names_per_req:.1f} names/req, reqs={thread_wrapper_count:d}, mins={elapsed_str}, remain={remain_str}"
-                # debug_print(f"{fetched_so_far}/{d['total']} [{stats_string}]")
                 thread_pbar.unit = stats_string
                 thread_pbar.update(increment)
 
@@ -6818,6 +6815,7 @@ def simulate_human_actions(bot: instaloader.Instaloader, sleep_seconds: int) -> 
         print("* BeHuman: simulation stop")
 
 
+# Formats an advanced follower/followee fetch config as a human-readable description
 def build_follow_string(enabled, limit, batch, delay, alt_format=False):
     if enabled:
         if limit and not batch and not delay:
@@ -6831,7 +6829,7 @@ def build_follow_string(enabled, limit, batch, delay, alt_format=False):
     return follow_str
 
 
-def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit, fetch_delay, advanced_fetch, estimated_limit, user):
+def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit, fetch_delay, advanced_fetch, estimated_limit, user, stop_event=None):
     """Fetch usernames in batches using a fresh generator per call.
 
     Args:
@@ -6840,11 +6838,13 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
         total_limit:      Stop after this many total accounts (FOLLOWER_LIMIT_TO_FETCH / FOLLOWEE_LIMIT_TO_FETCH). 0 = no limit.
         fetch_delay:      Seconds to sleep between batches.
         advanced_fetch:   Indicates if advanced_fetch is enabled (valid configuration of above 3 items)
-        estimated_limit:  Estimated number of items to fetch. Used for messaging.
+        estimated_limit:  Estimated number of itesm to fetch. Used for messaging.
         user:             Instagram username, forwarded to log_activity.
+        stop_event:       Optional threading.Event from the caller. If set, the inter-batch wait is
+                          aborted and the function returns whatever has been fetched so far.
 
     Returns:
-        List of username strings.
+        List of username strings (may be partial if stop_event fired).
     """
     results = []
     gen = get_generator_fn()  # single generator — keeps cursor position across batches
@@ -6854,15 +6854,24 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
         msg = f"Fetching {build_follow_string(advanced_fetch, estimated_limit, max_per_batch, fetch_delay, alt_format=True)}"
         if thread_pbar:
             thread_pbar.write(f"* {msg}", file=thread_pbar.fp)
-        print(f"* {msg}") # if pbar, this will go to log, while the thread_pbar.write only goes to screen
+        print(f"* {msg}")  # if pbar, this will go to log, while the thread_pbar.write only goes to screen
         log_activity(msg, user=user)
 
     while True:
+        # Abort between batches if the caller (e.g. Ctrl-C, web-dashboard stop) requested shutdown
+        # Returns whatever has been fetched so far rather than None so the caller's len()/iteration is safe
+        if stop_event is not None and stop_event.is_set():
+            return results
+
         batch = []
         for f in gen:
             batch.append(f.username)
             if advanced_fetch and max_per_batch and (len(batch) >= max_per_batch):
                 break  # pause; generator retains its position
+            # Stop mid-batch if the overall total_limit would be exceeded, otherwise a per_batch
+            # larger than total_limit (e.g. limit=30, per_batch=50) over-fetches by a full batch
+            if advanced_fetch and total_limit and (len(results) + len(batch) >= total_limit):
+                break
 
         if not batch:
             break  # generator fully exhausted
@@ -6874,16 +6883,13 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
 
         # advanced fetching feature disabled or generator ran out mid-batch
         if not advanced_fetch or (max_per_batch and len(batch) < max_per_batch):
-            break  
+            break
 
         # advanced fetching feature enabled if here
         if fetch_delay:
-            # Use thread-local storage for multi-target safety
-            stop_event = threading.Event()
             # Interruptible wait (stop/recheck aware) similar to the main sleep loop
             sleep_remaining = fetch_delay
-            if thread_pbar:
-                batch_info_orig = thread_pbar.unit
+            batch_info_orig = thread_pbar.unit if thread_pbar else ""
             while sleep_remaining > 0:
                 if thread_pbar:
                     # need to remove part of string to make room, since entire PBAR needs to fit within HORIZONTAL_LINE width (safe_ncols)
@@ -6892,24 +6898,23 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
                     batch_info = re.sub(r" - PAUSED.*$", "", batch_info) + f" - PAUSED for {sleep_remaining}s"
                     thread_pbar.unit = batch_info
                     thread_pbar.refresh()
-                if stop_event and stop_event.is_set():
-                    return
-                # Allow Web Dashboard "recheck" to break the wait early (still hour-gated later)
+                if stop_event is not None and stop_event.is_set():
+                    return results
+                # If a Web Dashboard "recheck" is pending, shorten the current inter-batch wait so the
+                # in-progress fetch completes sooner. Do not consume the event here: the recheck applies
+                # to the next check cycle and is handled by the main loop after this fetch returns
+                recheck_pending = False
                 if WEB_DASHBOARD_ENABLED:
                     with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
                         if user in WEB_DASHBOARD_RECHECK_EVENTS and WEB_DASHBOARD_RECHECK_EVENTS[user].is_set():
-                            WEB_DASHBOARD_RECHECK_EVENTS[user].clear()
-                            manual_recheck_active = True
-                            manual_override_active = True
-                            log_activity("Manual recheck requested", user=user, level='system')
-                            update_ui_data(targets={user: {'status': 'Recheck requested'}})
-                            break
+                            recheck_pending = True
                     # Check for proxy changes from web dashboard
                     refresh_proxy_if_needed(bot, user)
+                if recheck_pending:
+                    break
 
                 wait_chunk = min(1, sleep_remaining)
-                # debug_print(wait_chunk)
-                if stop_event:
+                if stop_event is not None:
                     stop_event.wait(wait_chunk)
                 else:
                     time.sleep(wait_chunk)
@@ -7411,6 +7416,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 advanced_fetch=ADVANCED_FOLLOWER_FETCH,
                 estimated_limit=follower_limit,
                 user=user,
+                stop_event=stop_event,
             )
             _thread_local.FETCH_TYPE = None
             end_time_dl = time.time()
@@ -7558,6 +7564,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 advanced_fetch=ADVANCED_FOLLOWEE_FETCH,
                 estimated_limit=followee_limit,
                 user=user,
+                stop_event=stop_event,
             )
             _thread_local.FETCH_TYPE = None
             end_time_dl = time.time()
@@ -8448,6 +8455,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             advanced_fetch=ADVANCED_FOLLOWEE_FETCH,
                             estimated_limit=followee_limit,
                             user=user,
+                            stop_event=stop_event,
                         )
                         _thread_local.FETCH_TYPE = None
                         followings_to_save = []
@@ -8607,6 +8615,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             advanced_fetch=ADVANCED_FOLLOWER_FETCH,
                             estimated_limit=follower_limit,
                             user=user,
+                            stop_event=stop_event,
                         )
                         _thread_local.FETCH_TYPE = None
                         followers_to_save = []
@@ -10199,17 +10208,17 @@ def run_main():
 
     # Advanced Follower/Followee Fetching Settings
     if any([FOLLOWERS_PER_BATCH, FOLLOWER_LIMIT_TO_FETCH, FOLLOWER_DELAY_PER_BATCH]):
-        ADVANCED_FOLLOWER_FETCH = (FOLLOWERS_PER_BATCH and FOLLOWER_DELAY_PER_BATCH) or (FOLLOWER_LIMIT_TO_FETCH and not FOLLOWERS_PER_BATCH and not FOLLOWER_DELAY_PER_BATCH)
+        ADVANCED_FOLLOWER_FETCH = bool((FOLLOWERS_PER_BATCH and FOLLOWER_DELAY_PER_BATCH) or (FOLLOWER_LIMIT_TO_FETCH and not FOLLOWERS_PER_BATCH and not FOLLOWER_DELAY_PER_BATCH))
         if not ADVANCED_FOLLOWER_FETCH:
             print(f"* Error: Invalid configuration for advanced follower fetching: FOLLOWER_LIMIT_TO_FETCH: {FOLLOWER_LIMIT_TO_FETCH}, FOLLOWERS_PER_BATCH: {FOLLOWERS_PER_BATCH}, FOLLOWER_DELAY_PER_BATCH: {FOLLOWER_DELAY_PER_BATCH}")
             sys.exit(1)
 
     if any([FOLLOWEES_PER_BATCH, FOLLOWEE_LIMIT_TO_FETCH, FOLLOWEE_DELAY_PER_BATCH]):
-        ADVANCED_FOLLOWEE_FETCH = (FOLLOWEES_PER_BATCH and FOLLOWEE_DELAY_PER_BATCH) or (FOLLOWEE_LIMIT_TO_FETCH and not FOLLOWEES_PER_BATCH and not FOLLOWEE_DELAY_PER_BATCH)
+        ADVANCED_FOLLOWEE_FETCH = bool((FOLLOWEES_PER_BATCH and FOLLOWEE_DELAY_PER_BATCH) or (FOLLOWEE_LIMIT_TO_FETCH and not FOLLOWEES_PER_BATCH and not FOLLOWEE_DELAY_PER_BATCH))
         if not ADVANCED_FOLLOWEE_FETCH:
             print(f"* Error: Invalid configuration for advanced followee fetching: FOLLOWEE_LIMIT_TO_FETCH: {FOLLOWEE_LIMIT_TO_FETCH}, FOLLOWEES_PER_BATCH: {FOLLOWEES_PER_BATCH}, FOLLOWEE_DELAY_PER_BATCH: {FOLLOWEE_DELAY_PER_BATCH}")
             sys.exit(1)
-    
+
     # Handle new debug, dashboard, and webhook arguments
     if args.debug_mode is True:
         DEBUG_MODE = True
