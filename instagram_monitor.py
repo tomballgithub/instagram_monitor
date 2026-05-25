@@ -10585,6 +10585,7 @@ def run_main():
     print(f"* Browser user agent:\t\t\t{USER_AGENT}")
     print(f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}")
     print(f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}")
+    print(f"* Requests Library:\t\t\t" + ("Niquests" if USE_NIQUESTS else "Requests"))
     print(f"* Proxies:\t\t\t\t" + ("Enabled" if PROXY_ENABLED else "Disabled"))
     if PROXY_ENABLED:
         ipaddr = get_ip_address()
