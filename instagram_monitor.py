@@ -4922,10 +4922,10 @@ def import_session(cookiefile, sessionfile):
     RESET = "\033[0m"
 
     print("")
-    print(f"{RED}******************************************************************{RESET}")
-    print(f"{RED} Log out of Instagram in Firefox now to avoid duplicate activity. {RESET}")
-    print(f"{RED} Otherwise, the main account may get flagged by Instagram.        {RESET}")
-    print(f"{RED}******************************************************************{RESET}")
+    print(f"{RED}*********************************************************************{RESET}")
+    print(f"{RED} Clear Instagram cookies in Firefox now to avoid duplicate activity. {RESET}")
+    print(f"{RED} Otherwise, the main account may get flagged by Instagram.           {RESET}")
+    print(f"{RED}*********************************************************************{RESET}")
 
 
 # Finds an optional config file
