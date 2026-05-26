@@ -1003,7 +1003,7 @@ class _FilteredStderr(io.TextIOBase):
         if not s or not s.strip():
             return len(s) if s else 0
         if HIDE_403_ERRORS:
-            if "JSON Query to graphql/query" in s:
+            if "403" in s:
                 return len(s)
         return self._original.write(s)
     def flush(self):
