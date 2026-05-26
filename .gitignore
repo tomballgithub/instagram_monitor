@@ -215,3 +215,7 @@ tmp/
 *.csv
 *.env
 *Copy*.py
+
+# Jeoff
+new.py
+*.txt
