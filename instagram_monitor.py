@@ -7260,6 +7260,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
             if stop_event and stop_event.is_set():
                 return
+        else:
+            print_cur_ts("\nTimestamp:\t\t\t\t")
 
         if WEB_DASHBOARD_ENABLED:
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
