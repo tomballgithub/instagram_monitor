@@ -3129,6 +3129,10 @@ class Logger(object):
             if not (DASHBOARD_ENABLED and RICH_AVAILABLE):
                 # Suppress terminal writes only for the thread that currently owns a progress bar
                 if (getattr(_thread_local, 'pbar', None) is None) and not pbar:
+                    # If we just printed a partial line (no newline), add one before the debug message to avoid clobbering
+                    if getattr(_thread_local, 'in_partial_line', False):
+                        self.terminal.write("\n")
+                        setattr(_thread_local, 'in_partial_line', False)
                     self.terminal.write(colorized_message)
                     self.terminal.flush()
 
@@ -7133,8 +7137,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             sleep_remaining -= wait_chunk
 
         # Always print and log activity; Logger handles terminal suppression
-        _thread_local.in_partial_line = True
         print("- loading profile from username...", end=" ", flush=True)
+        _thread_local.in_partial_line = True
         log_activity(f"Loading profile: {user}", user=user)
         update_ui_data(targets={user: {'status': 'Loading Profile'}})
 
@@ -7170,8 +7174,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         # Commented out by #JMK
         # if not skip_session and can_view:
             # update_ui_data(targets={user: {'status': 'Fetching Reels'}})
-            # _thread_local.in_partial_line = True
             # print("- fetching reels count...", end=" ", flush=True)
+            # _thread_local.in_partial_line = True
             # reels_count = get_total_reels_count(user, bot, skip_session)
 
             # print("              OK")
@@ -7184,8 +7188,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             # else:
                 # has_story = False
         # elif bot.context.is_logged_in and followed_by_viewer:
-            # _thread_local.in_partial_line = True
             # print("- checking for stories...", end=" ", flush=True)
+            # _thread_local.in_partial_line = True
             # update_ui_data(targets={user: {'status': 'Checking Stories'}})
             # story = next(bot.get_stories(userids=[insta_userid]), None)
             # has_story = bool(story and story.itemcount)
@@ -7202,8 +7206,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         if bot.context.is_logged_in:
             # Always print and log activity; Logger handles terminal suppression
-            _thread_local.in_partial_line = True
             print("- loading own profile...", end=" ", flush=True)
+            _thread_local.in_partial_line = True
             me = instaloader.Profile.own_profile(bot.context)
             session_username = me.username
             print(f"               OK: {session_username}")
@@ -7217,10 +7221,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             session_username = None
 
     except Exception as e:
-        _thread_local.in_partial_line = False
         error_msg = format_error_message(e)
         print(f"* Error: {error_msg}")
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        _thread_local.in_partial_line = False
         log_activity(f"Error: {error_msg}", user=user)
 
         # Handle session recovery for automated checks/challenge errors
@@ -7260,6 +7263,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
             if stop_event and stop_event.is_set():
                 return
+        else:
+            print_cur_ts("\nTimestamp:\t\t\t\t")
 
         if WEB_DASHBOARD_ENABLED:
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
