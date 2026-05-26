@@ -7152,11 +7152,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             _thread_local.in_partial_line = False
             log_activity(f"Profile loaded: {insta_username}", user=user)
         except Exception as e:
-            _thread_local.in_partial_line = False
-            error_msg = format_error_message(e)
-            print(f"* Error: {error_msg}")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
-            log_activity(f"Error: {error_msg}", user=user)
+            raise  # raise to the normal catch. just needed this try/catch/finally to restore STDERR correctly
         finally:
             if HIDE_403_ERRORS:
                 sys.stderr = _orig_stderr
@@ -8195,11 +8191,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     can_view = (not is_private) or followed_by_viewer
                     posts_count = profile.mediacount
                 except Exception as e:
-                    _thread_local.in_partial_line = False
-                    error_msg = format_error_message(e)
-                    print(f"* Error: {error_msg}")
-                    print_cur_ts("\nTimestamp:\t\t\t\t")
-                    log_activity(f"Error: {error_msg}", user=user)
+                    raise  # raise to the normal catch. just needed this try/catch/finally to restore STDERR correctly
                 finally:
                     if HIDE_403_ERRORS:
                         sys.stderr = _orig_stderr
@@ -8476,11 +8468,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             followings_count = profile.followees
                             followers_count_reported = profile.followers
                         except Exception as e:
-                            _thread_local.in_partial_line = False
-                            error_msg = format_error_message(e)
-                            print(f"* Error: {error_msg}")
-                            print_cur_ts("\nTimestamp:\t\t\t\t")
-                            log_activity(f"Error: {error_msg}", user=user)
+                            raise  # raise to the normal catch. just needed this try/catch/finally to restore STDERR correctly
                         finally:
                             if HIDE_403_ERRORS:
                                 sys.stderr = _orig_stderr
@@ -8636,11 +8624,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             followers_count = profile.followers
                             followings_count_reported = profile.followees
                         except Exception as e:
-                            _thread_local.in_partial_line = False
-                            error_msg = format_error_message(e)
-                            print(f"* Error: {error_msg}")
-                            print_cur_ts("\nTimestamp:\t\t\t\t")
-                            log_activity(f"Error: {error_msg}", user=user)
+                            raise  # raise to the normal catch. just needed this try/catch/finally to restore STDERR correctly
                         finally:
                             if HIDE_403_ERRORS:
                                 sys.stderr = _orig_stderr
