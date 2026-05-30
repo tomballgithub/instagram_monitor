@@ -7187,36 +7187,33 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         followed_by_viewer = profile.followed_by_viewer
         can_view = (not is_private) or followed_by_viewer
         posts_count = profile.mediacount
-        # Commented out by #JMK
-        # if not skip_session and can_view:
-            # update_ui_data(targets={user: {'status': 'Fetching Reels'}})
-            # print("- fetching reels count...", end=" ", flush=True)
-            # _thread_local.in_partial_line = True
-            # reels_count = get_total_reels_count(user, bot, skip_session)
+        if not skip_session and can_view and not skip_getting_posts_details:
+            update_ui_data(targets={user: {'status': 'Fetching Reels'}})
+            print("- fetching reels count...", end=" ", flush=True)
+            _thread_local.in_partial_line = True
+            reels_count = get_total_reels_count(user, bot, skip_session)
 
-            # print("              OK")
-            # _thread_local.in_partial_line = False
-            # log_activity(f"Reels count fetched: {reels_count}", user=user)
+            print("              OK")
+            _thread_local.in_partial_line = False
+            log_activity(f"Reels count fetched: {reels_count}", user=user)
 
-        # if not is_private:
-            # if bot.context.is_logged_in:
-                # has_story = profile.has_public_story
-            # else:
-                # has_story = False
-        # elif bot.context.is_logged_in and followed_by_viewer:
-            # print("- checking for stories...", end=" ", flush=True)
-            # _thread_local.in_partial_line = True
-            # update_ui_data(targets={user: {'status': 'Checking Stories'}})
-            # story = next(bot.get_stories(userids=[insta_userid]), None)
-            # has_story = bool(story and story.itemcount)
+        if not is_private and not skip_getting_story_details:
+            if bot.context.is_logged_in:
+                has_story = profile.has_public_story
+            else:
+                has_story = False
+        elif bot.context.is_logged_in and followed_by_viewer and not skip_getting_story_details:
+            print("- checking for stories...", end=" ", flush=True)
+            _thread_local.in_partial_line = True
+            update_ui_data(targets={user: {'status': 'Checking Stories'}})
+            story = next(bot.get_stories(userids=[insta_userid]), None)
+            has_story = bool(story and story.itemcount)
 
-            # print("              OK")
-            # _thread_local.in_partial_line = False
-            # log_activity("Checked for stories", user=user)
-        # else:
-            # has_story = False
-        reels_count = 0 #jmk
-        has_story = False #jmk
+            print("              OK")
+            _thread_local.in_partial_line = False
+            log_activity("Checked for stories", user=user)
+        else:
+            has_story = False
 
         profile_image_url = profile.profile_pic_url_no_iphone
 
@@ -8227,22 +8224,20 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 debug_print(f"Previous load : followers={followers_old_count}, following={followings_old_count}, posts={posts_count_old}")
                 consecutive_main_errors = 0
 
-                # JMK commented out #jmk
-                # if not skip_session and can_view:
-                    # reels_count = get_total_reels_count(user, bot, skip_session)
-                    # debug_print(f"Reels count: {reels_count}")
+                if not skip_session and can_view and not skip_getting_posts_details:
+                    reels_count = get_total_reels_count(user, bot, skip_session)
+                    debug_print(f"Reels count: {reels_count}")
 
-                # if not is_private:
-                    # if bot.context.is_logged_in:
-                        # has_story = profile.has_public_story
-                    # else:
-                        # has_story = False
-                # elif bot.context.is_logged_in and followed_by_viewer:
-                    # story = next(bot.get_stories(userids=[insta_userid]), None)
-                    # has_story = bool(story and story.itemcount)
-                # else:
-                    # has_story = False
-                has_story = False #jmk
+                if not is_private and not skip_getting_story_details:
+                    if bot.context.is_logged_in:
+                        has_story = profile.has_public_story
+                    else:
+                        has_story = False
+                elif bot.context.is_logged_in and followed_by_viewer and not skip_getting_story_details:
+                    story = next(bot.get_stories(userids=[insta_userid]), None)
+                    has_story = bool(story and story.itemcount)
+                else:
+                    has_story = False
 
                 debug_print(f"Story available: {has_story}")
 
