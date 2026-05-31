@@ -223,6 +223,9 @@ ENABLE_JITTER = False
 # Set to True to enable verbose output for HTTP jitter/back-off wrappers
 JITTER_VERBOSE = False
 
+# Set to True to skip the per-request WRAP-REQ/WRAP-SEND log lines from the HTTP jitter/back-off wrappers
+# These can be overwhelming in debug or jitter-verbose mode and are not needed in most cases
+SKIP_WRAP_MESSAGES = False
 # Optional Follower and Followee Adjustments
 #
 # This allows control of the fetching of followers and followees, which may be beneficial in avoiding account flagging by Instagram.
@@ -716,6 +719,7 @@ MY_HASHTAGS = []
 BE_HUMAN_VERBOSE = False
 ENABLE_JITTER = False
 JITTER_VERBOSE = False
+SKIP_WRAP_MESSAGES = False
 FOLLOWERS_PER_BATCH = 0
 FOLLOWEES_PER_BATCH = 0
 FOLLOWER_LIMIT_TO_FETCH = 0
@@ -788,8 +792,8 @@ DEFAULT_CONFIG_FILENAME = "instagram_monitor.conf"
 # List of secret keys to load from env/config
 SECRET_KEYS = ("SESSION_PASSWORD", "SMTP_PASSWORD", "WEBHOOK_URL", "PROXY_URL")
 
-# List of error messages indicating an Instagram has been flagged for 'automation' or 'botting'
-FLAGGED_TRIGGERS = ("detected automated checks", "ProfileNotExistsException", "cannot access local variable", "checkpoint_required")
+# List of error substrings that unambiguously indicate the session account or IP has been flagged (challenge/checkpoint/shadowban)
+FLAGGED_TRIGGERS = ("detected automated checks", "checkpoint_required")
 
 # Default value for network-related timeouts in functions
 FUNCTION_TIMEOUT = 15
@@ -3755,11 +3759,21 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
     return 1
 
 
+# Sleeps for the given seconds but returns True early if stop_event becomes set
+def interruptible_sleep(seconds, stop_event=None):
+    if stop_event is None:
+        time.sleep(seconds)
+        return False
+    return stop_event.wait(seconds)
+
+
 # Fetches the current outbound IP via IP_ADDRESS_URL, tolerating JSON and plain-text responses
-def get_ip_address(max_retries=5, timeout=10, retry_delay=5, long_retry=120, long_retry_attempts=3):
+def get_ip_address(max_retries=5, timeout=10, retry_delay=5, long_retry=120, long_retry_attempts=3, stop_event=None):
     last_err = None
     for long_attempt in range(1, long_retry_attempts + 1):
         for attempt in range(1, max_retries + 1):
+            if stop_event is not None and stop_event.is_set():
+                return f"(unavailable: {format_error_message(last_err) if last_err else 'stopped'})"
             try:
                 ip_response = req.get(IP_ADDRESS_URL, timeout=timeout, verify=get_proxies_ssl(), proxies=get_proxies())
                 ip_response.raise_for_status()
@@ -3778,15 +3792,14 @@ def get_ip_address(max_retries=5, timeout=10, retry_delay=5, long_retry=120, lon
                 raise ValueError(f"empty response body from {IP_ADDRESS_URL}")
             except Exception as e:
                 last_err = e
-                if attempt < max_retries:
-                    time.sleep(retry_delay)
-                else:
-                    debug_print(f"get_ip_address failed after {max_retries} attempts: {e}")
+                if attempt < max_retries and interruptible_sleep(retry_delay, stop_event):
+                    return f"(unavailable: {format_error_message(last_err)})"
         if long_attempt < long_retry_attempts:
-            debug_print(f"get_ip_address retrying in {long_retry} seconds")
-            time.sleep(long_retry)
+            debug_print(f"get_ip_address: all {max_retries} attempts failed in loop {long_attempt}/{long_retry_attempts}, retrying in {long_retry} seconds: {last_err}")
+            if interruptible_sleep(long_retry, stop_event):
+                return f"(unavailable: {format_error_message(last_err) if last_err else 'stopped'})"
         else:
-            debug_print(f"get_ip_address failed after {long_retry_attempts} loops")
+            debug_print(f"get_ip_address failed after {long_retry_attempts} loops of {max_retries} attempts: {last_err}")
     return f"(unavailable: {format_error_message(last_err) if last_err else 'unknown error'})"
 
 
@@ -4782,7 +4795,6 @@ def check_posts_counts(user, posts_count, posts_count_old, r_sleep_time):
             send_email(m_subject, m_body, m_body_html, SMTP_SSL)
 
         # Send webhook notification for posts count change
-
         if posts_count is not None and posts_count_old is not None:
             diff = posts_count - posts_count_old
             diff_str = f" ({'+' if diff > 0 else ''}{diff})"
@@ -4791,7 +4803,7 @@ def check_posts_counts(user, posts_count, posts_count_old, r_sleep_time):
 
         send_webhook(
             f"📮 {user} Posts Count Changed",
-            f"User **{user}** posts count changed from **{posts_count_old}** to **{posts_count}** {diff_str}",
+            f"User **{user}** posts count changed from **{posts_count_old}** to **{posts_count}**{diff_str}",
             color=0x34495e,  # Dark Blue
             notification_type="status"
         )
@@ -4959,14 +4971,15 @@ def import_session(cookiefile, sessionfile):
     else:
         instaloader.save_session_to_file()
 
-    # The sequence is: \033[ + {code} + m
-    RED = f"\033[{_STYLE_CODES['red']}m"
-    RESET = "\033[0m"
+    # Emit the warning in red only when colour output is enabled and supported, otherwise plain text
+    RED = f"\033[{_STYLE_CODES['red']}m" if COLOR_ENABLED else ""
+    RESET = ANSI_RESET if COLOR_ENABLED else ""
 
     print("")
     print(f"{RED}*********************************************************************{RESET}")
-    print(f"{RED} Clear Instagram cookies in Firefox now to avoid duplicate activity. {RESET}")
-    print(f"{RED} Otherwise, the session account may get flagged by Instagram.        {RESET}")
+    print(f"{RED} Do not use Instagram in Firefox while the script is running.         {RESET}")
+    print(f"{RED} Simultaneous browser and tool activity can get the account flagged.  {RESET}")
+    print(f"{RED} Tip: you might want to clear Instagram cookies in Firefox now.       {RESET}")
     print(f"{RED}*********************************************************************{RESET}")
 
 
@@ -6619,7 +6632,6 @@ def sleep_message(sleeptime, user=None):
 def format_error_message(e: Exception) -> str:
     error_str = str(e)
     error_type = type(e).__name__
-    # debug_print(f"Formatting error message for {error_type}: {error_str}")
 
     # Check for KeyError related to 'data' key - indicates Instagram challenge/shadow ban
     if error_type == "KeyError" and ("'data'" in error_str or '"data"' in error_str or error_str == "data"):
@@ -7244,7 +7256,6 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
             update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
             print(f"* Error: {err_str}")
-            
             # Pause all other threads once the session account is flagged.
             if WEB_DASHBOARD_ENABLED or DASHBOARD_ENABLED:
                 for other_user in list(WEB_DASHBOARD_STOP_EVENTS.keys()):
@@ -7254,17 +7265,17 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         stop_monitoring_for_target(other_user)
                         update_ui_data(targets={other_user: {'status': f'Paused: {err_str}'}})
                 # Update next_check status for this thread
-                NEXT_CHECK_TIME = None  
+                NEXT_CHECK_TIME = None
                 NEXT_CHECK_DISPLAY = "Paused"
                 update_check_times(next_time="Paused", user=user, increment_count=False)
-                # Pause this thread also
                 log_activity("Stopping monitoring", user=user)
-                print_cur_ts("\nTimestamp:\t\t\t\t")
-            else:
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts("\nTimestamp:\t\t\t\t")
+
+            # Without the Web Dashboard there is no in-place session recovery so exit since the flagged session is dead for every target
+            if not WEB_DASHBOARD_ENABLED:
                 signal_handler(signal.SIGINT, None, message='')
 
-            # Wait for session refresh or stop event
+            # Web Dashboard can re-import a session and resume, so wait for that or a stop event
             if WEB_DASHBOARD_ENABLED:
                 while not (stop_event and stop_event.is_set()):
                     if SESSION_REFRESHED_EVENT.wait(timeout=1.0):
@@ -8094,7 +8105,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
     # Show proxy IP at per-user startup only in verbose/debug (the run_main banner already shows it once)
     if PROXY_ENABLED and (VERBOSE_MODE or DEBUG_MODE):
-        ipaddr = get_ip_address()
+        ipaddr = get_ip_address(stop_event=stop_event)
         print(f"* Proxy IP address is {ipaddr}")
 
     # Monitoring active message
@@ -8184,7 +8195,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         # Debug/Verbose: show check start
         ip_str = ""
         if PROXY_ENABLED and (VERBOSE_MODE or DEBUG_MODE):
-            ipaddr = get_ip_address()
+            ipaddr = get_ip_address(stop_event=stop_event)
             ip_str = f" with proxy IP address of {ipaddr}"
         if VERBOSE_MODE:
             print(f"* Starting check #{CHECK_COUNT} for {user} ...{ip_str}")
@@ -8330,11 +8341,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 # Handle session recovery for automated checks/challenge errors
                 if any(t in error_msg for t in FLAGGED_TRIGGERS):
                     err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
-                    for i in range(50):
-                        log_activity(f"({i}) - {err_str}", user=user)
                     update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
                     print(f"* Error: {err_str}")
-                    
+
                     # Pause all other threads once the session account is flagged.
                     if WEB_DASHBOARD_ENABLED or DASHBOARD_ENABLED:
                         for other_user in list(WEB_DASHBOARD_STOP_EVENTS.keys()):
@@ -8344,17 +8353,17 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                                 stop_monitoring_for_target(other_user)
                                 update_ui_data(targets={other_user: {'status': f'Paused: {err_str}'}})
                         # Update next_check status for this thread
-                        NEXT_CHECK_TIME = None  
+                        NEXT_CHECK_TIME = None
                         NEXT_CHECK_DISPLAY = "Paused"
                         update_check_times(next_time="Paused", user=user, increment_count=False)
-                        # Pause this thread also
                         log_activity("Stopping monitoring", user=user)
-                        print_cur_ts("\nTimestamp:\t\t\t\t")
-                    else:
-                        print_cur_ts("\nTimestamp:\t\t\t\t")
+                    print_cur_ts("\nTimestamp:\t\t\t\t")
+
+                    # Without the Web Dashboard there is no in-place session recovery so exit since the flagged session is dead for every target
+                    if not WEB_DASHBOARD_ENABLED:
                         signal_handler(signal.SIGINT, None, message='')
 
-                    # Wait for session refresh or stop event
+                    # Web Dashboard can re-import a session and resume, so wait for that or a stop event
                     while not (stop_event and stop_event.is_set()):
                         if SESSION_REFRESHED_EVENT.wait(timeout=1.0):
                             # Session refreshed!
@@ -8590,7 +8599,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             m_body_html = f"Followings number changed by user <b>{user}</b> from <b>{followings_old_count}</b> to <b>{followings_count}</b> ({followings_diff_str})<br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
                         send_email(m_subject, m_body, m_body_html, SMTP_SSL)
 
-                        # Send webhook notification for followings change
+                    # Send webhook notification for followings change (independent of email notifications) only if something changed
+                    if followings_count != followings_old_count or added_followings_list or removed_followings_list:
                         webhook_result = send_follower_change_webhook(
                             user, "followings", followings_old_count, followings_count,
                             added_followings_list_webhook, removed_followings_list_webhook
@@ -8746,7 +8756,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             m_body_html = f"Followers number changed for user <b>{user}</b> from <b>{followers_old_count}</b> to <b>{followers_count}</b> ({followers_diff_str})<br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
                         send_email(m_subject, m_body, m_body_html, SMTP_SSL)
 
-                        # Send webhook notification for followers change
+                    # Send webhook notification for followers change (independent of email notifications) only if something changed
+                    if followers_count != followers_old_count or added_followers_list or removed_followers_list:
                         webhook_result = send_follower_change_webhook(
                             user, "followers", followers_old_count, followers_count,
                             added_followers_list_webhook, removed_followers_list_webhook
@@ -10965,7 +10976,7 @@ def run_main():
             finally:
                 # next code line added per Claude to fix 'deadlock' in multi-threaded mode when an account gets flagged and goes idle
                 # reason: loading_events never signaled on early return (note: event.set() is idempotent so calling it twice is harmless)
-                loading_events[idx + 1].set()  
+                loading_events[idx + 1].set()
                 with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
                     if u in WEB_DASHBOARD_RECHECK_EVENTS:
                         del WEB_DASHBOARD_RECHECK_EVENTS[u]
