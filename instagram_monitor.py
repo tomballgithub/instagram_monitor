@@ -254,9 +254,9 @@ FOLLOWEE_DELAY_PER_BATCH = 0
 # Provide a list of (search, replace) tuples. Any search term will be substituted with the replace term.
 #
 # Example:
-# PRIVACY_SUBSTITIONS = [ ("a.username", "XXX"), ("sdfsdf747475475", "Bobby") ]
+# PRIVACY_SUBSTITUTIONS = [ ("a.username", "XXX"), ("sdfsdf747475475", "Bobby") ]
 #
-PRIVACY_SUBSTITIONS = [ ]
+PRIVACY_SUBSTITUTIONS = [ ]
 
 # Optional: Enable proxy support for networking traffic
 #
@@ -779,7 +779,7 @@ DASHBOARD_SHOW_CHECK_SECONDS = True
 THUMBNAILS_FORCED_BY_WEB = False
 FOLLOWERS_CHURN_DETECTION = False
 TIME_FORMAT_12H = False
-PRIVACY_SUBSTITIONS = []
+PRIVACY_SUBSTITUTIONS = []
 mode_of_the_tool = "Unknown"
 SKIP_WRAP_MESSAGES = False
 HIDE_403_ERRORS = False
@@ -796,6 +796,15 @@ SECRET_KEYS = ("SESSION_PASSWORD", "SMTP_PASSWORD", "WEBHOOK_URL", "PROXY_URL")
 # List of error substrings that unambiguously indicate the session account or IP has been flagged (challenge/checkpoint/shadowban)
 FLAGGED_TRIGGERS = ("detected automated checks", "checkpoint_required")
 
+# Error substrings meaning a profile could not be found, which is ambiguous between a deleted/renamed target and a flagged session
+PROFILE_NOT_FOUND_TRIGGERS = ("ProfileNotExistsException",)
+
+# Canonical always-present public account used to probe whether the session/IP is flagged rather than a target being genuinely gone
+FLAGGED_PROBE_USERNAME = "instagram"
+
+# Seconds to reuse a flag-probe verdict so simultaneous target failures do not each hit the network
+FLAGGED_PROBE_TTL = 300
+
 # Default value for network-related timeouts in functions
 FUNCTION_TIMEOUT = 15
 
@@ -805,7 +814,7 @@ LIVENESS_CHECK_COUNTER = 0
 stdout_bck = None
 last_output = []
 csvfieldnames = ['Date', 'Type', 'Old', 'New']
-PRIVACY_SUBSTITIONS_INVALID_WARNED = False
+PRIVACY_SUBSTITUTIONS_INVALID_WARNED = False
 
 imgcat_exe = ""
 
@@ -933,6 +942,8 @@ import hashlib
 WEB_DASHBOARD_DATA_LOCK = threading.RLock()
 DASHBOARD_DATA_LOCK = threading.RLock()
 SESSION_REFRESHED_EVENT = threading.Event()  # Signals monitoring threads to reload session
+FLAGGED_PROBE_LOCK = threading.Lock()  # Serializes and dedupes flag-probe network calls
+FLAGGED_PROBE_CACHE = {'ts': 0.0, 'flagged': False}  # Cached flag-probe verdict with its timestamp
 PROXY_REFRESH_VERSION = 0
 PROXY_REFRESH_LOCK = threading.Lock()
 
@@ -949,6 +960,51 @@ try:
     from instaloader import ConnectionException, Instaloader
 except ModuleNotFoundError:
     raise SystemExit("Error: Couldn't find the instaloader library !\n\nTo install it, run:\n    pip3 install instaloader\n\nOnce installed, re-run this tool. For more help, visit:\nhttps://instaloader.github.io/")
+
+# Instaloader 4.15.1 profile metadata GraphQL broke after Instagram API changes (May 2026).
+# Patch doc_id/variables until upstream ships the fix: https://github.com/instaloader/instaloader/issues/2695
+# Mirrors instaloader PR #2696. Self-deactivating: once instaloader ships the fixed doc_id the
+# stale one no longer appears, so the rewrite below never fires and becomes a transparent no-op.
+_INSTALOADER_GRAPHQL_PROFILE_PATCH_APPLIED = False
+
+
+def _apply_instaloader_graphql_profile_patch() -> None:
+    """Monkey-patch Instaloader profile metadata GraphQL query (no site-packages edit)."""
+    global _INSTALOADER_GRAPHQL_PROFILE_PATCH_APPLIED
+    if _INSTALOADER_GRAPHQL_PROFILE_PATCH_APPLIED:
+        return
+
+    try:
+        from instaloader.instaloadercontext import InstaloaderContext
+    except ImportError:
+        return
+
+    # A future instaloader may rename or drop this method (e.g. migrate to /api/graphql); skip cleanly if so.
+    original = getattr(InstaloaderContext, "doc_id_graphql_query", None)
+    if original is None:
+        _INSTALOADER_GRAPHQL_PROFILE_PATCH_APPLIED = True
+        return
+
+    stale_doc_id = "25980296051578533"
+    fixed_doc_id = "27937681195819736"
+    extra_vars = {
+        "__relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider": False,
+        "enable_integrity_filters": True,
+    }
+
+    def _patched_doc_id_graphql_query(self, doc_id, variables, referer=None):  # type: ignore[no-untyped-def]
+        if str(doc_id) == stale_doc_id:
+            doc_id = fixed_doc_id
+            variables = {**(variables or {}), **extra_vars}
+            if DEBUG_MODE:
+                debug_print("instaloader profile metadata doc_id patch fired (stale doc_id rewritten)")
+        return original(self, doc_id, variables, referer)
+
+    InstaloaderContext.doc_id_graphql_query = _patched_doc_id_graphql_query  # type: ignore[method-assign]
+    _INSTALOADER_GRAPHQL_PROFILE_PATCH_APPLIED = True
+
+
+_apply_instaloader_graphql_profile_patch()
 
 from instaloader.exceptions import PrivateProfileNotFollowedException
 from html import escape
@@ -1459,8 +1515,12 @@ def create_web_dashboard_app():
                 data = apply_privacy_substitutions(data)  # substitute everything else
                 substituted_targets = {}
                 for username, t_data in raw_targets.items():
-                    substituted_t_data = apply_privacy_substitutions(t_data) if isinstance(t_data, dict) else t_data
-                    substituted_t_data['display_name'] = apply_privacy_substitutions(username)
+                    if isinstance(t_data, dict):
+                        substituted_t_data = apply_privacy_substitutions(t_data)
+                        substituted_t_data['display_name'] = apply_privacy_substitutions(username)
+                    else:
+                        # Non-dict target payload: pass through unchanged, can't attach display_name
+                        substituted_t_data = t_data
                     substituted_targets[username] = substituted_t_data
                 data['targets'] = substituted_targets
             else:
@@ -2608,7 +2668,6 @@ def update_ui_data(targets=None, config=None, check_count=None, last_check=None,
                             tgt_parts.append(f"session={s}")
                 parts.append(f"[{', '.join(tgt_parts)}]")
         if parts:
-            parts = apply_privacy_substitutions(parts)
             debug_print(f"UI Data Update: {', '.join(parts)}")
     if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
         if DASHBOARD_ENABLED:
@@ -3868,33 +3927,35 @@ def refresh_proxy_if_needed(bot, user):
 TPrivacyContent = TypeVar("TPrivacyContent")
 
 
-# Apply PRIVACY_SUBSTITIONS to any content type
+# Apply PRIVACY_SUBSTITUTIONS to any content type
 def apply_privacy_substitutions(content: TPrivacyContent) -> TPrivacyContent:
     """
     - Recurses into dict values and list items
-    - For strings, performs search/replace using PRIVACY_SUBSTITIONS
-    - Preserves dictionary keys to keep API object identity stable
+    - For strings, performs search/replace using PRIVACY_SUBSTITUTIONS
+    - Preserves dict keys so JSON and object keys stay stable for API
+      consumers. Callers that display a key (e.g. terminal target tables)
+      must substitute it explicitly at the point of display
     - Ignores invalid substitution entries to avoid runtime crashes
     - Non-string primitives are returned unchanged
     """
-    global PRIVACY_SUBSTITIONS_INVALID_WARNED
-    if not PRIVACY_SUBSTITIONS:
+    global PRIVACY_SUBSTITUTIONS_INVALID_WARNED
+    if not PRIVACY_SUBSTITUTIONS:
         return content
     if isinstance(content, str):
         content_str = content
-        for item in PRIVACY_SUBSTITIONS:
+        for item in PRIVACY_SUBSTITUTIONS:
             if not isinstance(item, (list, tuple)) or len(item) != 2:
-                if not PRIVACY_SUBSTITIONS_INVALID_WARNED:
+                if not PRIVACY_SUBSTITUTIONS_INVALID_WARNED:
                     if sys.__stderr__ is not None:
-                        sys.__stderr__.write("* Warning: Ignoring invalid PRIVACY_SUBSTITIONS entry, expected (search, replace) with both values as strings\n")
-                    PRIVACY_SUBSTITIONS_INVALID_WARNED = True
+                        sys.__stderr__.write("* Warning: Ignoring invalid PRIVACY_SUBSTITUTIONS entry, expected (search, replace) with both values as strings\n")
+                    PRIVACY_SUBSTITUTIONS_INVALID_WARNED = True
                 continue
             search, replace = item
             if not isinstance(search, str) or not isinstance(replace, str) or not search:
-                if not PRIVACY_SUBSTITIONS_INVALID_WARNED:
+                if not PRIVACY_SUBSTITUTIONS_INVALID_WARNED:
                     if sys.__stderr__ is not None:
-                        sys.__stderr__.write("* Warning: Ignoring invalid PRIVACY_SUBSTITIONS entry, expected non-empty string search and string replace values\n")
-                    PRIVACY_SUBSTITIONS_INVALID_WARNED = True
+                        sys.__stderr__.write("* Warning: Ignoring invalid PRIVACY_SUBSTITUTIONS entry, expected non-empty string search and string replace values\n")
+                    PRIVACY_SUBSTITUTIONS_INVALID_WARNED = True
                 continue
             content_str = content_str.replace(search, replace)
         return cast(TPrivacyContent, content_str)
@@ -5512,6 +5573,8 @@ def generate_dashboard_targets_table(target_data):
 
     now_ts = datetime.now().timestamp()
     for target, data in target_data.items():
+        # Substitute the displayed target name here. Dict keys stay real upstream so API consumers keep stable keys
+        display_target = apply_privacy_substitutions(target)
         status_val = data.get('status', 'Unknown')
         status_style = "green" if status_val == 'OK' else "yellow" if status_val in ('Checking', 'Starting', 'Loading Profile', 'Fetching Reels') else "blue"
 
@@ -5539,7 +5602,7 @@ def generate_dashboard_targets_table(target_data):
             next_chk = get_squeezed_date_from_ts(next_ts, show_seconds=DASHBOARD_SHOW_CHECK_SECONDS)
 
         table.add_row(
-            target,
+            display_target,
             visibility,
             str(data.get('followers') if data.get('followers') is not None else '-'),
             str(data.get('following') if data.get('following') is not None else '-'),
@@ -5628,11 +5691,12 @@ def generate_user_dashboard(target_data):
         return ts_val if isinstance(ts_val, (int, float)) else 0
 
     def append_update_entry(update, fallback_user):
-        user_label = update.get('user') or fallback_user or "Unknown"
+        # Substitute display-only fields (name, caption) but keep file paths and URLs real so they stay locatable/clickable
+        user_label = apply_privacy_substitutions(update.get('user') or fallback_user or "Unknown")
         last_fetched_text.append(f"User: {user_label}\n", style="bold green")
         last_fetched_text.append(f"Type: {update.get('type', 'Unknown')}\n", style="bold cyan")
         last_fetched_text.append(f"Date: {update.get('timestamp', '-')}\n", style="dim")
-        caption = update.get('caption', '')
+        caption = apply_privacy_substitutions(update.get('caption', ''))
         if caption:
             caption = caption.replace('\n', ' ')
             if len(caption) > 60:
@@ -6641,6 +6705,47 @@ def format_error_message(e: Exception) -> str:
     return f"{error_type}: {error_str}"
 
 
+# Returns True when the formatted error indicates a profile could not be found (deleted/renamed target or a flagged session masking every profile)
+def is_profile_not_found_error(error_msg):
+    return any(t in error_msg for t in PROFILE_NOT_FOUND_TRIGGERS)
+
+
+# Performs a single probe of a canonical always-present public account and returns True if it also looks missing or blocked
+def _run_flagged_probe(bot):
+    try:
+        profile_from_username_resilient(bot, FLAGGED_PROBE_USERNAME)
+        return False
+    except Exception as probe_err:
+        probe_msg = format_error_message(probe_err)
+        return is_profile_not_found_error(probe_msg) or any(t in probe_msg for t in FLAGGED_TRIGGERS)
+
+
+# Probes whether the session/IP is flagged versus a single target being gone, caching the verdict briefly to avoid a probe storm
+def probe_session_flagged(bot):
+    if bot is None:
+        return False
+    now = time.time()
+    with FLAGGED_PROBE_LOCK:
+        last_ts = FLAGGED_PROBE_CACHE['ts']
+        if last_ts and (now - last_ts) < FLAGGED_PROBE_TTL:
+            return FLAGGED_PROBE_CACHE['flagged']
+        flagged = _run_flagged_probe(bot)
+        FLAGGED_PROBE_CACHE['ts'] = time.time()
+        FLAGGED_PROBE_CACHE['flagged'] = flagged
+        verdict = "also unresolved, treating session as flagged" if flagged else "resolved, treating target as genuinely gone"
+        debug_print(f"Flag probe: canonical account '{FLAGGED_PROBE_USERNAME}' {verdict}")
+        return flagged
+
+
+# Returns True when an error indicates the session account or IP itself is flagged rather than a single target being gone
+def is_session_flagged(error_msg, bot):
+    if any(t in error_msg for t in FLAGGED_TRIGGERS):
+        return True
+    if is_profile_not_found_error(error_msg):
+        return probe_session_flagged(bot)
+    return False
+
+
 # Returns unique, validated hours (0-23) from the configured ranges
 def hours_to_check():
     # Notes:
@@ -7008,6 +7113,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     stories_count = 0
     stories_old_count = 0
     reels_count = 0
+    bot = None
 
     try:
         # Apply request monkey-patch for jitter or serialized HTTP mode even when no progress bar is created
@@ -7253,7 +7359,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         log_activity(f"Error: {error_msg}", user=user)
 
         # Handle session recovery for automated checks/challenge errors
-        if any(t in error_msg for t in FLAGGED_TRIGGERS):
+        if is_session_flagged(error_msg, bot):
             err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
             update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
             print(f"* Error: {err_str}")
@@ -8340,7 +8446,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         )
 
                 # Handle session recovery for automated checks/challenge errors
-                if any(t in error_msg for t in FLAGGED_TRIGGERS):
+                if is_session_flagged(error_msg, bot):
                     err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
                     update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
                     print(f"* Error: {err_str}")
