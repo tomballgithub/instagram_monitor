@@ -781,7 +781,6 @@ FOLLOWERS_CHURN_DETECTION = False
 TIME_FORMAT_12H = False
 PRIVACY_SUBSTITUTIONS = []
 mode_of_the_tool = "Unknown"
-SKIP_WRAP_MESSAGES = False
 HIDE_403_ERRORS = False
 USE_NIQUESTS = False
 
@@ -827,7 +826,6 @@ nl_ch = "\n"
 START_TIME = 0
 NAME_COUNT = 1
 WRAPPER_COUNT = 0
-FETCH_TYPE = None
 pbar = None
 
 # Global tracking for last/next check times
@@ -2906,6 +2904,7 @@ _PROXY_IP_RE = re.compile(r"proxy IP address of [\d.]+", re.IGNORECASE)
 _IP_ADDRESS_RE = re.compile(r"(?<!://)\b(\d{1,3}\.){3}\d{1,3}\b(?!:\d+/?)")
 _ACCOUNT_LIMIT_RE = re.compile(r"(\d+)\s+(accounts?)", re.IGNORECASE)
 
+
 # Builds ANSI escape sequence from a style description string
 def _build_ansi_sequence(style_str):
     if not style_str:
@@ -3960,10 +3959,7 @@ def apply_privacy_substitutions(content: TPrivacyContent) -> TPrivacyContent:
             content_str = content_str.replace(search, replace)
         return cast(TPrivacyContent, content_str)
     if isinstance(content, dict):
-            return cast(TPrivacyContent, {
-                apply_privacy_substitutions(k) if isinstance(k, str) else k: apply_privacy_substitutions(v)
-                for k, v in content.items()
-            })
+        return cast(TPrivacyContent, {k: apply_privacy_substitutions(v) for k, v in content.items()})
     if isinstance(content, list):
         return cast(TPrivacyContent, [apply_privacy_substitutions(item) for item in content])
     return content
@@ -6134,7 +6130,7 @@ def print_check_timing(r_sleep_time, prefix="", user=None):
 
 # Initializes and sets up a progress bar for displaying download progress
 def setup_pbar(total_expected, title):
-    global START_TIME, NAME_COUNT, WRAPPER_COUNT, FETCH_TYPE, pbar
+    global START_TIME, NAME_COUNT, WRAPPER_COUNT, pbar
 
     # Ensure request hooks are active so progress updates are tracked even without jitter or serialization
     ensure_requests_monkey_patched()
@@ -6353,7 +6349,7 @@ def close_pbar():
 def instagram_wrap_request(orig_request):
     @wraps(orig_request)
     def wrapper(*args, **kwargs):
-        global NAME_COUNT, START_TIME, WRAPPER_COUNT, FETCH_TYPE, pbar
+        global NAME_COUNT, START_TIME, WRAPPER_COUNT, pbar
         method = kwargs.get("method") or (args[1] if len(args) > 1 else None)
         if method and isinstance(method, str):
             method = method.upper()
@@ -7363,6 +7359,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
             update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
             print(f"* Error: {err_str}")
+
             # Pause all other threads once the session account is flagged.
             if WEB_DASHBOARD_ENABLED or DASHBOARD_ENABLED:
                 for other_user in list(WEB_DASHBOARD_STOP_EVENTS.keys()):
