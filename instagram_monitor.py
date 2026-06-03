@@ -895,7 +895,7 @@ from dateutil import relativedelta
 from dateutil.parser import isoparse, parse
 import calendar
 
-# optional swap niquests of for requests for this script AND for instaloader
+# optional swap of niquests for requests for this script AND for instaloader
 if USE_NIQUESTS:
     import niquests as req
 else:
