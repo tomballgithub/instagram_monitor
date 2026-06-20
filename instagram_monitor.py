@@ -3864,9 +3864,11 @@ def get_ip_address(max_retries=5, timeout=10, retry_delay=5, long_retry=120, lon
                 text = (ip_response.text or "").strip()
                 if text:
                     return text.splitlines()[0].strip()
-                raise ValueError(f"empty response body from {IP_ADDRESS_URL}")
+                raise ValueError(f"empty response body from {url}")
             except Exception as e:
                 last_err = e
+                site_index += 1  # rotate on any failure
+                debug_print(f"error during get_ip_address() from {url}")
                 if attempt < max_retries and interruptible_sleep(retry_delay, stop_event):
                     return f"(unavailable: {format_error_message(last_err)})"
         if long_attempt < long_retry_attempts:
