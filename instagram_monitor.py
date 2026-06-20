@@ -1212,6 +1212,112 @@ _thread_local = threading.local()
 
 
 # ===========================
+# Terminal Resize Watcher
+# ===========================
+
+def _get_actual_console_width(fallback=80):
+    """Return the current visible terminal width in characters."""
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            import struct
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)
+            csbi = ctypes.create_string_buffer(22)
+            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, csbi):
+                left, top, right, bottom = struct.unpack_from('hhhh', csbi.raw, 10)
+                width = right - left + 1
+                if width > 0:
+                    return width
+    except Exception:
+        pass
+    return shutil.get_terminal_size(fallback=(fallback, 24)).columns
+
+
+def _update_pbar_ncols(new_width):
+    """Update the active pbar's ncols to reflect a new terminal width."""
+    if not pbar:
+        return
+    width_constraints = [HORIZONTAL_LINE, new_width - 1]
+    if MAX_PBAR_WIDTH:
+        width_constraints.append(MAX_PBAR_WIDTH)
+    safe_ncols = max(20, min(width_constraints))
+    # thread_pbar = getattr(_thread_local, 'pbar', None)
+    # debug_print(f"[_update_pbar_ncols] ENTRY - thread_pbar is None: {thread_pbar is None}, PBAR exists: {pbar is not None}")
+
+    # Use the global pbar — _thread_local is not visible from the resize watcher thread
+    active_pbar = pbar
+    if active_pbar is not None:
+        # active_pbar.write("jeoff")
+        # active_pbar.clear()
+        # active_pbar.refresh()
+        active_pbar.ncols = safe_ncols
+        active_pbar.refresh()
+        debug_print(f"Set pbar to a new width of {safe_ncols} columns. Read back as {active_pbar.ncols} with title of {active_pbar.desc}")
+    else:
+        debug_print(f"* Error: Did not set active_pbar.ncols due to missing active_pbar")
+
+
+# -- Windows: event-driven resize via ReadConsoleInputW -----------------------
+if sys.platform == 'win32':
+    import ctypes as _ctypes
+    import ctypes.wintypes as _wt
+
+    _kernel32 = _ctypes.windll.kernel32
+
+    _ENABLE_WINDOW_INPUT      = 0x0008
+    _WINDOW_BUFFER_SIZE_EVENT = 0x0004
+    _KEY_EVENT                = 0x0001
+
+    class _COORD(_ctypes.Structure):
+        _fields_ = [("X", _ctypes.c_short), ("Y", _ctypes.c_short)]
+
+    class _WINDOW_BUFFER_SIZE_RECORD(_ctypes.Structure):
+        _fields_ = [("dwSize", _COORD)]
+
+    class _EVENT_UNION(_ctypes.Union):
+        _fields_ = [
+            ("WindowBufferSizeEvent", _WINDOW_BUFFER_SIZE_RECORD),
+            ("_pad", _ctypes.c_byte * 18),
+        ]
+
+    class _INPUT_RECORD(_ctypes.Structure):
+        _fields_ = [
+            ("EventType", _wt.WORD),
+            ("Event",     _EVENT_UNION),
+        ]
+
+    _resize_stop_event = threading.Event()
+
+    def _win_resize_watcher():
+        handle = _kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        mode = _wt.DWORD()
+        _kernel32.GetConsoleMode(handle, _ctypes.byref(mode))
+        _kernel32.SetConsoleMode(handle, mode.value | _ENABLE_WINDOW_INPUT)
+        record   = _INPUT_RECORD()
+        num_read = _wt.DWORD(0)
+        while not _resize_stop_event.is_set():
+            ok = _kernel32.ReadConsoleInputW(
+                handle,
+                _ctypes.byref(record),
+                1,
+                _ctypes.byref(num_read),
+            )
+            if not ok or not num_read.value:
+                continue
+            if record.EventType == _WINDOW_BUFFER_SIZE_EVENT:
+                new_width = _get_actual_console_width()
+                debug_print(f"Terminal screen width change detected to {new_width} columns")
+                _update_pbar_ncols(new_width)
+
+    _resize_thread = threading.Thread(
+        target=_win_resize_watcher,
+        name="pbar-resize-watcher",
+        daemon=True,
+    )
+    _resize_thread.start()
+
+
+# ===========================
 # Web Dashboard Flask Server
 # ===========================
 
@@ -6209,33 +6315,20 @@ def setup_pbar(total_expected, title):
             def __getattr__(self, name):
                 return getattr(self._stream, name)
 
-        def _get_actual_console_width(fallback=80):
-            try:
-                if sys.platform == 'win32':
-                    import ctypes
-                    import struct
-                    handle = ctypes.windll.kernel32.GetStdHandle(-11)
-                    csbi = ctypes.create_string_buffer(22)
-                    if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, csbi):
-                        left, top, right, bottom = struct.unpack_from('hhhh', csbi.raw, 10)
-                        width = right - left + 1
-                        if width > 0:
-                            return width
-            except Exception:
-                pass
-            # Non-Windows or fallback: shutil is reliable on Linux/Mac
-            return shutil.get_terminal_size(fallback=(fallback, 24)).columns
-
         actual_width = _get_actual_console_width()
-        safe_ncols = max(20, min(HORIZONTAL_LINE, actual_width - 1))
-        # print(f"DEBUG: terminal width is {safe_ncols}")
+        debug_print(f"Terminal width detected as {actual_width}") #jmk
+        width_constraints = [HORIZONTAL_LINE, actual_width - 1]
+        if MAX_PBAR_WIDTH:
+            width_constraints.append(MAX_PBAR_WIDTH)
+        safe_ncols = max(20, min(width_constraints))
+        debug_print(f"Safe terminal width is {safe_ncols}") #jmk
 
         custom_bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{unit}]"
         # Write progress bar updates to terminal only (not log file) to avoid cluttering logs
         terminal_out = stdout_bck if stdout_bck is not None else sys.stdout
         locked_terminal_out = _LockedStream(terminal_out, STDOUT_LOCK)
         # Use HORIZONTAL_LINE (default 113) as the fixed width for consistent behavior across environments
-        _thread_local.pbar = tqdm(total=total_expected, bar_format=custom_bar_format, unit="Initializing...", desc=title, file=locked_terminal_out, ncols=safe_ncols)  # type: ignore[misc]
+        _thread_local.pbar = tqdm(total=total_expected, bar_format=custom_bar_format, unit="Initializing...", desc=title, file=locked_terminal_out, ncols=safe_ncols, dynamic_ncols=False)  # type: ignore[misc]
 
         # Also set global for backward compatibility (single-threaded mode)
         pbar = _thread_local.pbar
@@ -7590,7 +7683,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             update_ui_data(targets={user: {'status': 'Downloading Followers'}})
             log_activity(f"Started downloading followers", user=user)
             follower_limit = min(FOLLOWER_LIMIT_TO_FETCH, followers_count) if (ADVANCED_FOLLOWER_FETCH and FOLLOWER_LIMIT_TO_FETCH) else followers_count
-            setup_pbar(total_expected=follower_limit, title="* Downloading Followers")
+            setup_pbar(total_expected=follower_limit, title="* Get Followers")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'follower'
             followers = fetch_usernames_paginated(
@@ -7738,7 +7831,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             update_ui_data(targets={user: {'status': 'Downloading Followings'}})
             log_activity(f"Started downloading followings", user=user)
             followee_limit = min(FOLLOWEE_LIMIT_TO_FETCH, followings_count) if (ADVANCED_FOLLOWEE_FETCH and FOLLOWEE_LIMIT_TO_FETCH) else followings_count
-            setup_pbar(total_expected=followee_limit, title="* Downloading Followings")
+            setup_pbar(total_expected=followee_limit, title="* Get Followings")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'followee'
             followings = fetch_usernames_paginated(
@@ -8635,7 +8728,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     try:
                         log_activity(f"Started downloading followings", user=user)
                         followee_limit = min(FOLLOWEE_LIMIT_TO_FETCH, followings_count) if (ADVANCED_FOLLOWEE_FETCH and FOLLOWEE_LIMIT_TO_FETCH) else followings_count
-                        setup_pbar(total_expected=followee_limit, title="* Downloading Followings")
+                        setup_pbar(total_expected=followee_limit, title="* Get Followings")
                         start_time_dl = time.time()
                         followings = []
                         _thread_local.FETCH_TYPE = 'followee'
@@ -8792,7 +8885,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     try:
                         log_activity(f"Started downloading followers", user=user)
                         follower_limit = min(FOLLOWER_LIMIT_TO_FETCH, followers_count) if (ADVANCED_FOLLOWER_FETCH and FOLLOWER_LIMIT_TO_FETCH) else followers_count
-                        setup_pbar(total_expected=follower_limit, title="* Downloading Followers")
+                        setup_pbar(total_expected=follower_limit, title="* Get Followers")
                         start_time_dl = time.time()
                         followers = []
                         _thread_local.FETCH_TYPE = 'follower'
