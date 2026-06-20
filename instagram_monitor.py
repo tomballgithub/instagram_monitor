@@ -305,7 +305,13 @@ CHECK_INTERNET_URL = 'https://www.instagram.com/'
 CHECK_INTERNET_TIMEOUT = 5
 
 # URL used to determine IP address
-IP_ADDRESS_URL = 'https://httpbin.org/ip'
+IP_ADDRESS_URLS = [
+    "https://checkip.amazonaws.com",
+    "https://api.ipify.org?format=json",
+    "https://api.my-ip.io/ip.json",
+    "https://ipinfo.io/json",
+    "https://httpbin.org/ip",
+]
 
 # Limit fetching updates to specific hours of the day?
 # If True, the tool will only fetch updates within the defined hour ranges below
@@ -732,7 +738,13 @@ ADVANCED_FOLLOWEE_FETCH = False
 LIVENESS_CHECK_INTERVAL = 0
 CHECK_INTERNET_URL = ""
 CHECK_INTERNET_TIMEOUT = 0
-IP_ADDRESS_URL = ""
+IP_ADDRESS_URLS = [
+    "https://checkip.amazonaws.com",
+    "https://api.ipify.org?format=json",
+    "https://api.my-ip.io/ip.json",
+    "https://ipinfo.io/json",
+    "https://httpbin.org/ip",
+]
 CHECK_POSTS_IN_HOURS_RANGE = False
 HOURS_VERBOSE = False
 MIN_H1 = 0
@@ -3826,15 +3838,17 @@ def interruptible_sleep(seconds, stop_event=None):
     return stop_event.wait(seconds)
 
 
-# Fetches the current outbound IP via IP_ADDRESS_URL, tolerating JSON and plain-text responses
+# Fetches the current outbound IP via IP_ADDRESS_URLS, tolerating JSON and plain-text responses.
 def get_ip_address(max_retries=5, timeout=10, retry_delay=5, long_retry=120, long_retry_attempts=3, stop_event=None):
     last_err = None
+    site_index = 0
     for long_attempt in range(1, long_retry_attempts + 1):
         for attempt in range(1, max_retries + 1):
             if stop_event is not None and stop_event.is_set():
                 return f"(unavailable: {format_error_message(last_err) if last_err else 'stopped'})"
+            url = IP_ADDRESS_URLS[site_index % len(IP_ADDRESS_URLS)]
             try:
-                ip_response = req.get(IP_ADDRESS_URL, timeout=timeout, verify=get_proxies_ssl(), proxies=get_proxies())
+                ip_response = req.get(url, timeout=timeout, verify=get_proxies_ssl(), proxies=get_proxies())
                 ip_response.raise_for_status()
                 try:
                     data = ip_response.json()
