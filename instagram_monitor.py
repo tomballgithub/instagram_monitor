@@ -10780,9 +10780,26 @@ def run_main():
     print(f"* Follower churn detection:\t\t{churn_status}")
     print(f"* Browser user agent:\t\t\t{USER_AGENT}")
     print(f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}")
+    http_type = "Niquests" if USE_NIQUESTS else "Requests"
+    if _curl_cffi_backend_active():
+        if USE_NIQUESTS:
+            print_red(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {_curl_cffi_impersonate_target()}), with fallback to {http_type}", invert=True)
+        else:
+            print(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {_curl_cffi_impersonate_target()}), with fallback to {http_type}")
+    else:
+        if USE_NIQUESTS:
+            print_red(f"* HTTP backend:\t\t\t\t" + f"{http_type}", invert=True)
+        else:
+            print(f"* HTTP backend:\t\t\t\t" + f"{http_type}")
     print(f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}")
-    print(f"* Requests Library:\t\t\t" + ("Niquests" if USE_NIQUESTS else "Requests"))
-    print(f"* Proxies:\t\t\t\t" + ("Enabled" if PROXY_ENABLED else "Disabled"))
+    if HIDE_403_ERRORS:
+        print_red(f"* Hide 403 Errors:\t\t\t" + "Enabled", invert=True)
+    else:
+        print(f"* Hide 403 Errors:\t\t\t" + "Disabled")
+    if PROXY_ENABLED:
+        print(f"* Proxies:\t\t\t\t" + "Enabled")
+    else:
+        print_red(f"* Proxies:\t\t\t\t" + "Disabled", invert=True)
     if PROXY_ENABLED:
         ipaddr = get_ip_address()
         masked_proxy_url = mask_url_credentials(PROXY_URL)
