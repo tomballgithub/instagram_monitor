@@ -7355,6 +7355,8 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
                     batch_info = re.sub(r" - PAUSED.*$", "", batch_info) + f" - PAUSED for {sleep_remaining}s"
                     thread_pbar.unit = batch_info
                     thread_pbar.refresh()
+                else:
+                    debug_print("* Error No Pbar found in fetch_usernames_paginated()")
                 if stop_event is not None and stop_event.is_set():
                     if thread_pbar:
                         thread_pbar.unit = batch_info_orig  # restore units back to original state to avoid observed problems
@@ -7591,8 +7593,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             sleep_remaining -= wait_chunk
 
         # Always print and log activity; Logger handles terminal suppression
-        print("- loading profile from username...", end=" ", flush=True)
         _thread_local.in_partial_line = True
+        print("- loading profile from username...", end=" ", flush=True)
         log_activity(f"Loading profile: {user}", user=user)
         update_ui_data(targets={user: {'status': 'Loading Profile'}})
 
@@ -7627,8 +7629,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         posts_count = profile.mediacount
         if not skip_session and can_view and not skip_getting_posts_details:
             update_ui_data(targets={user: {'status': 'Fetching Reels'}})
-            print("- fetching reels count...", end=" ", flush=True)
             _thread_local.in_partial_line = True
+            print("- fetching reels count...", end=" ", flush=True)
             reels_count = get_total_reels_count(user, bot, skip_session)
 
             print("              OK")
@@ -7641,8 +7643,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             else:
                 has_story = False
         elif bot.context.is_logged_in and followed_by_viewer and not skip_getting_story_details:
-            print("- checking for stories...", end=" ", flush=True)
             _thread_local.in_partial_line = True
+            print("- checking for stories...", end=" ", flush=True)
             update_ui_data(targets={user: {'status': 'Checking Stories'}})
             story = next(bot.get_stories(userids=[insta_userid]), None)
             has_story = bool(story and story.itemcount)
@@ -7657,8 +7659,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         if bot.context.is_logged_in:
             # Always print and log activity; Logger handles terminal suppression
-            print("- loading own profile...", end=" ", flush=True)
             _thread_local.in_partial_line = True
+            print("- loading own profile...", end=" ", flush=True)
             me = instaloader.Profile.own_profile(bot.context)
             session_username = me.username
             print(f"               OK: {session_username}")
@@ -7672,9 +7674,10 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             session_username = None
 
     except Exception as e:
+        _thread_local.in_partial_line = False
         error_msg = format_error_message(e)
         print(f"* Error: {error_msg}")
-        _thread_local.in_partial_line = False
+
         log_activity(f"Error: {error_msg}", user=user)
 
         # Handle session recovery for automated checks/challenge errors
