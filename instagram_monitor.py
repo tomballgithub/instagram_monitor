@@ -2818,6 +2818,7 @@ ANSI_ESCAPE_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
 
 # Internal flag & style map for colour handling
 COLOR_ENABLED = False
+SKIP_COLOR = False
 _COLOR_STYLES = {}
 
 # Default built-in colour theme. Values can be overridden via COLOR_THEME in config
@@ -2878,6 +2879,7 @@ _STYLE_CODES = {
     "magenta": "35",
     "cyan": "36",
     "white": "37",
+    "red_background": "41",
     "bright_black": "90",
     "bright_red": "91",
     "bright_green": "92",
@@ -3154,7 +3156,7 @@ def _colorize_line(line):
 
 # Applies colourisation to multi-line text, preserving line breaks
 def apply_color_to_text(text):
-    if not COLOR_ENABLED or not isinstance(text, str):
+    if not COLOR_ENABLED or not isinstance(text, str) or SKIP_COLOR:
         return text
 
     # Skip coloring if terminal dashboard is active to prevent interference with Rich tags/layout
@@ -3978,6 +3980,21 @@ def apply_privacy_substitutions(content: TPrivacyContent) -> TPrivacyContent:
         return cast(TPrivacyContent, [apply_privacy_substitutions(item) for item in content])
     return content
 
+
+# Prints warning message in red font or inverted with red background & white text
+def print_red(text, invert=False):
+    global SKIP_COLOR
+    if COLOR_ENABLED:
+        red    = f"\033[{_STYLE_CODES['red']}m"  # red font, default background
+        red_bg = f"\033[{_STYLE_CODES['red_background']}m\033[{_STYLE_CODES['white']}m"  # red background, white font
+        reset  = f"\033[0m"
+        style  = red_bg if invert else red
+    else:
+        style = reset = ""
+    SKIP_COLOR = True
+    print(f"{style}{text}{reset}")
+    SKIP_COLOR = False
+    
 
 # Debug print helper - only prints if DEBUG_MODE is enabled
 def debug_print(message):
@@ -5044,15 +5061,13 @@ def import_session(cookiefile, sessionfile):
         instaloader.save_session_to_file()
 
     # Emit the warning in red only when colour output is enabled and supported, otherwise plain text
-    RED = f"\033[{_STYLE_CODES['red']}m" if COLOR_ENABLED else ""
-    RESET = ANSI_RESET if COLOR_ENABLED else ""
-
+    invert_text = True
     print("")
-    print(f"{RED}*********************************************************************{RESET}")
-    print(f"{RED} Do not use Instagram in Firefox while the script is running.         {RESET}")
-    print(f"{RED} Simultaneous browser and tool activity can get the account flagged.  {RESET}")
-    print(f"{RED} Tip: you might want to clear Instagram cookies in Firefox now.       {RESET}")
-    print(f"{RED}*********************************************************************{RESET}")
+    print_red(f"*************************************************************************", invert=invert_text)
+    print_red(f"*  Do not use Instagram in Firefox while the script is running.         *", invert=invert_text)
+    print_red(f"*  Simultaneous browser and tool activity can get the account flagged.  *", invert=invert_text)
+    print_red(f"*  Tip: you might want to clear Instagram cookies in Firefox now.       *", invert=invert_text)
+    print_red(f"*************************************************************************", invert=invert_text)
 
 
 # Finds an optional config file
