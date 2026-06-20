@@ -34,6 +34,7 @@ docker pull misiektoja/instagram-monitor:latest
 
 ### 🔍 Real-time Tracking
 - **Profile Activity**: Monitor **new posts, reels** and **stories** in real-time.
+- **Private Posts**: Detects **collab posts** leaking from **private accounts** via public collaborators.
 - **Audience Insights**: Track changes in **followings** and **followers**.
 - **Visual Changes**: Detect updates to **profile pictures** and **visibility** (public/private).
 - **Bio Updates**: Stay informed about changes to **user bio**.
@@ -58,6 +59,7 @@ docker pull misiektoja/instagram-monitor:latest
 - **Jitter Mode**: Adds human-like delays to HTTP requests.
 - **Hour-Range Checking**: Limits activity to specific hours of the day.
 - **Account Flexibility**: Works with or without a logged-in Instagram account.
+- **Browser TLS Impersonation**: Routes traffic through curl_cffi to mimic a real browser's TLS fingerprint and dodge fingerprint-based blocks.
 - **Proxy Support**: Route Instagram and webhook traffic through your own proxy.
 - **Privacy Substitutions**: Mask or rename identities across all output, logs and notifications.
 - **Block Awareness**: Detects shadowbans and flagged sessions to avoid false alerts.
@@ -112,12 +114,14 @@ docker pull misiektoja/instagram-monitor:latest
    * [Skipping Follow Changes](#skipping-follow-changes)
    * [Advanced Follower/Following Fetching](#advanced-followerfollowing-fetching)
    * [Routing Traffic Through a Proxy](#routing-traffic-through-a-proxy)
+   * [HTTP Transport Backend](#http-transport-backend)
    * [Privacy Substitutions](#privacy-substitutions)
    * [Shadowban and Flagged Account Detection](#shadowban-and-flagged-account-detection)
    * [Reducing Jitter Log Noise](#reducing-jitter-log-noise)
    * [CSV Export](#csv-export)
    * [Output Directory](#output-directory)
    * [Detection of Changed Profile Pictures](#detection-of-changed-profile-pictures)
+   * [Detecting Collab Posts on Private Accounts](#detecting-collab-posts-on-private-accounts)
    * [Displaying Images in Your Terminal](#displaying-images-in-your-terminal)
    * [Check Intervals](#check-intervals)
    * [Signal Controls (macOS/Linux/Unix)](#signal-controls-macoslinuxunix)
@@ -136,7 +140,7 @@ Choose one runtime path:
 
 * **Python path**:
   * [Python](https://www.python.org/downloads/) 3.9 or higher
-  * Libraries: [instaloader](https://github.com/instaloader/instaloader), `requests`, `python-dateutil`, `pytz`, `tzlocal`, `python-dotenv`, `tqdm`, `rich` (for Terminal Dashboard), `flask` (for Web Dashboard)
+  * Libraries: [instaloader](https://github.com/instaloader/instaloader), `requests`, [curl_cffi](https://github.com/lexiforest/curl_cffi) (for browser TLS impersonation), `python-dateutil`, `pytz`, `tzlocal`, `python-dotenv`, `tqdm`, `rich` (for Terminal Dashboard), `flask` (for Web Dashboard)
 * **Container path** (Python is not required on host):
   * Any Docker-compatible runtime such as:
     * [Docker Desktop](https://docs.docker.com/get-started/get-docker/) (macOS, Windows, Linux)
@@ -315,6 +319,8 @@ instaloader -l <your_insta_user>
 
 This saves the session locally. However, frequent follower/following/stories changes can still lead to detection, as Instagram may flag this as automated behavior.
 
+For device consistency, set `USER_AGENT` to match Instaloader's Chrome user agent (see [User Agent](#user-agent) below).
+
 <a id="option-3-session-login-using-firefox-cookies-recommended"></a>
 #### Option 3: Session Login Using Firefox Cookies (recommended)
 
@@ -347,6 +353,14 @@ It is also recommended to use the exact user agent string from your Firefox web 
 - open Firefox and type `about:support` in the address bar
 - find the `User Agent` value under the `Application Basics` section and copy it
 - set this value via the `USER_AGENT` configuration option or by using the `--user-agent` flag (since **v3.0**, you can also do it easily via the **[Web Dashboard](#web-dashboard-mode)**)
+
+If you created the session with Instaloader instead (Option 2 above), match Instaloader's user agent rather than Firefox's. Instaloader logs in with a Chrome user agent, so set `USER_AGENT` to a matching Chrome string to keep the same device consistency. You can print the exact value Instaloader uses with:
+
+```sh
+python3 -c "from instaloader.instaloadercontext import default_user_agent; print(default_user_agent())"
+```
+
+With the default `auto` impersonation (see [HTTP Transport Backend](#http-transport-backend)) the curl_cffi TLS fingerprint follows whichever user agent you set, so a Chrome user agent here yields a Chrome TLS fingerprint.
 
 <a id="time-zone"></a>
 ### Time Zone
@@ -883,6 +897,31 @@ PROXY_WEBHOOKS = False
 
 **Note**: Even when `PROXY_ENABLED` is `False`, the underlying `requests` library still honors the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` environment variables. If those are set in your shell or service unit they are applied silently, so unset them if you want a guaranteed direct connection.
 
+<a id="http-transport-backend"></a>
+### HTTP Transport Backend
+
+All Instagram traffic flows through a configurable HTTP transport backend:
+
+- `curl_cffi` (default): sends requests via [curl_cffi](https://github.com/lexiforest/curl_cffi), impersonating a real browser's TLS (JA3/JA4) and HTTP/2 fingerprint. This avoids fingerprint-based blocks where Instagram returns a spurious `HTTP 429` on the very first request even from a clean IP, a pattern most often seen on Linux builds (including Raspberry Pi OS) whose system TLS stack presents a fingerprint Instagram treats as automation.
+- `requests`: the stock `requests` / `urllib3` transport using the system TLS stack (the historical behavior).
+
+Both the anonymous and logged-in paths use the selected backend. If `curl_cffi` is selected but not installed, the tool prints a warning and transparently falls back to `requests`.
+
+Select the backend with `HTTP_BACKEND` (or `--http-backend`) and choose which browser curl_cffi impersonates with `CURL_CFFI_IMPERSONATE` (or `--impersonate`):
+
+```ini
+HTTP_BACKEND = "curl_cffi"
+CURL_CFFI_IMPERSONATE = "auto"
+```
+
+`CURL_CFFI_IMPERSONATE` defaults to `auto`, which picks the impersonation target that matches your `USER_AGENT` so the TLS, HTTP/2 and client-hint headers stay consistent with the browser identity. This matters when you import a Firefox session and set a matching Firefox `USER_AGENT`: `auto` then presents a Firefox TLS fingerprint instead of pairing a Firefox user agent with Chrome client-hint headers. You can also pin a specific target such as `chrome`, `safari`, `safari_ios`, `edge` or `firefox`:
+
+```sh
+instagram_monitor <target_insta_user> --http-backend curl_cffi --impersonate firefox
+```
+
+See the [curl_cffi documentation](https://github.com/lexiforest/curl_cffi) for the full list of impersonation targets available in your installed version.
+
 <a id="privacy-substitutions"></a>
 ### Privacy Substitutions
 
@@ -1012,6 +1051,25 @@ To enable this:
 - place it in the directory where you run the tool. **Note**: If installed via `pip`, this file is already bundled; however, any local file in your working directory will take **priority** over the bundled default.
 
 Without this file, the tool will treat an empty profile picture as a regular image. For example, if a user removes their profile picture, it would be treated as a change rather than a removal.
+
+<a id="detecting-collab-posts-on-private-accounts"></a>
+### Detecting Collab Posts on Private Accounts
+
+Instagram's collaboration feature lets two accounts co-author a single post. When a **private** account co-authors a post with a **public** account, that post stays visible on the private account's profile through the public `web_profile_info` endpoint even though the rest of the account is hidden. The tool surfaces these otherwise hidden posts.
+
+This feature is enabled by default. To disable it, either:
+
+- set the `DETECT_COLLAB_POSTS` to `False`
+- or use the `--no-detect-collab-posts` flag
+
+<a id="collab-posts-how-it-works"></a>
+#### How It Works
+
+The probe runs only for accounts whose posts are not otherwise viewable, meaning private profiles you do not follow.
+
+On the first run the tool displays the newest collab post currently visible, the same way it shows a regular account's latest post and records a baseline so it does not re-alert on the ones already there. On later checks, when the account's post or reel count changes, it looks for newly leaked collab posts and reports each one with its date, owner, collaborators, likes, comments, caption and media through the console, email and webhook notifications. Media is saved like any other post.
+
+This was inspired by [InstagramPrivSniffer](https://github.com/obitouka/InstagramPrivSniffer). Meta has confirmed that this visibility is intended behavior of the [collaboration feature](https://help.instagram.com/3526836317546926) rather than a vulnerability. Use it only for legitimate research and investigation.
 
 <a id="displaying-images-in-your-terminal"></a>
 ### Displaying Images in Your Terminal

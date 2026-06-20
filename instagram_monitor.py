@@ -195,6 +195,13 @@ SKIP_GETTING_POSTS_DETAILS = False
 # Can also be enabled via the -t flag
 GET_MORE_POST_DETAILS = False
 
+# Detect "collab" posts that leak from PRIVATE accounts via the public web_profile_info endpoint
+# When a private account co-authors a post with a public account that post stays visible in the
+# private account's timeline media. This probes for such leaked posts and reports new ones over time
+# Only kicks in for accounts whose posts are otherwise not viewable (private and not followed by you)
+# Can be disabled via the --no-detect-collab-posts flag
+DETECT_COLLAB_POSTS = True
+
 # When enabled, fetches the full list of followers and followings every check (not just when the count changes) and
 # compares usernames to detect who followed/unfollowed even when counts remain the same (churn detection)
 # This is useful for detecting when someone unfollows and someone else follows in the same interval, keeping the count unchanged
@@ -303,9 +310,12 @@ USER_AGENT_MOBILE = ""
 HTTP_BACKEND = "curl_cffi"
 
 # Browser profile curl_cffi impersonates when HTTP_BACKEND is "curl_cffi"
-# Examples: "chrome", "safari", "safari_ios", "edge", "firefox" (see curl_cffi docs for the full list)
+# - "auto" (default): pick the impersonation target that matches USER_AGENT, so the TLS, HTTP/2 and
+#   client-hint headers stay consistent with the browser identity (and with a Firefox-imported session)
+# - or pin a specific target, e.g. "chrome", "safari", "safari_ios", "edge", "firefox"
+#   (see curl_cffi docs for the full list)
 # Can also be set using the --impersonate flag
-CURL_CFFI_IMPERSONATE = "chrome"
+CURL_CFFI_IMPERSONATE = "auto"
 
 # How often to print a "liveness check" message to the output; in seconds
 # Set to 0 to disable
@@ -731,10 +741,11 @@ FOLLOWERS_CHURN_AUTODISABLED_REASON = ""
 SKIP_GETTING_STORY_DETAILS = False
 SKIP_GETTING_POSTS_DETAILS = False
 GET_MORE_POST_DETAILS = False
+DETECT_COLLAB_POSTS = True
 USER_AGENT = ""
 USER_AGENT_MOBILE = ""
 HTTP_BACKEND = "curl_cffi"
-CURL_CFFI_IMPERSONATE = "chrome"
+CURL_CFFI_IMPERSONATE = "auto"
 BE_HUMAN = False
 DAILY_HUMAN_HITS = 0
 MY_HASHTAGS = []
@@ -970,6 +981,8 @@ DASHBOARD_DATA_LOCK = threading.RLock()
 SESSION_REFRESHED_EVENT = threading.Event()  # Signals monitoring threads to reload session
 FLAGGED_PROBE_LOCK = threading.Lock()  # Serializes and dedupes flag-probe network calls
 FLAGGED_PROBE_CACHE = {'ts': 0.0, 'flagged': False}  # Cached flag-probe verdict with its timestamp
+FLAGGED_NOTIFY_LOCK = threading.Lock()  # Serializes flag-alert de-dup across concurrent target threads
+FLAGGED_NOTIFY_STATE = {'ts': 0.0}  # Timestamp of the last flag alert so one shared session flag alerts once per window
 PROXY_REFRESH_VERSION = 0
 PROXY_REFRESH_LOCK = threading.Lock()
 
@@ -1080,10 +1093,26 @@ def _curl_cffi_backend_active() -> bool:
     return True
 
 
-# Returns the configured curl_cffi impersonation target, falling back to chrome when empty
+# Maps a browser user agent string to the matching curl_cffi impersonation family, defaulting to chrome
+def _impersonate_target_from_ua(ua: str) -> str:
+    ua = str(ua or "").lower()
+    if "firefox" in ua:
+        return "firefox"
+    if "edg/" in ua or "edgios" in ua or "edga/" in ua:
+        return "edge"
+    if "chrome" in ua or "chromium" in ua or "crios" in ua:
+        return "chrome"
+    if "safari" in ua or "iphone" in ua or "ipad" in ua:
+        return "safari"
+    return "chrome"
+
+
+# Returns the curl_cffi impersonation target, resolving "auto" from USER_AGENT so TLS matches the browser identity
 def _curl_cffi_impersonate_target() -> str:
-    target = str(CURL_CFFI_IMPERSONATE or "chrome").strip()
-    return target or "chrome"
+    target = str(CURL_CFFI_IMPERSONATE or "auto").strip().lower()
+    if target in ("", "auto"):
+        return _impersonate_target_from_ua(USER_AGENT)
+    return target
 
 
 # Minimal urllib3-style raw wrapper exposing the read/stream surface requests and instaloader downloads rely on
@@ -1189,12 +1218,39 @@ def _install_http_backend() -> None:
     _CURL_CFFI_BACKEND_INSTALLED = True
 
 
+# Patches instaloader.copy_session so the per-request iPhone-API session inherits the proxy and TLS-verify settings
+def _install_copy_session_proxy_patch() -> None:
+    try:
+        from instaloader import instaloadercontext as _ilc
+    except Exception:
+        return
+    original = getattr(_ilc, "copy_session", None)
+    if original is None or getattr(original, "_proxies_patched", False):
+        return
+
+    def _patched_copy_session(session, request_timeout=None):
+        new = original(session, request_timeout)
+        # instaloader's copy_session copies only cookies and headers, dropping proxies and verify,
+        # so the anonymous web_profile_info call would bypass a configured proxy and leak the real IP
+        try:
+            new.proxies.clear()
+            new.proxies.update(getattr(session, "proxies", None) or {})
+            new.verify = getattr(session, "verify", True)
+        except Exception:
+            pass
+        return new
+
+    _patched_copy_session._proxies_patched = True  # type: ignore
+    _ilc.copy_session = _patched_copy_session
+
+
 _install_http_backend()
+_install_copy_session_proxy_patch()
 
 from instaloader.exceptions import PrivateProfileNotFollowedException
 from html import escape
 from itertools import islice
-from typing import Optional, Tuple, Any, Callable, List, TypeVar, cast
+from typing import Optional, Tuple, Any, Callable, Dict, List, TypeVar, cast
 from glob import glob
 import sqlite3
 from sqlite3 import OperationalError, connect
@@ -1847,7 +1903,7 @@ def create_web_dashboard_app():
             msg = f"Web Dashboard mode changed to: {DASHBOARD_MODE}"
             log_activity(msg)
             print(f"\n* {msg}")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
             return jsonify({'success': True, 'mode': DASHBOARD_MODE})  # type: ignore
         return jsonify({'success': False}), 400  # type: ignore
 
@@ -1983,7 +2039,7 @@ def create_web_dashboard_app():
         global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, PROXY_REFRESH_VERSION
         global FOLLOWERS_CHURN_DETECTION, DEBUG_MODE, SESSION_USERNAME, VERBOSE_MODE
         global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_SSL, SENDER_EMAIL, RECEIVER_EMAIL
-        global SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS
+        global SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS
         global ENABLE_JITTER, DETECT_CHANGED_PROFILE_PIC, SKIP_SESSION, CLI_CONFIG_PATH
         global DOTENV_FILE, WEB_DASHBOARD_TEMPLATE_DIR, LOCAL_TIMEZONE, OUTPUT_DIR, CSV_FILE
         global BE_HUMAN, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, LIVENESS_CHECK_INTERVAL, SKIP_FOLLOW_CHANGES
@@ -2102,6 +2158,7 @@ def create_web_dashboard_app():
         SKIP_GETTING_STORY_DETAILS = bool(update_setting('skip_stories', SKIP_GETTING_STORY_DETAILS, bool))
         SKIP_GETTING_POSTS_DETAILS = bool(update_setting('skip_posts', SKIP_GETTING_POSTS_DETAILS, bool))
         GET_MORE_POST_DETAILS = bool(update_setting('get_more_post_details', GET_MORE_POST_DETAILS, bool))
+        DETECT_COLLAB_POSTS = bool(update_setting('detect_collab_posts', DETECT_COLLAB_POSTS, bool))
         DETECT_CHANGED_PROFILE_PIC = bool(update_setting('profile_pic_changes', DETECT_CHANGED_PROFILE_PIC, bool))
         SKIP_SESSION = bool(update_setting('skip_session_login', SKIP_SESSION, bool))
         LIVENESS_CHECK_INTERVAL = int(update_setting('liveness_check_interval', LIVENESS_CHECK_INTERVAL, int))
@@ -2148,7 +2205,7 @@ def create_web_dashboard_app():
                 pass
             print(f"* {msg}")
             try:
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
             except Exception:
                 pass
             SESSION_REFRESHED_EVENT.set()
@@ -2163,7 +2220,7 @@ def create_web_dashboard_app():
         global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS
         global FOLLOWERS_CHURN_DETECTION, DEBUG_MODE, SESSION_USERNAME, VERBOSE_MODE
         global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_SSL, SENDER_EMAIL, RECEIVER_EMAIL
-        global SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS
+        global SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS
         global ENABLE_JITTER, DETECT_CHANGED_PROFILE_PIC, SKIP_SESSION, CLI_CONFIG_PATH
         global DOTENV_FILE, WEB_DASHBOARD_TEMPLATE_DIR, LOCAL_TIMEZONE, OUTPUT_DIR, CSV_FILE
         global BE_HUMAN, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, LIVENESS_CHECK_INTERVAL, SKIP_FOLLOW_CHANGES
@@ -2202,6 +2259,7 @@ def create_web_dashboard_app():
                 'skip_stories': SKIP_GETTING_STORY_DETAILS,
                 'skip_posts': SKIP_GETTING_POSTS_DETAILS,
                 'get_more_post_details': GET_MORE_POST_DETAILS,
+                'detect_collab_posts': DETECT_COLLAB_POSTS,
                 'enable_jitter': ENABLE_JITTER,
                 'profile_pic_changes': DETECT_CHANGED_PROFILE_PIC,
                 'skip_session_login': SKIP_SESSION,
@@ -2275,7 +2333,7 @@ def create_web_dashboard_app():
             pass
         print(f"* Generated config file: {out_path}")
         try:
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
         except Exception:
             pass
 
@@ -2306,7 +2364,7 @@ def create_web_dashboard_app():
                 log_activity(msg)
                 print(f"\n* {msg}")
                 print(f"* {mode_msg}")
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
 
                 SESSION_REFRESHED_EVENT.set()
                 SESSION_REFRESHED_EVENT.clear()
@@ -2380,7 +2438,7 @@ def create_web_dashboard_app():
             log_activity(msg)
             print(f"\n* {msg}")
             print(f"* {mode_msg}")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
             SESSION_REFRESHED_EVENT.set()
             SESSION_REFRESHED_EVENT.clear()
@@ -2406,7 +2464,7 @@ def create_web_dashboard_app():
                 msg = f"Session test successful for: {SESSION_USERNAME}"
                 log_activity(msg)
                 print(f"\n* {msg}")
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
 
                 return jsonify({'success': True, 'username': test_username})  # type: ignore
             else:
@@ -2416,7 +2474,7 @@ def create_web_dashboard_app():
                 msg = f"Session test failed for: {SESSION_USERNAME} (not logged in)"
                 log_activity(msg)
                 print(f"\n* {msg}")
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
 
                 return jsonify({'success': False, 'error': 'Session test failed: not logged in'})  # type: ignore
         except FileNotFoundError:
@@ -2426,7 +2484,7 @@ def create_web_dashboard_app():
             msg = f"Session test failed: file not found for {SESSION_USERNAME}"
             log_activity(msg)
             print(f"\n* {msg}")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
             return jsonify({'success': False, 'error': 'Session file not found'})  # type: ignore
         except Exception as e:
@@ -2436,7 +2494,7 @@ def create_web_dashboard_app():
             msg = f"Session test error for {SESSION_USERNAME}: {str(e)}"
             log_activity(msg)
             print(f"\n* {msg}")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
             return jsonify({'success': False, 'error': str(e)})  # type: ignore
 
@@ -2467,7 +2525,7 @@ def create_web_dashboard_app():
                     msg = f"Session refreshed successfully for: {SESSION_USERNAME}"
                     log_activity(msg)
                     print(f"\n* {msg}")
-                    print_cur_ts("\nTimestamp:\t\t\t\t")
+                    print_cur_ts(newline=True)
 
                     SESSION_REFRESHED_EVENT.set()
                     SESSION_REFRESHED_EVENT.clear()
@@ -2484,7 +2542,7 @@ def create_web_dashboard_app():
                         msg = f"Session re-authenticated and refreshed for: {SESSION_USERNAME}"
                         log_activity(msg)
                         print(f"* {msg}")
-                        print_cur_ts("\nTimestamp:\t\t\t\t")
+                        print_cur_ts(newline=True)
 
                         SESSION_REFRESHED_EVENT.set()
                         SESSION_REFRESHED_EVENT.clear()
@@ -2501,7 +2559,7 @@ def create_web_dashboard_app():
                         WEB_DASHBOARD_DATA['session']['last_refreshed'] = get_hour_min_from_ts(datetime.now(), show_seconds=True)
                     log_activity(f"Session created and saved", user=SESSION_USERNAME, level='system')
                     print(f"* Session created and saved for: {SESSION_USERNAME}")
-                    print_cur_ts("\nTimestamp:\t\t\t\t")
+                    print_cur_ts(newline=True)
                     SESSION_REFRESHED_EVENT.set()
                     SESSION_REFRESHED_EVENT.clear()
                     return jsonify({'success': True, 'username': SESSION_USERNAME, 'message': 'Session created'})  # type: ignore
@@ -2514,7 +2572,7 @@ def create_web_dashboard_app():
             msg = f"Session refresh failed for {SESSION_USERNAME}: {str(e)}"
             log_activity(msg)
             print(f"\n* {msg}")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
             return jsonify({'success': False, 'error': str(e)})  # type: ignore
 
@@ -2547,7 +2605,7 @@ def create_web_dashboard_app():
         log_activity(msg)
         print(f"\n* {msg}")
         print(f"* {mode_msg}")
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
 
         SESSION_REFRESHED_EVENT.set()
         SESSION_REFRESHED_EVENT.clear()
@@ -2569,10 +2627,10 @@ def create_web_dashboard_app():
         res = send_email(m_subject, m_body, m_body_html, SMTP_SSL, smtp_timeout=5)
         if res == 0:
             print("* Email notification sent successfully")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
             return jsonify({'success': True})  # type: ignore
         print("* Error: Failed to send test email")
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
         return jsonify({'success': False, 'error': 'Failed to send test email. Check console logs.'}), 500  # type: ignore
 
     @app.route('/api/test-webhook', methods=['POST'])
@@ -2589,10 +2647,10 @@ def create_web_dashboard_app():
         WEBHOOK_ENABLED = old_webhook_enabled
 
         if res == 0:
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
             return jsonify({'success': True})  # type: ignore
         print("* Error: Test webhook notification failed")
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
         return jsonify({'success': False, 'error': 'Failed to send test webhook. Check console logs.'}), 500  # type: ignore
 
     return app
@@ -2628,7 +2686,7 @@ def start_monitoring_for_target(username, wait_event=None, signal_event=None, de
                     if recheck_event.is_set():
                         recheck_event.clear()
                         print(f"* Staggered start interrupted for {user} by recheck request!")
-                        print_cur_ts("\nTimestamp:\t\t\t\t")
+                        print_cur_ts(newline=True)
                         manual_recheck = True
                         break
 
@@ -2755,7 +2813,7 @@ def start_all_monitoring():
         # Pre-populate dashboards with the correct next check time
         update_check_times(next_time=planned, user=u, increment_count=False)
 
-    print_cur_ts("\nTimestamp:\t\t\t\t")
+    print_cur_ts(newline=True)
 
     loading_events = [threading.Event() for _ in range(len(targets_to_start) + 1)]
     loading_events[0].set()
@@ -2812,7 +2870,7 @@ def recheck_all_targets():
         msg_time = planned.strftime('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S')
         print(f"  - {u} @ ~{msg_time} (in {display_time(delay)})")
 
-    print_cur_ts("\nTimestamp:\t\t\t\t")
+    print_cur_ts(newline=True)
 
     def _staggered_rechecker_thread():
         # Small pause to let user see the plans in console before rechecks start
@@ -4409,9 +4467,9 @@ def get_cur_ts(ts_str=""):
 
 
 # Prints the current date/time in human readable format with separator; eg. Sun 21 Apr 2024, 15:08:45
-def print_cur_ts(ts_str=""):
+def print_cur_ts(ts_str="Timestamp:\t\t\t\t", newline=False):
     # Always print; Logger handles terminal suppression while ensuring file logging
-    print(get_cur_ts(str(ts_str)))
+    print(get_cur_ts(("\n" if newline else "") + str(ts_str)))
     print("─" * HORIZONTAL_LINE)
 
 
@@ -4665,7 +4723,7 @@ def toggle_status_changes_notifications_signal_handler(sig, frame):
     sig_name = signal.Signals(sig).name
     print(f"* Signal {sig_name} received")
     print(f"* Email notifications: [new posts/reels/stories/followings/bio/profile picture = {STATUS_NOTIFICATION}]")
-    print_cur_ts("Timestamp:\t\t\t\t")
+    print_cur_ts()
 
 
 # Signal handler for SIGUSR2 allowing to switch email notifications for new followers
@@ -4675,7 +4733,7 @@ def toggle_followers_notifications_signal_handler(sig, frame):
     sig_name = signal.Signals(sig).name
     print(f"* Signal {sig_name} received")
     print(f"* Email notifications: [followers = {FOLLOWERS_NOTIFICATION}]")
-    print_cur_ts("Timestamp:\t\t\t\t")
+    print_cur_ts()
 
 
 # Signal handler for SIGTRAP allowing to increase check timer by INSTA_CHECK_SIGNAL_VALUE seconds
@@ -4690,7 +4748,7 @@ def increase_check_signal_handler(sig, frame):
     sig_name = signal.Signals(sig).name
     print(f"* Signal {sig_name} received")
     print(f"* Instagram timers: [check interval: {display_time(check_interval_low)} - {display_time(INSTA_CHECK_INTERVAL + RANDOM_SLEEP_DIFF_HIGH)}]")
-    print_cur_ts("Timestamp:\t\t\t\t")
+    print_cur_ts()
 
 
 # Signal handler for SIGABRT allowing to decrease check timer by INSTA_CHECK_SIGNAL_VALUE seconds
@@ -4706,7 +4764,7 @@ def decrease_check_signal_handler(sig, frame):
     sig_name = signal.Signals(sig).name
     print(f"* Signal {sig_name} received")
     print(f"* Instagram timers: [check interval: {display_time(check_interval_low)} - {display_time(INSTA_CHECK_INTERVAL + RANDOM_SLEEP_DIFF_HIGH)}]")
-    print_cur_ts("Timestamp:\t\t\t\t")
+    print_cur_ts()
 
 
 # Signal handler for SIGHUP allowing to reload secrets from .env
@@ -4741,7 +4799,7 @@ def reload_secrets_signal_handler(sig, frame):
                 globals()[secret] = val
                 print(f"* Reloaded {secret} from {env_path}")
 
-    print_cur_ts("Timestamp:\t\t\t\t")
+    print_cur_ts()
 
 
 # Saves user's image / video to selected file name
@@ -4838,9 +4896,9 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
 
         if func_ver == 2:
             print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-            print_cur_ts("Timestamp:\t\t\t\t")
+            print_cur_ts()
         else:
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
     # Profile pic exists in the filesystem, we check if it has not changed
     elif os.path.isfile(profile_pic_file):
@@ -4968,7 +5026,7 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
 
                 if func_ver == 2:
                     print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                    print_cur_ts("Timestamp:\t\t\t\t")
+                    print_cur_ts()
 
             else:
                 if func_ver == 1:
@@ -4992,9 +5050,9 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
             print(f"* Error while checking if the profile picture has changed !")
             if func_ver == 2:
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
         if func_ver == 1:
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
 
 # Builds a Profile object from the mobile web_profile_info response
@@ -5121,12 +5179,185 @@ def latest_post_mobile(user: str, bot: instaloader.Instaloader):
         p.caption = ""
 
     p.pcaption = ""
-    p.tagged_users = []
+    p.tagged_users = _extract_collaborators(best_node, user)
     p.shortcode = best_node.get("shortcode", "")
     p.url = best_node.get("display_url", "")
     p.video_url = best_node.get("video_url")
 
     return p, "post"
+
+
+# Extracts collaborator usernames from a web_profile_info media node (tagged users plus co-authors)
+def _extract_collaborators(node: Dict[str, Any], owner_username: str = "") -> List[str]:
+    collaborators: List[str] = []
+    seen = set()
+    for edge in node.get("edge_media_to_tagged_user", {}).get("edges", []):
+        username = edge.get("node", {}).get("user", {}).get("username")
+        if username and username != owner_username and username not in seen:
+            seen.add(username)
+            collaborators.append(username)
+    for coauthor in node.get("coauthor_producers", []) or []:
+        username = coauthor.get("username")
+        if username and username != owner_username and username not in seen:
+            seen.add(username)
+            collaborators.append(username)
+    return collaborators
+
+
+# Returns posts leaking from a private account's timeline media via web_profile_info (collab posts shared with public accounts)
+def fetch_leaked_collab_posts(user: str, bot: instaloader.Instaloader) -> List[Dict[str, Any]]:
+    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={user}", {})
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("data")
+    user_data = raw.get("user") if isinstance(raw, dict) else None
+    if not isinstance(user_data, dict):
+        return []
+    edges = user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
+    posts: List[Dict[str, Any]] = []
+    for edge in edges:
+        node = edge.get("node")
+        if not node:
+            continue
+        owner = node.get("owner", {}).get("username", "") or user
+        caption_edges = node.get("edge_media_to_caption", {}).get("edges", [])
+        caption = caption_edges[0]["node"].get("text", "") if caption_edges and "node" in caption_edges[0] else ""
+        posts.append({
+            "shortcode": node.get("shortcode", ""),
+            "owner": owner,
+            "is_video": bool(node.get("is_video")),
+            "ts": node.get("taken_at_timestamp", 0),
+            "likes": node.get("edge_liked_by", {}).get("count", 0),
+            "comments": node.get("edge_media_to_comment", {}).get("count", 0),
+            "caption": caption,
+            "collaborators": _extract_collaborators(node, owner),
+            "display_url": node.get("display_url", ""),
+            "video_url": node.get("video_url"),
+        })
+    return posts
+
+
+# Displays a leaked collab post from a private account with media download and returns dashboard metadata
+def report_leaked_collab_post(user: str, insta_username: str, post: Dict[str, Any], r_sleep_time: int, images_dir: str, videos_dir: str, user_root_path: Optional[str], is_new: bool = True, csv_file_name: str = "") -> Optional[Dict[str, Any]]:
+    source = "reel" if post.get("is_video") else "post"
+    shortcode = post.get("shortcode", "")
+    post_url = f"https://www.instagram.com/{'reel' if source == 'reel' else 'p'}/{shortcode}/"
+    ts = post.get("ts", 0)
+    post_dt = now_local()
+    if ts:
+        converted = convert_utc_datetime_to_tz_datetime(datetime.fromtimestamp(ts, timezone.utc))
+        if converted:
+            post_dt = converted
+    likes = post.get("likes", 0)
+    comments = post.get("comments", 0)
+    caption = post.get("caption", "") or "(empty)"
+    owner = post.get("owner", "") or user
+    collaborators = post.get("collaborators", []) or []
+    collab_str = ", ".join(collaborators) if collaborators else "(none reported)"
+
+    if is_new:
+        print(f"* New leaked collab {source} detected for private user {user} (revealed via a public collaborator) !\n")
+        log_activity(f"Leaked collab {source} detected", user=user, level='update', details={'url': post_url})
+    else:
+        print(f"* Newest leaked collab {source} for private user {user} (revealed via a public collaborator):\n")
+    print(f"Date:\t\t\t\t\t{get_date_from_ts(post_dt)} ({calculate_timespan(now_local(), post_dt)} ago)")
+    print(f"{source.capitalize()} URL:\t\t\t\t{post_url}")
+    print(f"Profile URL:\t\t\t\thttps://www.instagram.com/{insta_username}/")
+    print(f"Owner:\t\t\t\t\thttps://www.instagram.com/{owner}/")
+    print(f"Collaborators:\t\t\t\t{collab_str}")
+    print(f"Likes:\t\t\t\t\t{likes}")
+    print(f"Comments:\t\t\t\t{comments}")
+    print(f"Description:\n\n{caption}\n")
+
+    image_filename = ""
+    video_filename = ""
+    if post.get("video_url"):
+        video_filename = f'instagram_{user}_collab_{source}_{shortcode}.mp4'
+        if (user_root_path or OUTPUT_DIR) and videos_dir:
+            video_filename = os.path.join(videos_dir, video_filename)
+        if not os.path.isfile(video_filename):
+            if save_pic_video(post["video_url"], video_filename, ts):
+                print(f"Collab {source} video saved for {user} to '{video_filename}'")
+            else:
+                print(f"Error saving collab {source} video !")
+
+    pic_saved_html = ""
+    if DOWNLOAD_THUMBNAILS and post.get("display_url"):
+        image_filename = f'instagram_{user}_collab_{source}_{shortcode}.jpg'
+        if (user_root_path or OUTPUT_DIR) and images_dir:
+            image_filename = os.path.join(images_dir, image_filename)
+        if not os.path.isfile(image_filename):
+            if save_pic_video(post["display_url"], image_filename, ts):
+                pic_saved_html = '<br><br><img src="cid:collab_pic" width="50%">'
+                print(f"Collab {source} thumbnail image saved for {user} to '{image_filename}'")
+                try:
+                    if imgcat_exe and not (DASHBOARD_ENABLED and RICH_AVAILABLE):
+                        subprocess.run(f"\"{imgcat_exe}\" \"{image_filename}\"", shell=True, check=True)
+                except Exception:
+                    pass
+
+    if is_new and STATUS_NOTIFICATION:
+        m_subject = f"Instagram private user {user} has a leaked collab {source} - {get_short_date_from_ts(post_dt)}"
+        m_body = f"Leaked collab {source} detected for private Instagram user {user} (revealed via a public collaborator)\n\nDate: {get_date_from_ts(post_dt)}\n{source.capitalize()} URL: {post_url}\nProfile URL: https://www.instagram.com/{insta_username}/\nOwner: https://www.instagram.com/{owner}/\nCollaborators: {collab_str}\nLikes: {likes}\nComments: {comments}\nDescription:\n\n{caption}\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
+        m_body_html = f"Leaked collab {source} detected for private Instagram user <b>{user}</b> (revealed via a public collaborator){pic_saved_html}<br><br>Date: <b>{get_date_from_ts(post_dt)}</b><br>{source.capitalize()} URL: <a href=\"{post_url}\">{post_url}</a><br>Profile URL: <a href=\"https://www.instagram.com/{insta_username}/\">https://www.instagram.com/{insta_username}/</a><br>Owner: <a href=\"https://www.instagram.com/{owner}/\">{owner}</a><br>Collaborators: {escape(collab_str)}<br>Likes: {likes}<br>Comments: {comments}<br>Description:<br><br>{escape(str(caption))}<br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
+        print(f"\n* Sending email notification to {RECEIVER_EMAIL}")
+        if pic_saved_html and image_filename and os.path.isfile(image_filename):
+            send_email(m_subject, m_body, m_body_html, SMTP_SSL, image_filename, "collab_pic")
+        else:
+            send_email(m_subject, m_body, m_body_html, SMTP_SSL)
+
+    if is_new and csv_file_name:
+        try:
+            write_csv_entry(csv_file_name, convert_to_local_naive(post_dt), f"New Leaked Collab {source.capitalize()}", "", caption if caption != "(empty)" else post_url)
+        except Exception as e:
+            print(f"* Error: {e}")
+
+    if is_new:
+        webhook_fields = [
+            {"name": "Date", "value": f"**{get_date_from_ts(post_dt)}**", "inline": True},
+            {"name": "Likes", "value": f"**{likes}**", "inline": True},
+            {"name": "Comments", "value": f"**{comments}**", "inline": True},
+            {"name": f"{source.capitalize()} URL", "value": post_url},
+            {"name": "Owner", "value": f"https://www.instagram.com/{owner}/"},
+        ]
+        if collaborators:
+            webhook_fields.append({"name": "Collaborators", "value": collab_str})
+        if caption and caption != "(empty)":
+            webhook_fields.append({"name": "Description", "value": (caption[:WEBHOOK_FIELD_VALUE_LIMIT - 4] + "...") if len(caption) > WEBHOOK_FIELD_VALUE_LIMIT else caption})  # type: ignore
+
+        has_local_image = bool(image_filename and os.path.isfile(image_filename))
+        send_webhook(
+            f"🕵️ {user} Leaked Collab {source.capitalize()}",
+            f"Private user **{user}** has a leaked collab **{source}** (revealed via a public collaborator)",
+            color=0x9b59b6,  # Purple
+            fields=webhook_fields,
+            local_image_file=image_filename if has_local_image else None,
+            image_url=post.get("display_url") if (post.get("display_url") and not has_local_image) else None,
+            notification_type="status"
+        )
+
+    saved_file_path = None
+    if video_filename and os.path.isfile(video_filename):
+        saved_file_path = video_filename
+    elif image_filename and os.path.isfile(image_filename):
+        saved_file_path = image_filename
+
+    display_url = post.get("display_url", "")
+    if image_filename and os.path.isfile(image_filename):
+        display_url = f"/media/{image_filename}"
+
+    return {
+        "type": f"Leaked Collab {source.capitalize()}",
+        "caption": caption[:50] + "..." if caption and len(caption) > 50 else caption,
+        "url": display_url,
+        "video_url": f"/media/{video_filename}" if video_filename and os.path.isfile(video_filename) else None,
+        "file_path": saved_file_path,
+        "post_url": post_url,
+        "timestamp": get_short_date_from_ts(post_dt, show_year=True),
+        "timestamp_ts": int(post_dt.timestamp()) if isinstance(post_dt, datetime) else None,
+        "user": user,
+        "is_story": False
+    }
 
 
 # Returns reels count by using Instaloader's iPhone API (requires session login)
@@ -5198,7 +5429,7 @@ def check_posts_counts(user, posts_count, posts_count_old, r_sleep_time):
 
         log_activity(f"Posts changed: {posts_count_old} -> {posts_count}", user=user, level='update')
         print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-        print_cur_ts("Timestamp:\t\t\t\t")
+        print_cur_ts()
         return 1
     else:
         return 0
@@ -5229,7 +5460,7 @@ def check_reels_counts(user, reels_count, reels_count_old, r_sleep_time):
         )
 
         print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-        print_cur_ts("Timestamp:\t\t\t\t")
+        print_cur_ts()
         return 1
     else:
         return 0
@@ -6176,6 +6407,7 @@ def generate_config_dashboard(target_data, config_data):
         ("Skip Follow Changes", str(config_data.get('skip_follow_changes', '-'))),
         ("Skip Stories Details", str(config_data.get('skip_stories', '-'))),
         ("Get More Post Details", str(config_data.get('get_more_post_details', '-'))),
+        ("Detect Collab Posts", str(config_data.get('detect_collab_posts', '-'))),
         ("Liveness Check", str(config_data.get('liveness_check', '-'))),
         ("Display Profile Pics", config_data.get('imgcat', '-')),
         ("Show Check Seconds", str(config_data.get('dashboard_show_check_seconds', '-'))),
@@ -6453,7 +6685,7 @@ def print_check_timing(r_sleep_time, prefix="", user=None):
         print(f"{prefix}Last check:\t\t\t\t{get_date_from_ts(LAST_CHECK_TIME) if LAST_CHECK_TIME else 'N/A'}")
         print(f"{prefix}Next check:\t\t\t\t{next_check_str} (in {display_time(r_sleep_time)})")
         print(f"{prefix}Check interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
 
 
 # Initializes and sets up a progress bar for displaying download progress
@@ -6953,6 +7185,7 @@ def get_dashboard_config_data(final_log_path=None, imgcat_exe=None, profile_pic_
         'skip_stories': SKIP_GETTING_STORY_DETAILS,
         'skip_posts': SKIP_GETTING_POSTS_DETAILS,
         'get_more_post_details': GET_MORE_POST_DETAILS,
+        'detect_collab_posts': DETECT_COLLAB_POSTS,
         'followers_churn': FOLLOWERS_CHURN_DETECTION,
         'verbose_mode': VERBOSE_MODE,
         'debug_mode': DEBUG_MODE,
@@ -7003,7 +7236,7 @@ def sleep_message(sleeptime, user=None):
         debug_print(message)
     elif HOURS_VERBOSE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE):
         print("* " + message)
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
 
 
 # Formats error messages to be more informative, especially for Instagram detection/challenge errors
@@ -7057,6 +7290,31 @@ def is_session_flagged(error_msg, bot):
     if is_profile_not_found_error(error_msg):
         return probe_session_flagged(bot)
     return False
+
+
+# Sends a one-off email and webhook alert when the session account or IP is flagged, bypassing ERROR_FAILURE_THRESHOLD since a flag is terminal and operator-actionable
+def notify_session_flagged(user, err_str, error_msg):
+    # One shared session flag trips every target thread, so de-dupe within the flag-probe window to alert once instead of once per target
+    now = time.time()
+    with FLAGGED_NOTIFY_LOCK:
+        last_ts = FLAGGED_NOTIFY_STATE['ts']
+        if last_ts and (now - last_ts) < FLAGGED_PROBE_TTL:
+            return
+        FLAGGED_NOTIFY_STATE['ts'] = now
+
+    if ERROR_NOTIFICATION:
+        alert_subject = f"instagram_monitor: session account flagged (target: {user})"
+        alert_body = f"{err_str}\n\nTriggering error: {error_msg}{get_cur_ts(nl_ch + nl_ch + 'Timestamp: ')}"
+        alert_body_html = f"{err_str}<br><br>Triggering error: <b>{error_msg}</b>{get_cur_ts('<br><br>Timestamp: ')}"
+        print(f"* Sending session flagged notification to {RECEIVER_EMAIL}")
+        send_email(alert_subject, alert_body, alert_body_html, SMTP_SSL)
+
+    send_webhook(
+        title=f"🚩 Session account flagged (target: {user})",
+        description=f"{err_str}\n\nTriggering error: `{error_msg}`",
+        color=0xFF0000,
+        notification_type="error"
+    )
 
 
 # Returns unique, validated hours (0-23) from the configured ranges
@@ -7488,14 +7746,14 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             except Exception as e:
                 error_msg = format_error_message(e)
                 print(f"* Session error for {user}: {error_msg}")
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
                 log_activity(f"Session error: {error_msg}", user=user)
 
                 if WEB_DASHBOARD_ENABLED:
                     update_ui_data(targets={user: {'status': 'Paused: Session re-login required'}})
                     log_activity("Initial setup paused: Session re-login required via Web Dashboard", user=user)
                     print(f"* Initial setup paused for {user}. Please refresh/import session via Web Dashboard.")
-                    print_cur_ts("\nTimestamp:\t\t\t\t")
+                    print_cur_ts(newline=True)
 
                     # Wait for session refresh or stop event
                     while not (stop_event and stop_event.is_set()):
@@ -7503,7 +7761,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             # Session refreshed! Refresh parameters and retry
                             log_activity("Session refresh detected, resuming setup...", user=user)
                             print(f"* Session refresh detected for {user}, resuming setup...")
-                            print_cur_ts("\nTimestamp:\t\t\t\t")
+                            print_cur_ts(newline=True)
                             return instagram_monitor_user(user, csv_file_name, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, wait_for_prev_user, signal_loading_complete, stop_event, user_root_path, manual_recheck, skip_follow_changes=SKIP_FOLLOW_CHANGES)
 
                     if stop_event and stop_event.is_set():
@@ -7678,6 +7936,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         error_msg = format_error_message(e)
         print(f"* Error: {error_msg}")
 
+        print_cur_ts(newline=True)
         log_activity(f"Error: {error_msg}", user=user)
 
         # Handle session recovery for automated checks/challenge errors
@@ -7685,6 +7944,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
             update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
             print(f"* Error: {err_str}")
+
+            # A flag is terminal for every target, so alert the operator immediately regardless of ERROR_FAILURE_THRESHOLD
+            notify_session_flagged(user, err_str, error_msg)
 
             # Pause all other threads once the session account is flagged.
             if WEB_DASHBOARD_ENABLED or DASHBOARD_ENABLED:
@@ -7699,7 +7961,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 NEXT_CHECK_DISPLAY = "Paused"
                 update_check_times(next_time="Paused", user=user, increment_count=False)
                 log_activity("Stopping monitoring", user=user)
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
             # Without the Web Dashboard there is no in-place session recovery so exit since the flagged session is dead for every target
             if not WEB_DASHBOARD_ENABLED:
@@ -7712,7 +7974,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         # Session refreshed! Reload and retry
                         log_activity("Session/Mode change detected, resuming monitoring...", user=user)
                         print(f"* Session/Mode change detected for {user}, resuming...")
-                        print_cur_ts("\nTimestamp:\t\t\t\t")
+                        print_cur_ts(newline=True)
 
                         # Refresh configuration from global settings
                         skip_session = SKIP_SESSION
@@ -7728,7 +7990,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 if stop_event and stop_event.is_set():
                     return
         else:
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
         if WEB_DASHBOARD_ENABLED:
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
@@ -7778,7 +8040,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             print(f"\nStory available:\t\t\t{has_story}")
 
         print(f"\nBio:\n\n{bio}\n")
-        print_cur_ts("Timestamp:\t\t\t\t")
+        print_cur_ts()
 
     # Populate initial Dashboard data immediately after first fetch (regardless of print mode)
     target_data_unified = {
@@ -8134,7 +8396,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     followings_old_count = followings_count
 
     if followers_followings_fetched:
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
         # Update dashboard with actual counts after download in detailed logging mode
         if FOLLOWERS_CHURN_DETECTION:
             update_ui_data(targets={user: {'followers': len(followers) if followers else followers_count, 'following': len(followings) if followings else followings_count}})
@@ -8283,7 +8545,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         }
 
                         if i == stories_count:
-                            print_cur_ts("\nTimestamp:\t\t\t\t")
+                            print_cur_ts(newline=True)
                         else:
                             print("─" * HORIZONTAL_LINE)
 
@@ -8319,6 +8581,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     last_source = "post"
     thumbnail_url = ""
     video_url = ""
+    highest_collab_ts_old = 0
 
     if int(posts_count + reels_count) >= 1 and can_view and not skip_getting_posts_details:
         if bot.context.is_logged_in:
@@ -8467,7 +8730,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             'timestamp_ts': int(highestinsta_dt.timestamp()) if isinstance(highestinsta_dt, datetime) else None
         }
 
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
 
         highestinsta_ts_old = highestinsta_ts
         highestinsta_dt_old = highestinsta_dt
@@ -8475,6 +8738,26 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     else:
         highestinsta_ts_old = int(time.time())
         highestinsta_dt_old = now_local()
+
+    # Baseline of leaked collab posts for private (otherwise not viewable) accounts; new ones are reported in the loop
+    if DETECT_COLLAB_POSTS and not can_view and int(posts_count + reels_count) >= 1:
+        update_ui_data(targets={user: {'status': 'Probing Collab Posts'}})
+        try:
+            time.sleep(NEXT_OPERATION_DELAY)
+            leaked_baseline = fetch_leaked_collab_posts(user, bot)
+        except Exception as e:
+            leaked_baseline = []
+            debug_print(f"[{user}] initial collab probe failed: {format_error_message(e)}")
+        if leaked_baseline:
+            highest_collab_ts_old = max(p.get("ts", 0) for p in leaked_baseline)
+            latest_collab = max(leaked_baseline, key=lambda item: item.get("ts", 0))
+            if len(leaked_baseline) > 1:
+                print(f"\n* {len(leaked_baseline)} leaked collab posts currently visible for private user {user} (showing the newest below):\n")
+            # r_sleep_time is unused when is_new is False, so 0 is a safe placeholder before the loop computes it
+            latest_collab_update = report_leaked_collab_post(user, insta_username, latest_collab, 0, images_dir, videos_dir, user_root_path, is_new=False)
+            if latest_collab_update:
+                last_post = latest_collab_update
+            print_cur_ts("\nTimestamp:\t\t\t\t")
 
     # Initialize check timing and update last check time for dashboard
     # Don't increment CHECK_COUNT here - it will be incremented in the main loop
@@ -8549,7 +8832,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     else:
         print(f"* Tracking {user}... next check planned at ~{msg_time} (in {display_time(r_sleep_time)})\n")
 
-    print_cur_ts("Timestamp:\t\t\t\t")
+    print_cur_ts()
 
     if HOURS_VERBOSE or DEBUG_MODE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE):
         sleep_message(r_sleep_time, user)
@@ -8564,7 +8847,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             # Check for stop event
             if stop_event and stop_event.is_set():
                 print(f"* Monitoring stopped for {user}\n")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
                 log_activity("Monitoring stopped", user=user)
                 return
 
@@ -8577,7 +8860,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
             if recheck_triggered:
                 print(f"* Recheck requested for {user}! Breaking sleep early...\n")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
                 manual_recheck_active = True
                 manual_override_active = True
                 break
@@ -8608,7 +8891,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         # Check stop event at the start of each loop iteration
         if stop_event and stop_event.is_set():
             print(f"* Monitoring stopped for {user}\n")
-            print_cur_ts("Timestamp:\t\t\t\t")
+            print_cur_ts()
             return
 
         # Check for proxy changes via web dashboard at start of each loop iteration
@@ -8629,7 +8912,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             ip_str = f" with proxy IP address of {ipaddr}"
         if VERBOSE_MODE:
             print(f"* Starting check #{CHECK_COUNT} for {user} ...{ip_str}")
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
         elif DEBUG_MODE:
             debug_print(f"Starting check #{CHECK_COUNT}{ip_str}")
 
@@ -8646,7 +8929,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         if in_allowed_hours:
             if HOURS_VERBOSE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE) or DEBUG_MODE:
                 print(f"* Fetching updates for {user}, current hour: {int(cur_h)}, allowed: [{format_hours_as_ranges(hours_to_check())}]")
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
                 log_activity(f"Fetching updates (hour: {int(cur_h)})", user=user)
 
             debug_print(f"Fetching profile data from Instagram API...")
@@ -8752,7 +9035,11 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 debug_print(f"Full exception: {type(e).__name__}: {e}")
 
                 consecutive_main_errors += 1
-                if ERROR_NOTIFICATION and consecutive_main_errors == ERROR_FAILURE_THRESHOLD:
+
+                # A flagged session/IP is terminal and operator-actionable, so detect it up front to alert immediately and skip the generic threshold alert below
+                session_flagged = is_session_flagged(error_msg, bot)
+
+                if not session_flagged and ERROR_NOTIFICATION and consecutive_main_errors == ERROR_FAILURE_THRESHOLD:
                     alert_subject = f"instagram_monitor: error for {user} (failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD})"
                     alert_body = f"An error occurred for user {user} (failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD}):\n{error_msg}\n\nCheck interval: {display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts(nl_ch + 'Timestamp: ')}"
                     alert_body_html = f"An error occurred for user <b>{user}</b> (failure #{consecutive_main_errors}, threshold: {ERROR_FAILURE_THRESHOLD}):<br><br><b>{error_msg}</b><br><br>Check interval: <b>{display_time(r_sleep_time)}</b> ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)}){get_cur_ts('<br>Timestamp: ')}"
@@ -8769,10 +9056,13 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         )
 
                 # Handle session recovery for automated checks/challenge errors
-                if is_session_flagged(error_msg, bot):
+                if session_flagged:
                     err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
                     update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
                     print(f"* Error: {err_str}")
+
+                    # A flag is terminal for every target, so alert the operator immediately regardless of ERROR_FAILURE_THRESHOLD
+                    notify_session_flagged(user, err_str, error_msg)
 
                     # Pause all other threads once the session account is flagged.
                     if WEB_DASHBOARD_ENABLED or DASHBOARD_ENABLED:
@@ -8787,7 +9077,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         NEXT_CHECK_DISPLAY = "Paused"
                         update_check_times(next_time="Paused", user=user, increment_count=False)
                         log_activity("Stopping monitoring", user=user)
-                    print_cur_ts("\nTimestamp:\t\t\t\t")
+                    print_cur_ts(newline=True)
 
                     # Without the Web Dashboard there is no in-place session recovery so exit since the flagged session is dead for every target
                     if not WEB_DASHBOARD_ENABLED:
@@ -8799,7 +9089,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             # Session refreshed!
                             log_activity("Session/Mode change detected, resuming monitoring...", user=user)
                             print(f"* Session/Mode change detected for {user}, resuming...")
-                            print_cur_ts("\nTimestamp:\t\t\t\t")
+                            print_cur_ts(newline=True)
 
                             # Refresh configuration from global settings
                             skip_session = SKIP_SESSION
@@ -8855,7 +9145,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 now = now_local_naive()
                 r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time)
                 update_check_times(next_time=next_check_val, user=user, increment_count=False)
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
                 time.sleep(r_sleep_time)
                 continue
 
@@ -8883,7 +9173,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 now = now_local_naive()
                 r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time)
                 update_check_times(next_time=next_check_val, user=user, increment_count=False)
-                print_cur_ts("\nTimestamp:\t\t\t\t")
+                print_cur_ts(newline=True)
                 time.sleep(r_sleep_time)
                 continue
 
@@ -9041,7 +9331,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 followings_old_count = followings_count
 
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
 
             if int(followers_count) != int(followers_old_count) or FOLLOWERS_CHURN_DETECTION:
                 if FOLLOWERS_CHURN_DETECTION and followers_count > 5000:
@@ -9198,7 +9488,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 followers_old_count = followers_count
 
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
 
             # Profile pic
 
@@ -9248,7 +9538,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
                 bio_old = bio
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
 
             if is_private != is_private_old:
 
@@ -9293,7 +9583,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
                 is_private_old = is_private
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
 
             if followed_by_viewer != followed_by_viewer_old:
 
@@ -9324,7 +9614,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
                 followed_by_viewer_old = followed_by_viewer
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
 
             if has_story and not story_flag:
                 print(f"* New story for user {user} !\n")
@@ -9360,7 +9650,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     print(f"* Warning: Webhook notification for new story failed")
 
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
 
             if not has_story and story_flag:
                 processed_stories_list = []
@@ -9368,7 +9658,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 print(f"* Story for user {user} disappeared !")
                 log_activity("Story disappeared", user=user)
                 print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                print_cur_ts("Timestamp:\t\t\t\t")
+                print_cur_ts()
                 story_flag = False
 
             if has_story and not skip_session and can_view and not skip_getting_story_details:
@@ -9521,7 +9811,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                                 )
 
                             print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                            print_cur_ts("Timestamp:\t\t\t\t")
+                            print_cur_ts()
 
                             # Update web dashboard with the new story
                             if WEB_DASHBOARD_ENABLED:
@@ -9560,7 +9850,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 except Exception as e:
                     error_msg = format_error_message(e)
                     print(f"* Error while processing story items: {error_msg}")
-                    print_cur_ts("\nTimestamp:\t\t\t\t")
+                    print_cur_ts(newline=True)
 
             new_post = False
 
@@ -9667,7 +9957,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             notification_type="error"
                         )
 
-                    print_cur_ts("Timestamp:\t\t\t\t")
+                    print_cur_ts()
 
                     update_check_times(next_time=next_check_val, user=user, increment_count=False)
                     time.sleep(r_sleep_time)
@@ -9840,7 +10130,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     highestinsta_dt_old = highestinsta_dt
 
                     print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
-                    print_cur_ts("Timestamp:\t\t\t\t")
+                    print_cur_ts()
 
                 elif not new_post and (posts_count != posts_count_old or reels_count != reels_count_old):
 
@@ -9858,6 +10148,24 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 if check_reels_counts(user, reels_count, reels_count_old, r_sleep_time):
                     reels_count_old = reels_count
 
+                # Private (not viewable) account: probe for newly leaked collab posts revealed via public collaborators
+                if DETECT_COLLAB_POSTS and not can_view:
+                    try:
+                        leaked = fetch_leaked_collab_posts(user, bot)
+                    except Exception as e:
+                        leaked = []
+                        debug_print(f"[{user}] collab probe failed: {format_error_message(e)}")
+                    new_leaked = sorted([p for p in leaked if p.get("ts", 0) > highest_collab_ts_old], key=lambda item: item.get("ts", 0))
+                    for p in new_leaked:
+                        leaked_update = report_leaked_collab_post(user, insta_username, p, r_sleep_time, images_dir, videos_dir, user_root_path, csv_file_name=csv_file_name)
+                        if leaked_update:
+                            update_ui_data(targets={user: {'new_update': leaked_update, 'last_post': leaked_update, 'posts': posts_count, 'reels': reels_count}})
+                    if new_leaked:
+                        print(f"\nCheck interval:\t\t\t\t{display_time(r_sleep_time)} ({get_range_of_dates_from_tss(int(time.time()) - r_sleep_time, int(time.time()), short=True)})")
+                        print_cur_ts("Timestamp:\t\t\t\t")
+                    if leaked:
+                        highest_collab_ts_old = max(highest_collab_ts_old, max(p.get("ts", 0) for p in leaked))
+
         else:
             if HOURS_VERBOSE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE) or DEBUG_MODE:
                 print(f"* Skipping updates for {user}, current hour: {int(cur_h)}, allowed: [{format_hours_as_ranges(hours_to_check())}]")
@@ -9873,13 +10181,13 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         if manual_recheck_active:
             print(f"* Check #{CHECK_COUNT} completed for {user} ...\n")
-            print_cur_ts("Timestamp:\t\t\t\t")
+            print_cur_ts()
             log_activity("Check completed", user=user)
             manual_recheck_active = False
             manual_override_active = False
         elif VERBOSE_MODE or DEBUG_MODE:
             print(f"* Check #{CHECK_COUNT} completed for {user} ...\n")
-            print_cur_ts("Timestamp:\t\t\t\t")
+            print_cur_ts()
 
         if WEB_DASHBOARD_ENABLED:
             update_ui_data(targets={user: {'status': 'OK'}})
@@ -9920,7 +10228,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                         color=0xFF0000,
                         notification_type="error"
                     )
-            print_cur_ts("\nTimestamp:\t\t\t\t")
+            print_cur_ts(newline=True)
 
         if HOURS_VERBOSE or DEBUG_MODE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE):
             sleep_message(r_sleep_time, user)
@@ -9935,7 +10243,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 # Check for stop event (Web Dashboard mode)
                 if stop_event and stop_event.is_set():
                     print(f"* Monitoring stopped for {user}\n")
-                    print_cur_ts("Timestamp:\t\t\t\t")
+                    print_cur_ts()
                     return
 
                 # Check for recheck trigger (Web Dashboard mode)
@@ -9947,7 +10255,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
                 if recheck_triggered:
                     print(f"* Recheck requested for {user}! Breaking sleep early...\n")
-                    print_cur_ts("Timestamp:\t\t\t\t")
+                    print_cur_ts()
                     manual_recheck_active = True
                     manual_override_active = True
                     break
@@ -10042,7 +10350,7 @@ def acquire_dir_lock():
     # print(f"Directory lock acquired (PID {os.getpid()})")
     
 def run_main():
-    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
+    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H
     global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, ADVANCED_FOLLOWER_FETCH, ADVANCED_FOLLOWEE_FETCH
@@ -10319,7 +10627,7 @@ def run_main():
         dest="impersonate",
         metavar="TARGET",
         type=str,
-        help="Browser profile curl_cffi impersonates when --http-backend is curl_cffi (e.g. chrome, safari, safari_ios)"
+        help="Browser profile curl_cffi impersonates when --http-backend is curl_cffi: 'auto' (match the user agent, default) or a pinned target like chrome, safari, safari_ios, edge, firefox"
     )
     session_opts.add_argument(
         "--be-human",
@@ -10372,6 +10680,13 @@ def run_main():
         action="store_false",
         default=None,
         help="Disable detection of changed profile picture"
+    )
+    opts.add_argument(
+        "--no-detect-collab-posts",
+        dest="detect_collab_posts",
+        action="store_false",
+        default=None,
+        help="Disable detection of collab posts leaking from private accounts via the public web_profile_info endpoint"
     )
     opts.add_argument(
         "-b", "--csv-file",
@@ -10872,6 +11187,9 @@ def run_main():
     if args.get_more_post_details is True:
         GET_MORE_POST_DETAILS = True
 
+    if args.detect_collab_posts is False:
+        DETECT_COLLAB_POSTS = False
+
     if args.be_human is True:
         BE_HUMAN = True
 
@@ -11087,6 +11405,7 @@ def run_main():
     print(f"* Skip stories details:\t\t\t{SKIP_GETTING_STORY_DETAILS}")
     print(f"* Skip posts details:\t\t\t{SKIP_GETTING_POSTS_DETAILS}")
     print(f"* Get more posts details:\t\t{GET_MORE_POST_DETAILS}")
+    print(f"* Detect collab posts (private):\t{DETECT_COLLAB_POSTS}")
     churn_status = str(FOLLOWERS_CHURN_DETECTION)
     if FOLLOWERS_CHURN_AUTODISABLED:
         churn_status += f" ({FOLLOWERS_CHURN_AUTODISABLED_REASON})"
@@ -11095,10 +11414,12 @@ def run_main():
     print(f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}")
     http_type = "Niquests" if USE_NIQUESTS else "Requests"
     if _curl_cffi_backend_active():
+        impersonate_resolved = _curl_cffi_impersonate_target()
+        impersonate_display = f"auto -> {impersonate_resolved}" if str(CURL_CFFI_IMPERSONATE or "auto").strip().lower() in ("", "auto") else impersonate_resolved
         if USE_NIQUESTS:
-            print_red(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {_curl_cffi_impersonate_target()}), with fallback to {http_type}", invert=True)
+            print_red(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {impersonate_display}), with fallback to {http_type}", invert=True)
         else:
-            print(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {_curl_cffi_impersonate_target()}), with fallback to {http_type}")
+            print(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {impersonate_display}), with fallback to {http_type}")
     else:
         if USE_NIQUESTS:
             print_red(f"* HTTP backend:\t\t\t\t" + f"{http_type}", invert=True)
@@ -11364,7 +11685,7 @@ def run_main():
             if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
                 update_check_times(next_time=planned, user=u, increment_count=False)
 
-        print_cur_ts("\nTimestamp:\t\t\t\t")
+        print_cur_ts(newline=True)
 
         # Create events to coordinate initial loading between users.
         # We create N+1 events: event[i] means "user i finished initial load".
@@ -11393,7 +11714,7 @@ def run_main():
                         if recheck_event.is_set():
                             recheck_event.clear()
                             print(f"* Staggered start interrupted for {u} by recheck request!")
-                            print_cur_ts("\nTimestamp:\t\t\t\t")
+                            print_cur_ts(newline=True)
                             manual_startup_recheck = True
                             break
 
