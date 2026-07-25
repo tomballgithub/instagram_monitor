@@ -822,6 +822,7 @@ mode_of_the_tool = "Unknown"
 HIDE_403_ERRORS = False
 USE_NIQUESTS = False
 MAX_PBAR_WIDTH = 0  # disabled
+MIN_PBAR_WIDTH = 75 # if below this size, reduce the PBAR description to fit
 
 exec(CONFIG_BLOCK, globals())
 
@@ -7605,18 +7606,29 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
             # Interruptible wait (stop/recheck aware) similar to the main sleep loop
             sleep_remaining = fetch_delay
             batch_info_orig = thread_pbar.unit if thread_pbar else ""
+            desc_info_orig = thread_pbar.desc if thread_pbar else ""
             while sleep_remaining > 0:
                 if thread_pbar:
-                    # need to remove part of string to make room, since entire PBAR needs to fit within HORIZONTAL_LINE width (safe_ncols)
-                    batch_info = re.sub(r'^.*?(mins=)', r'\1', batch_info_orig)
-                    # remove existing PAUSED messages. can occur if no accounts fetched for some reason
-                    batch_info = re.sub(r" - PAUSED.*$", "", batch_info) + f" - PAUSED for {sleep_remaining}s"
+                    if (_get_actual_console_width() < MIN_PBAR_WIDTH):
+                        # need to remove part of string to make room, since entire PBAR needs to fit within HORIZONTAL_LINE width (safe_ncols)
+                        batch_info = re.sub(r'^.*?(mins=)', r'\1', batch_info_orig)
+                        # remove existing PAUSED messages. can occur if no accounts fetched for some reason
+                        batch_info = re.sub(r" - PAUSED.*$", "", batch_info) + f" - PAUSE {sleep_remaining}s"
+                        new_desc = desc_info_orig[:2] + desc_info_orig[11:]
+                    else:
+                        # need to remove part of string to make room, since entire PBAR needs to fit within HORIZONTAL_LINE width (safe_ncols)
+                        batch_info = re.sub(r'^.*?(mins=)', r'\1', batch_info_orig)
+                        # remove existing PAUSED messages. can occur if no accounts fetched for some reason
+                        batch_info = re.sub(r" - PAUSED.*$", "", batch_info) + f" - PAUSED for {sleep_remaining}s"
+                        new_desc = desc_info_orig
+                    thread_pbar.desc = new_desc
                     thread_pbar.unit = batch_info
                     thread_pbar.refresh()
                 else:
                     debug_print("* Error No Pbar found in fetch_usernames_paginated()")
                 if stop_event is not None and stop_event.is_set():
                     if thread_pbar:
+                        thread_pbar.desc = desc_info_orig
                         thread_pbar.unit = batch_info_orig  # restore units back to original state to avoid observed problems
                     return results
                 # If a Web Dashboard "recheck" is pending, shorten the current inter-batch wait so the
@@ -7631,6 +7643,7 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
                     refresh_proxy_if_needed(bot, user)
                 if recheck_pending:
                     if thread_pbar:
+                        thread_pbar.desc = desc_info_orig
                         thread_pbar.unit = batch_info_orig  # restore units back to original state to avoid observed problems
                     break
 
@@ -7641,6 +7654,7 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
                     time.sleep(wait_chunk)
                 sleep_remaining -= wait_chunk
             if thread_pbar:
+                thread_pbar.desc = desc_info_orig
                 thread_pbar.unit = batch_info_orig  # restore units back to original state to avoid observed problems
 
     return results
@@ -8141,7 +8155,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             update_ui_data(targets={user: {'status': 'Downloading Followers'}})
             log_activity(f"Started downloading followers", user=user)
             follower_limit = min(FOLLOWER_LIMIT_TO_FETCH, followers_count) if (ADVANCED_FOLLOWER_FETCH and FOLLOWER_LIMIT_TO_FETCH) else followers_count
-            setup_pbar(total_expected=follower_limit, title="* Get Followers")
+            setup_pbar(total_expected=follower_limit, title="* Fetching Followers")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'follower'
             followers = fetch_usernames_paginated(
@@ -8289,7 +8303,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             update_ui_data(targets={user: {'status': 'Downloading Followings'}})
             log_activity(f"Started downloading followings", user=user)
             followee_limit = min(FOLLOWEE_LIMIT_TO_FETCH, followings_count) if (ADVANCED_FOLLOWEE_FETCH and FOLLOWEE_LIMIT_TO_FETCH) else followings_count
-            setup_pbar(total_expected=followee_limit, title="* Get Followings")
+            setup_pbar(total_expected=followee_limit, title="* Fetching Followings")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'followee'
             followings = fetch_usernames_paginated(
@@ -9214,7 +9228,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     try:
                         log_activity(f"Started downloading followings", user=user)
                         followee_limit = min(FOLLOWEE_LIMIT_TO_FETCH, followings_count) if (ADVANCED_FOLLOWEE_FETCH and FOLLOWEE_LIMIT_TO_FETCH) else followings_count
-                        setup_pbar(total_expected=followee_limit, title="* Get Followings")
+                        setup_pbar(total_expected=followee_limit, title="* Fetching Followings")
                         start_time_dl = time.time()
                         followings = []
                         _thread_local.FETCH_TYPE = 'followee'
@@ -9371,7 +9385,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     try:
                         log_activity(f"Started downloading followers", user=user)
                         follower_limit = min(FOLLOWER_LIMIT_TO_FETCH, followers_count) if (ADVANCED_FOLLOWER_FETCH and FOLLOWER_LIMIT_TO_FETCH) else followers_count
-                        setup_pbar(total_expected=follower_limit, title="* Get Followers")
+                        setup_pbar(total_expected=follower_limit, title="* Fetching Followers")
                         start_time_dl = time.time()
                         followers = []
                         _thread_local.FETCH_TYPE = 'follower'
