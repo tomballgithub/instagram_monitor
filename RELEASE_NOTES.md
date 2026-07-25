@@ -1,5 +1,98 @@
 # instagram_monitor release notes
 
+# Changes in 3.7.1 (24 Jul 2026)
+
+**Bug fixes**:
+
+- **BUGFIX:** Updated the built-in guide link to the renamed **Setup & First Run** page so CLI help and recovery guidance no longer point to the retired Quick Start URL
+
+# Changes in 3.7 (23 Jul 2026)
+
+Version **3.7** makes **Docker onboarding portable across macOS, Linux and Windows**. It adds **host-aware Firefox session import** and keeps setup files safe on the persistent **`/data` bind mount**. Generated recovery commands now preserve **targets, custom files and Web Dashboard ports** from import through Doctor and launch.
+
+**Features and improvements**:
+
+- **IMPROVE:** Kept Firefox session import as the **recommended Docker setup choice** while deferring the import until setup files are saved. The wizard now asks which host environment runs Docker then prints the matching read-only import command for macOS, standard Linux, Snap, Flatpak, Windows PowerShell or Windows Command Prompt
+- **NEW:** Added **Windows-host Firefox session import** for direct Docker and Docker Compose through the normal `%APPDATA%\Mozilla\Firefox` profile root with shell-specific PowerShell and Command Prompt commands
+- **IMPROVE:** Expanded direct Docker and Docker Compose Firefox import documentation with **complete commands for every supported host profile layout**
+- **IMPROVE:** Preserved **setup guidance across one-time session imports** by keeping terminal history visible and repeating the exact Doctor and monitoring commands after a successful Firefox import
+- **IMPROVE:** Printed the **install-aware monitoring command** after a successful Doctor run while preserving explicit targets, selected files and Web Dashboard port publishing
+
+**Bug fixes**:
+
+- **BUGFIX:** Stopped the setup wizard from offering **Doctor before a deferred Firefox session import succeeds**, avoiding expected authentication failures during incomplete Docker setup
+- **BUGFIX:** Removed **Linux user mapping from generated macOS Docker commands** while preserving host UID and GID mapping for Linux commands
+- **BUGFIX:** Anchored **default container setup files** to the bind-mounted **`/data` directory** so the generated configuration and dotenv files survive the temporary setup container
+- **BUGFIX:** Preserved **Web Dashboard port publishing** in Docker and Docker Compose monitoring commands printed after Firefox import then replaced container-only `0.0.0.0` browser links with the reachable loopback URL
+- **BUGFIX:** Rejected **Docker setup destinations outside `/data`** instead of saving ephemeral files then printing commands for different paths
+- **BUGFIX:** Generated direct Docker commands with **`${PWD}` for macOS, Linux and Windows PowerShell** then switched to `%cd%` for Windows Command Prompt while retaining Linux user mapping
+- **BUGFIX:** Prevented local setup from offering **immediate monitoring after a declined or failed browser import** unless Doctor validates an existing session
+- **BUGFIX:** Rejected **conflicting standalone actions and setup targets** instead of silently ignoring part of the command
+- **BUGFIX:** Matched generated Docker and one-off Compose port publishing to a **non-default Web Dashboard port**
+- **BUGFIX:** Restricted terminal time highlighting to valid complete clock values so Docker mappings such as `8000:8000` are no longer partially colored as dates
+- **BUGFIX:** Prevented a **Windows traceback after Ctrl+C** when monitoring was started directly from setup. The setup parent now treats its duplicate console interrupt as the same clean termination already handled by the monitoring child
+
+# Changes in 3.6.1 (22 Jul 2026)
+
+**Features and improvements**:
+
+- **IMPROVE:** Added automatic Firefox profile discovery for native Linux, Snap and Flatpak installations. CLI and Web Dashboard session imports now locate all three layouts and de-duplicate cookie databases
+- **IMPROVE:** Improved CLI and `--doctor` recovery guidance with installation-aware Firefox session import commands and direct links for session, rate-limit, proxy, SMTP, webhook and configuration errors
+
+**Bug fixes**:
+
+- **BUGFIX:** Made the Compose service pass `/data/.env` explicitly so `docker compose up` loads saved secrets even when config does not set `DOTENV_FILE`
+
+# Changes in 3.6 (22 Jul 2026)
+
+Version **3.6** focuses on flexible, dependable notifications and safer guided configuration. It adds native ntfy support with protected-topic authentication, interactive delivery checks in `--doctor` and an editable setup summary, while preserving Discord compatibility and strengthening Docker defaults, saved launch behavior and Web Dashboard exposure.
+
+**Features and Improvements**:
+
+- **NEW:** Added native **ntfy webhook notifications** for status, follower and error events. Set `WEBHOOK_PROVIDER = "ntfy"` and save a complete ntfy topic URL in `WEBHOOK_URL` or select ntfy in the setup wizard or Web Dashboard. The setup wizard also accepts a bare ntfy.sh topic name and expands it to a complete URL
+- **NEW:** Added **authentication for protected ntfy topics** via `NTFY_ACCESS_TOKEN` support with Bearer authentication, hidden setup wizard collection and precedence over custom `Authorization` headers in `WEBHOOK_HEADERS`
+- **IMPROVE:** Preserved Discord as the default webhook provider for backward compatibility, including custom payload templates, headers, transformations, proxy routing and Discord image attachments
+- **IMPROVE:** Added provider validation to `--doctor`, provider visibility in startup and dashboard summaries plus a `--webhook-provider {discord,ntfy}` command-line option
+- **IMPROVE:** Extended interactive **`--doctor`** runs with separate tests for email and webhook channels. Each approved test sends one real message. Doctor never writes files and non-interactive runs remain message-free
+- **IMPROVE:** Sent native ntfy messages as bounded UTF-8 text with the alert subject as the title, event field details in the body and existing topic query parameters preserved for authentication
+- **IMPROVE:** Added an editable setup summary so answers can be reviewed before saving
+- **IMPROVE:** Simplified browser onboarding with separate Firefox and Chromium choices plus optional `pycookiecheat` installation
+- **IMPROVE:** Made generated commands portable across Python installations and custom config paths
+- **IMPROVE:** Added confirmation, backups and validation when replacing configuration files
+- **BUGFIX:** No-argument launches now honor saved targets and Web Dashboard mode
+- **BUGFIX:** Improved Docker and Compose support for Linux user mappings, persistent sessions and saved interface choices
+- **SECURITY:** Limited Docker Web Dashboard publishing to the host loopback interface
+
+# Changes in 3.5 (01 Jul 2026)
+
+Version **3.5** focuses on making the tool easier to use, configure and recover when something goes wrong, especially for non-technical users who asked for a simpler path. It brings guided setup, broader browser-session import, clearer diagnostics and friendlier recovery hints so first runs and everyday troubleshooting require less manual digging.
+
+**Features and Improvements**:
+
+- **NEW:** Added an **interactive setup wizard** to make first-time setup easy for non-technical users. Run it with the `--setup` flag or launch the tool with no arguments from an interactive terminal and accept the prompt. The wizard asks a short series of questions, then writes a ready-to-run `instagram_monitor.conf`, routes secrets to a `.env` file and can start monitoring right away for local installs. It auto-detects whether the tool was installed via pip, run from a downloaded script, run under Docker or run via Docker Compose and tailors the suggested commands accordingly
+- **NEW:** Added **session import from Chromium-based browsers** (Chrome, Brave and Chromium) in addition to Firefox, via the new `--import-browser-session --browser {firefox,chrome,brave,chromium}` flags and a browser dropdown on the **Web Dashboard** Session page. Firefox stays the recommended source as it requires no additional dependencies, while Chromium-based browsers use the optional [`pycookiecheat`](https://github.com/n8henrie/pycookiecheat) package and work on macOS and Linux only. On Windows, where Chrome's app-bound encryption (Chrome 127+) blocks external cookie access, the tool detects the platform and recommends Firefox instead.
+- **NEW:** Added **unified per-profile selection across all browsers**. A single `--browser-profile` flag now picks a profile for any browser - a Firefox profile name (e.g. `default-release`) or a Chromium profile directory (e.g. `Default`, `Profile 1`) - with an interactive prompt when several exist and a profile picker on the Web Dashboard import flow. `--cookie-file` is the advanced explicit-database override for every browser. For Chromium-based browsers the cookie database is resolved directly, so both the legacy `<profile>/Cookies` and the newer `<profile>/Network/Cookies` layouts work
+- **NEW:** Added an **ASCII art startup banner** that prints on launch. It uses pure ASCII for broad terminal compatibility and follows the configured color theme, replacing the previous plain one-line version header
+- **IMPROVE:** The **startup summary** now prints a **concise view** on the terminal that leads with the monitored targets and hides settings left at their default or turned off, so the banner stays on screen and the key details (targets, session mode, polling interval, where output goes) are no longer buried in noise. The full configuration is still written to the log for troubleshooting and can be shown on the terminal with `--verbose`/`--debug`
+- **NEW:** Added an **animated demo** (install, setup wizard and run) at the top of the README and docs home, generated from a committed [VHS](https://github.com/charmbracelet/vhs) tape ([demo.tape](demo/demo.tape)) so it can be re-rendered as the tool evolves
+- **NEW:** Added a **[docker-compose.yml](docker-compose.yml)** and a **[.env.example](.env.example)** so Docker users can get started with `docker compose up` instead of long `docker run` commands, with secrets kept in a copyable dotenv template
+- **IMPROVE:** Running the tool with **no arguments** from an interactive terminal now shows a **short welcome with the most common commands** and an offer to launch the setup wizard, instead of dumping the full help text
+- **NEW:** Published a **documentation site** at [misiektoja.github.io/instagram_monitor](https://misiektoja.github.io/instagram_monitor/), built with MkDocs Material and deployed via GitHub Actions. The README is now a concise landing page and the full reference guide
+- **IMPROVE:** The Web Dashboard now shows an actionable **"No targets yet"** empty state with an Add Target button instead of a permanent "Loading targets..." placeholder when no targets are configured
+- **IMPROVE:** A broken hand-edited config file now reports the **offending line and a `To fix:` hint** instead of a raw traceback
+- **NEW:** Added a **`--doctor` preflight self-check**. Version 3.5 introduced it as a read-only PASS/WARN/FAIL report with no email or webhook delivery. It covers optional dependencies, the config file and secrets, session validity, Instagram connectivity, target resolution and notification configuration with a `To fix:` next step on each failure plus a non-zero exit code if any check fails. The setup wizard offers to run it at the end
+- **IMPROVE:** Added **action-oriented error hints**. Common failures (invalid or expired session, challenge/checkpoint, rate limiting, missing session file, target not found, network problems, SMTP and webhook delivery errors) now print a concise `To fix:` next step instead of just the raw error
+- **IMPROVE:** Renamed the session modes from numbered **Mode 1 / Mode 2** to intent-based **No-login** and **Logged-in** across console output, the Web Dashboard, the config template and the README, so you no longer have to remember which number means what
+- **IMPROVE:** Added an **examples section to `--help`** with copy-pasteable commands for guided setup, anonymous tracking, logged-in tracking and the web dashboard. The examples auto-detect how the tool was launched (pip, downloaded script, Docker or Docker Compose) and print matching commands the same way the setup wizard does
+- **IMPROVE:** The old `--import-firefox-session` flag is kept as a backward-compatible alias for `--import-browser-session --browser firefox`
+- **IMPROVE:** Expanded the **offline pytest suite** to increase coverage of critical monitoring workflows, including webhook delivery, paginated follower/following fetching, Web Dashboard endpoints, posts/reels count detection, leaked-collab reporting, profile-picture creation/removal/change handling, install-method detection and startup story item metadata/CSV updates.
+- **IMPROVE:** Suppressed **Instaloader's intermittent retry noise** (the repeated `JSON Query to graphql/query: 403 Forbidden ...` lines it prints to stderr) during normal runs and the `--doctor`/`--setup` preflight, since those attempts usually succeed on a later try. The final failure is still shown, while verbose or debug mode keeps the full chatter
+
+**Bug fixes**:
+
+- **BUGFIX:** Repaired **logged-in post and reel fetching** after Instagram retired the GraphQL `doc_id 8845758582119845` (`xdt_shortcode_media`) in June 2026, which returned null data and crashed `Post._obtain_metadata` with `TypeError: 'NoneType' object is not subscriptable` as soon as a field outside the timeline node (such as tagged users) was read. Added a compatibility patch that migrates to `doc_id 27128499623469141` (`PolarisPostRootQuery`) and reshapes the response to the legacy fields (ports [instaloader/instaloader#2706](https://github.com/instaloader/instaloader/pull/2706), see [#2704](https://github.com/instaloader/instaloader/issues/2704))
+- **BUGFIX:** Guarded **`latest_post_reel`** against a null GraphQL `data` response so a deprecated query or a temporary block surfaces a clean, actionable `To fix:` message instead of a raw `TypeError`
+
 # Changes in 3.4 (16 Jun 2026)
 
 **Features and Improvements**:
@@ -93,12 +186,12 @@ A huge thank you to our amazing contributors [@Sha-Dox](https://github.com/Sha-D
 
 **Features and Improvements**:
 
-- **NEW:** Added a comprehensive **dashboard system** accessible in terminal and web, including a Rich-powered **Terminal Dashboard** and a Flask-powered **Web Dashboard** with real-time stats, activity feeds and interactive controls; check the [Terminal Dashboard](https://github.com/misiektoja/instagram_monitor#terminal-dashboard-mode) and [Web Dashboard](https://github.com/misiektoja/instagram_monitor#web-dashboard-mode) for more info
-- **NEW:** Added **webhook notifications** system compatible with **Discord** and other webhook services for all monitored events with support for sending local image files; check the [Webhook Notifications](https://github.com/misiektoja/instagram_monitor#webhook-notifications) for more info
+- **NEW:** Added a comprehensive **dashboard system** accessible in terminal and web, including a Rich-powered **Terminal Dashboard** and a Flask-powered **Web Dashboard** with real-time stats, activity feeds and interactive controls; check the [Terminal Dashboard](https://misiektoja.github.io/instagram_monitor/view-modes/#terminal-dashboard-mode) and [Web Dashboard](https://misiektoja.github.io/instagram_monitor/view-modes/#web-dashboard-mode) for more info
+- **NEW:** Added **webhook notifications** system compatible with **Discord** and other webhook services for all monitored events with support for sending local image files; check the [Webhook Notifications](https://misiektoja.github.io/instagram_monitor/usage/#webhook-notifications) for more info
 - **NEW:** Implemented native **color output** support for terminal, enhancing user experience with customizable **color themes** (see `COLORED_OUTPUT` and `COLOR_THEME` config options). You can still use the old **grc** method if you prefer to only color the logs
-- **NEW:** Added **follower churn detection** (`--followers-churn` flag or `FOLLOWERS_CHURN_DETECTION` config option) - forces the tool to download and compare the full list of followers/followings even if the total count hasn't changed, allowing the detection of user handle changes or simultaneous additions and removals; check the [Follower Churn Detection](https://github.com/misiektoja/instagram_monitor#follower-churn-detection) for more info
-- **NEW:** Added **custom output directory** feature to organize all files into target-specific subdirectories (**images**, **videos**, **logs**, **json**, **csvs**) which significantly improves organization for multi-target monitoring; check the [Output Directory](https://github.com/misiektoja/instagram_monitor#output-directory) for more info (closes [#35](https://github.com/misiektoja/instagram_monitor/issues/35))
-- **NEW:** Added **skip follow changes** option (`--skip-follow-changes` flag or `SKIP_FOLLOW_CHANGES` config option) - allows to completely silence and disable follow-related tracking (console prints, activity logs, email/webhook notifications and CSV saving) while still maintaining live statistics in the dashboards; note that enabling this automatically disables **follower churn detection** as detailed tracking is suppressed; check the [Skipping Follow Changes](https://github.com/misiektoja/instagram_monitor#skipping-follow-changes) for more info
+- **NEW:** Added **follower churn detection** (`--followers-churn` flag or `FOLLOWERS_CHURN_DETECTION` config option) - forces the tool to download and compare the full list of followers/followings even if the total count hasn't changed, allowing the detection of user handle changes or simultaneous additions and removals; check the [Follower Churn Detection](https://misiektoja.github.io/instagram_monitor/usage/#follower-churn-detection) for more info
+- **NEW:** Added **custom output directory** feature to organize all files into target-specific subdirectories (**images**, **videos**, **logs**, **json**, **csvs**) which significantly improves organization for multi-target monitoring; check the [Output Directory](https://misiektoja.github.io/instagram_monitor/usage/#output-directory) for more info (closes [#35](https://github.com/misiektoja/instagram_monitor/issues/35))
+- **NEW:** Added **skip follow changes** option (`--skip-follow-changes` flag or `SKIP_FOLLOW_CHANGES` config option) - allows to completely silence and disable follow-related tracking (console prints, activity logs, email/webhook notifications and CSV saving) while still maintaining live statistics in the dashboards; note that enabling this automatically disables **follower churn detection** as detailed tracking is suppressed; check the [Skipping Follow Changes](https://misiektoja.github.io/instagram_monitor/usage/#skipping-follow-changes) for more info
 - **NEW:** Implemented **debug mode** (`--debug` flag or `DEBUG_MODE` config option) - provides full technical logging including every API request and internal state changes
 - **NEW:** Introduced **verbose mode** (`--verbose` flag or `VERBOSE_MODE` config option) - provides a middle-ground logging level that shows timing details, next check schedule and loop completion messages without the exhaustive detail of Debug Mode
 - **NEW:** Added support for **12-hour time format** (`TIME_FORMAT_12H` config option) across the entire tool including dashboards, console output, activity logs and email notifications
@@ -197,9 +290,9 @@ A huge thank you to our amazing contributors [@Sha-Dox](https://github.com/Sha-D
 
 **Features and Improvements**:
 
-- **NEW:** Introduced new experimental **Be Human** mode that makes the tool behave more like a real user to reduce bot detection by performing random feed / profile / hashtag / followee actions. It is disabled by default, check the [Human Mode](https://github.com/misiektoja/instagram_monitor#use-the-human-mode) for more info.
-- **NEW:** Added new **Jitter** mode which allows to force every HTTP call made by Instaloader to go through a built-in jitter/back-off layer to look more human. It is disabled by default, check the [Jitter Mode](https://github.com/misiektoja/instagram_monitor#use-the-jitter-mode) for more info.
-- **NEW:** Added config options and flags to set desktop and mobile Instagram user agent strings. Check [User Agent](https://github.com/misiektoja/instagram_monitor#user-agent) for more info.
+- **NEW:** Introduced new experimental **Be Human** mode that makes the tool behave more like a real user to reduce bot detection by performing random feed / profile / hashtag / followee actions. It is disabled by default, check the [Human Mode](https://misiektoja.github.io/instagram_monitor/anti-detection/#use-the-human-mode) for more info.
+- **NEW:** Added new **Jitter** mode which allows to force every HTTP call made by Instaloader to go through a built-in jitter/back-off layer to look more human. It is disabled by default, check the [Jitter Mode](https://misiektoja.github.io/instagram_monitor/anti-detection/#use-the-jitter-mode) for more info.
+- **NEW:** Added config options and flags to set desktop and mobile Instagram user agent strings. Check [User Agent](https://misiektoja.github.io/instagram_monitor/configuration/#user-agent) for more info.
 - **NEW:** Ensured all Instagram requests now include the appropriate user agent, if not specified - they are randomly generated per session
 
 **Bug fixes**:

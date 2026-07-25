@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "instagram_monitor"
-version = "3.4"
+version = "3.7.1"
 description = "Track Instagram users' activities, profile changes and capture content with beautiful dashboards and instant notifications"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -42,9 +42,12 @@ keywords = ["instagram", "monitoring", "tracking", "real-time", "osint", "instal
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
+# Needed only to import Chrome/Brave/Chromium sessions (--browser chrome|brave|chromium); macOS and Linux only
+browser = ["pycookiecheat>=0.8"]
 
 [project.urls]
 Homepage = "https://github.com/misiektoja/instagram_monitor"
+Documentation = "https://misiektoja.github.io/instagram_monitor/"
 Source   = "https://github.com/misiektoja/instagram_monitor"
 Changelog= "https://github.com/misiektoja/instagram_monitor/blob/main/RELEASE_NOTES.md"
 

@@ -938,11 +938,11 @@
                     </div>
 
                     <p style="margin-bottom: 12px;">
-                        <strong>Session Mode 1 (Anonymous):</strong> No login required. Limited to basic profile info
+                        <strong>No-login mode:</strong> No login required. Limited to basic profile info
                         and post counts.
                     </p>
                     <p style="margin-bottom: 12px;">
-                        <strong>Session Mode 2 (Logged In):</strong> Requires Instagram account login. Provides access
+                        <strong>Logged-in mode:</strong> Requires Instagram account login. Provides access
                         to full functionality including detailed follower/following lists, stories content, detailed
                         post/reel info.
                     </p>
@@ -1006,24 +1006,37 @@
             <div class="card" style="margin-top: 20px;">
                 <div class="card-title">Configure Session</div>
 
-                <div id="firefox-import-section" style="margin-bottom: 24px;">
-                    <button class="btn btn-secondary" onclick="detectFirefoxProfiles()" id="detect-firefox-btn">
-                        <span>🦊</span> Detect Firefox Profiles
-                    </button>
+                <div id="browser-import-section" style="margin-bottom: 24px;">
+                    <label class="form-label">Import session from browser</label>
+                    <select class="form-input" id="browser-select" style="margin-bottom: 16px; max-width: 360px;"
+                        onchange="onBrowserChange()">
+                        <option value="firefox">Firefox (recommended)</option>
+                        <option value="chrome">Google Chrome</option>
+                        <option value="brave">Brave</option>
+                        <option value="chromium">Chromium (standalone browser, not Chrome)</option>
+                    </select>
 
-                    <div id="firefox-profiles-container"
-                        style="display: none; margin-top: 16px; background: rgba(0,0,0,0.2); padding: 16px; border-radius: 12px;">
-                        <label class="form-label">Select Firefox Profile</label>
-                        <select class="form-input" id="firefox-profile-select" style="margin-bottom: 12px;"></select>
-                        <button class="btn btn-primary btn-sm" onclick="importFirefoxSession()">
+                    <!-- Browser import flow (same logic for every browser) -->
+                    <p id="browser-import-note" style="font-size: 13px; color: #888; margin-bottom: 12px; display: none;"></p>
+
+                    <!-- Profile picker, shown only when several profiles exist -->
+                    <div id="browser-profiles-container"
+                        style="display: none; margin-bottom: 12px; background: rgba(0,0,0,0.2); padding: 16px; border-radius: 12px;">
+                        <label class="form-label">Select Profile</label>
+                        <select class="form-input" id="browser-profile-select" style="margin-bottom: 12px;"></select>
+                        <button class="btn btn-primary btn-sm" onclick="importSelectedProfile()">
                             <span>📥</span> Import Selected Profile
                         </button>
                     </div>
+
+                    <button class="btn btn-primary btn-sm" id="browser-import-btn" onclick="startBrowserImport()">
+                        <span>📥</span> Import from <span id="browser-import-label">Firefox</span>
+                    </button>
                 </div>
 
                 <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px; margin-top: 20px;">
                     <div class="form-group">
-                        <label class="form-label">Manual Username Setup (Mode 2)</label>
+                        <label class="form-label">Manual Username Setup (Logged-in mode)</label>
                         <input type="text" class="form-input" id="session-username"
                             placeholder="your_instagram_username">
                     </div>
@@ -1041,7 +1054,7 @@
                         </button>
                         <button class="btn btn-danger" onclick="clearSession()" id="clear-session-btn"
                             style="display: none;">
-                            <span>🗑️</span> Reset to Mode 1 (Anonymous)
+                            <span>🗑️</span> Reset to No-login mode
                         </button>
                     </div>
                 </div>
@@ -1344,9 +1357,16 @@
                         </label>
                     </div>
                     <div class="form-group" style="margin: 10px 0;">
+                        <label class="form-label">Provider</label>
+                        <select class="form-input" id="webhook-provider">
+                            <option value="discord">Discord</option>
+                            <option value="ntfy">ntfy</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin: 10px 0;">
                         <label class="form-label">Webhook URL</label>
                         <input type="text" class="form-input" id="webhook-url"
-                            placeholder="https://discord.com/api/webhooks/...">
+                            placeholder="Discord webhook or complete ntfy topic URL">
                     </div>
                     <div style="margin-bottom: 20px;">
                         <button class="btn btn-secondary btn-sm" onclick="testWebhook()">
@@ -1960,12 +1980,13 @@
                 // settings-grid pairs each webhook row with its proxy counterpart
                 { l: 'Webhook', v: config.webhook_enabled },
                 { l: 'Proxy for Instagram', v: config.proxy_enabled ? 'Enabled' : 'Disabled' },
-                { l: 'Webhook Status', v: config.webhook_status ? 'Enabled' : 'Disabled' },
+                { l: 'Webhook Provider', v: config.webhook_provider },
                 { l: 'Proxy for Webhooks', v: config.proxy_webhooks ? 'Enabled' : 'Disabled' },
-                { l: 'Webhook Followers', v: config.webhook_followers ? 'Enabled' : 'Disabled' },
+                { l: 'Webhook Status', v: config.webhook_status ? 'Enabled' : 'Disabled' },
                 { l: 'Proxy URL', v: config.proxy_url ? config.proxy_url.substring(0, 50) + (config.proxy_url.length > 50 ? '...' : '') : '' },
-                { l: 'Webhook Errors', v: config.webhook_errors ? 'Enabled' : 'Disabled' },
+                { l: 'Webhook Followers', v: config.webhook_followers ? 'Enabled' : 'Disabled' },
                 { l: 'Proxy Certificate', v: config.proxy_cert || '' },
+                { l: 'Webhook Errors', v: config.webhook_errors ? 'Enabled' : 'Disabled' },
             ];
 
             // Environment specific items
@@ -2049,9 +2070,10 @@
 
             if (Object.keys(targets).length === 0) {
                 console.log('No targets found, showing empty state');
-                if (tbody) tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state"><p>No targets added yet.</p></div></td></tr>`;
-                if (tbodySimple) tbodySimple.innerHTML = `<tr><td colspan="9"><div class="empty-state"><p>No targets added yet.</p></div></td></tr>`;
-                if (targetsList) targetsList.innerHTML = `<tr><td colspan="6"><div class="empty-state"><p>No targets configured</p></div></td></tr>`;
+                const emptyTargets = `<div class="empty-state"><div class="empty-state-icon">👥</div><p>No targets yet</p><p style="font-size:0.9em;opacity:0.7;margin-top:4px;">Add an Instagram account to start monitoring.</p><button class="btn btn-primary" style="margin-top:16px;" onclick="showModal('add-target')"><span>➕</span> Add Target</button></div>`;
+                if (tbody) tbody.innerHTML = `<tr><td colspan="10">${emptyTargets}</td></tr>`;
+                if (tbodySimple) tbodySimple.innerHTML = `<tr><td colspan="9">${emptyTargets}</td></tr>`;
+                if (targetsList) targetsList.innerHTML = `<tr><td colspan="6">${emptyTargets}</td></tr>`;
                 return;
             }
 
@@ -2184,6 +2206,7 @@
             document.getElementById('error-notifications').checked = s.error_notifications || false;
 
             document.getElementById('webhook-enabled').checked = s.webhook_enabled || false;
+            document.getElementById('webhook-provider').value = s.webhook_provider || 'discord';
             document.getElementById('webhook-url').value = s.webhook_url || '';
             document.getElementById('webhook-status').checked = s.webhook_status || false;
             document.getElementById('webhook-followers').checked = s.webhook_followers || false;
@@ -2399,6 +2422,7 @@
                 error_notifications: document.getElementById('error-notifications').checked,
 
                 webhook_enabled: document.getElementById('webhook-enabled').checked,
+                webhook_provider: document.getElementById('webhook-provider').value,
                 webhook_url: document.getElementById('webhook-url').value,
                 webhook_status: document.getElementById('webhook-status').checked,
                 webhook_followers: document.getElementById('webhook-followers').checked,
@@ -2561,34 +2585,99 @@
             }
         }
 
-        async function detectFirefoxProfiles() {
-            try {
-                showToast('Searching for Firefox profiles...');
-                const response = await fetch('/api/session/firefox/profiles');
-                const data = await response.json();
-                if (data.success && data.profiles.length > 0) {
-                    const select = document.getElementById('firefox-profile-select');
-                    select.innerHTML = data.profiles.map(p => `<option value="${escapeHtml(p.path)}">${escapeHtml(p.name)}</option>`).join('');
-                    document.getElementById('firefox-profiles-container').style.display = 'block';
-                    showToast(`Found ${data.profiles.length} profiles`);
-                } else {
-                    showToast('No Firefox profiles found', 'error');
-                }
-            } catch (err) {
-                showToast('Failed to detect profiles', 'error');
-            }
+        const CHROMIUM_IMPORT_NOTE = 'Make sure you are logged in to Instagram in this browser. "Chromium" means the standalone open-source browser, not Chrome - pick it only if you run that browser. Requires the pycookiecheat package and works only on macOS and Linux (not on Windows, where Chrome\'s app-bound encryption blocks access - use Firefox there). Edge, Opera, Vivaldi and Arc are not supported.';
+
+        function browserDisplayLabel(browser) {
+            return browser === 'chrome' ? 'Google Chrome' : browser.charAt(0).toUpperCase() + browser.slice(1);
         }
 
-        async function importFirefoxSession() {
-            const path = document.getElementById('firefox-profile-select').value;
-            if (!path) return;
+        function onBrowserChange() {
+            const browser = document.getElementById('browser-select').value;
+            document.getElementById('browser-import-label').textContent = browserDisplayLabel(browser);
 
+            const note = document.getElementById('browser-import-note');
+            if (browser === 'firefox') {
+                note.style.display = 'none';
+                note.textContent = '';
+            } else {
+                note.style.display = 'block';
+                note.textContent = CHROMIUM_IMPORT_NOTE;
+            }
+
+            // Reset the profile picker - profiles differ per browser
+            document.getElementById('browser-profiles-container').style.display = 'none';
+            document.getElementById('browser-profile-select').innerHTML = '';
+            document.getElementById('browser-import-btn').style.display = 'inline-flex';
+        }
+
+        // Returns profiles normalised to {value, label}, or null on error (Firefox value is a path, Chromium a profile dir)
+        async function fetchBrowserProfiles(browser) {
+            const url = browser === 'firefox'
+                ? '/api/session/firefox/profiles'
+                : '/api/session/chromium/profiles?browser=' + encodeURIComponent(browser);
+            const response = await fetch(url);
+            const data = await response.json();
+            if (!data.success) {
+                showToast(data.error || 'Failed to detect profiles', 'error');
+                return null;
+            }
+            return data.profiles.map(p => browser === 'firefox'
+                ? { value: p.path, label: p.name }
+                : { value: p.dir, label: `${p.name} (${p.dir})` });
+        }
+
+        // Same logic for every browser: one profile imports directly, several reveal the list to choose from
+        async function startBrowserImport() {
+            const browser = document.getElementById('browser-select').value;
+            showToast(`Searching for ${browser} profiles...`);
+
+            let profiles;
             try {
-                showToast('Importing session from Firefox...');
-                const response = await fetch('/api/session/firefox/import', {
+                profiles = await fetchBrowserProfiles(browser);
+            } catch (err) {
+                showToast('Failed to detect profiles', 'error');
+                return;
+            }
+            if (profiles === null) return;
+
+            if (profiles.length === 0) {
+                showToast(`No ${browser} profiles found`, 'error');
+                return;
+            }
+            if (profiles.length === 1) {
+                doBrowserImport(browser, profiles[0].value);
+                return;
+            }
+
+            // Multiple profiles - let the user choose, then import the selected one
+            const select = document.getElementById('browser-profile-select');
+            select.innerHTML = profiles.map(p =>
+                `<option value="${escapeHtml(p.value)}">${escapeHtml(p.label)}</option>`).join('');
+            document.getElementById('browser-profiles-container').style.display = 'block';
+            document.getElementById('browser-import-btn').style.display = 'none';
+            showToast(`Found ${profiles.length} profiles - select one and import`);
+        }
+
+        function importSelectedProfile() {
+            const browser = document.getElementById('browser-select').value;
+            const value = document.getElementById('browser-profile-select').value;
+            if (!value) return;
+            doBrowserImport(browser, value);
+        }
+
+        async function doBrowserImport(browser, value) {
+            const payload = { browser };
+            if (browser === 'firefox') {
+                payload.path = value;
+            } else {
+                payload.profile = value;
+            }
+            try {
+                showToast(`Importing session from ${browser}...`);
+                const response = await fetch('/api/session/browser/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path })
+                    body: JSON.stringify(payload)
                 });
                 const data = await response.json();
                 if (data.success) {
@@ -2695,7 +2784,7 @@
                 badge.textContent = sessionData.active ? 'Active' : 'Inactive';
 
                 modeIndicator.className = 'badge badge-success';
-                modeIndicator.textContent = 'Mode 2: Logged In';
+                modeIndicator.textContent = 'Logged-in mode';
 
                 // Show details
                 detailsContainer.style.display = 'block';
@@ -2707,7 +2796,9 @@
                     `${escapeHtml(sessionData.last_modified)} (${escapeHtml(sessionData.last_modified_relative)} ago)` :
                     (sessionData.file_exists ? 'Unknown' : 'N/A');
                 document.getElementById('session-detail-method').textContent = sessionData.method ?
-                    (sessionData.method === 'firefox' ? 'Firefox Import' : 'Manual Setup') : '-';
+                    (['firefox', 'chrome', 'brave', 'chromium'].includes(sessionData.method) ?
+                        sessionData.method.charAt(0).toUpperCase() + sessionData.method.slice(1) + ' Import' :
+                        'Manual Setup') : '-';
                 document.getElementById('session-detail-tested').textContent = sessionData.last_tested || 'Never';
 
                 // Show action buttons
@@ -2722,7 +2813,7 @@
                 badge.textContent = 'Inactive';
 
                 modeIndicator.className = 'badge badge-idle';
-                modeIndicator.textContent = 'Mode 1: Anonymous';
+                modeIndicator.textContent = 'No-login mode';
 
                 // Hide details
                 detailsContainer.style.display = 'none';

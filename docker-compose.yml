@@ -1,0 +1,55 @@
+# Docker Compose setup for instagram_monitor
+#
+# Quick start:
+#   1. On native Linux export the host identity first (users on macOS or Windows normally skip this):
+#        export INSTAGRAM_MONITOR_UID="$(id -u)"
+#        export INSTAGRAM_MONITOR_GID="$(id -g)"
+#   2. Generate a config (the wizard configures the dashboard for container access):
+#        docker compose run --rm --pull=always instagram_monitor --setup
+#   3. Start the saved targets and selected interface:
+#        docker compose up --no-log-prefix
+#   4. Open the web dashboard at http://127.0.0.1:8000/ and add targets.
+#      0.0.0.0 is the internal server bind address, not a browser destination.
+#
+# To monitor specific targets from the command line instead of the dashboard,
+# override the command, e.g.:
+#   docker compose run --rm --service-ports instagram_monitor user1 user2 --web-dashboard
+#
+# To import a Firefox session, use the command matching the host profile layout:
+#   macOS:         docker compose run --rm -v "${HOME}/Library/Application Support/Firefox/Profiles:/home/instagram/.mozilla/firefox:ro" instagram_monitor --import-browser-session --browser firefox --env-file /data/.env
+#   Linux:         docker compose run --rm -v "$HOME/.mozilla/firefox:/home/instagram/.mozilla/firefox:ro" instagram_monitor --import-browser-session --browser firefox --env-file /data/.env
+#   Linux Snap:    docker compose run --rm -v "$HOME/snap/firefox/common/.mozilla/firefox:/home/instagram/.mozilla/firefox:ro" instagram_monitor --import-browser-session --browser firefox --env-file /data/.env
+#   Linux Flatpak: docker compose run --rm -v "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox:/home/instagram/.mozilla/firefox:ro" instagram_monitor --import-browser-session --browser firefox --env-file /data/.env
+#   Windows PowerShell: docker compose run --rm -v "$env:APPDATA\Mozilla\Firefox:/home/instagram/.mozilla/firefox:ro" instagram_monitor --import-browser-session --browser firefox --env-file /data/.env
+#   Windows Command Prompt: docker compose run --rm -v "%APPDATA%\Mozilla\Firefox:/home/instagram/.mozilla/firefox:ro" instagram_monitor --import-browser-session --browser firefox --env-file /data/.env
+
+services:
+  instagram_monitor:
+    image: misiektoja/instagram-monitor:latest
+    # To build from this repo instead of pulling the published image, comment out
+    # the "image:" line above and uncomment the "build:" line below.
+    # build: .
+    init: true
+    stdin_open: true
+    tty: true
+    # Native Linux users can map this service to the host identity so /data stays writable
+    user: "${INSTAGRAM_MONITOR_UID:-10001}:${INSTAGRAM_MONITOR_GID:-10001}"
+    environment:
+      # Lets the tool print docker-compose-style example commands in --help and the setup wizard
+      - INSTAGRAM_MONITOR_COMPOSE=1
+    ports:
+      # Keep the unauthenticated dashboard reachable only from this host
+      - "127.0.0.1:${INSTAGRAM_MONITOR_WEB_DASHBOARD_PORT:-8000}:${INSTAGRAM_MONITOR_WEB_DASHBOARD_PORT:-8000}"
+    volumes:
+      # Generated files plus config and the .env secrets file live in the current
+      # directory on the host.
+      # The shared SELinux label is ignored on hosts that do not use SELinux.
+      - ./:/data:z
+      # Persist the Instaloader session across runs
+      - instagram_monitor_session:/home/instagram/.config/instaloader
+    # Override the image's --help default while preserving saved targets and interface
+    # choices from config, then load bind-mounted secrets explicitly.
+    command: ["--env-file", "/data/.env"]
+
+volumes:
+  instagram_monitor_session:

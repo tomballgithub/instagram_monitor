@@ -43,7 +43,7 @@
 #!/usr/bin/env python3
 """
 Author: Michal Szymanski <misiektoja-github@rm-rf.ninja>
-v3.4
+v3.7.1
 
 OSINT tool implementing real-time tracking of Instagram users activities and profile changes:
 https://github.com/misiektoja/instagram_monitor/
@@ -62,25 +62,25 @@ flask (optional - for web dashboard)
 rich (optional - for terminal dashboard)
 """
 
-VERSION = "3.4"
+VERSION = "3.7.1"
 
 # ---------------------------
 # CONFIGURATION SECTION START
 # ---------------------------
 
 CONFIG_BLOCK = """
-# Session login (mode 2) is required for some features such as retrieving the list of followings/followers
+# Session login (Logged-in mode) is required for some features such as retrieving the list of followings/followers
 # or detailed posts/reels/stories info
 #
-# The tool still works without login (mode 1), but in a limited way
+# The tool still works without login (No-login mode), but in a limited way
 #
-# For session login (mode 2), you'll need to log in with your Instagram username and password
+# For session login (Logged-in mode), you'll need to log in with your Instagram username and password
 #
 # Provide the username below (or use the -u flag)
 SESSION_USERNAME = ""
 
 # Provide the password using one of the following methods:
-#   - Log in via Firefox web browser and import session cookie: instagram_monitor --import-firefox-session
+#   - Log in via web browser and import session cookie: instagram_monitor --import-browser-session --browser firefox (also chrome, brave or chromium)
 #   - Log in using instaloader: instaloader -l <SESSION_USERNAME>
 #   - Pass it at runtime with -p / --session-password
 #   - Set it as an environment variable (e.g. export SESSION_PASSWORD=...)
@@ -90,7 +90,7 @@ SESSION_USERNAME = ""
 SESSION_PASSWORD = ""
 
 # SMTP settings for sending email notifications
-# If left as-is, no notifications will be sent
+# If left as-is, no email notifications will be sent
 #
 # Provide the SMTP_PASSWORD secret using one of the following methods:
 #   - Set it as an environment variable (e.g. export SMTP_PASSWORD=...)
@@ -144,7 +144,7 @@ LOCAL_TIMEZONE = 'Auto'
 # Can be also toggled via Web Dashboard
 TIME_FORMAT_12H = False
 
-# Notify when the user's profile picture changes? (via console and email if STATUS_NOTIFICATION / -s is enabled).
+# Detect profile picture changes in console output and enabled email or webhook status notifications
 # If enabled, the current profile picture is saved as:
 #   - instagram_<username>_profile_pic.jpg (initial)
 #   - instagram_<username>_profile_pic_YYmmdd_HHMM.jpg (on change)
@@ -212,7 +212,7 @@ FOLLOWERS_CHURN_DETECTION = False
 SKIP_FOLLOW_CHANGES = False
 
 # Make the tool behave more like a human by performing random feed / profile / hashtag / followee actions
-# Used only with session login (mode 2), always disabled without login (anonymous mode 1)
+# Used only with session login (Logged-in mode), always disabled without login (No-login mode)
 BE_HUMAN = False
 
 # Approximate number of simulated human actions to perform per 24 hours
@@ -388,6 +388,7 @@ DOTENV_FILE = ""
 # Default Firefox cookie directories by OS
 FIREFOX_MACOS_COOKIE = "~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite"
 FIREFOX_WINDOWS_COOKIE = "~/AppData/Roaming/Mozilla/Firefox/Profiles/*/cookies.sqlite"
+# Native Linux path, with Snap and Flatpak paths discovered automatically too
 FIREFOX_LINUX_COOKIE = "~/.mozilla/firefox/*/cookies.sqlite"
 
 # Base name for the log file. Output will be saved to target-specific log files.
@@ -508,19 +509,24 @@ DASHBOARD_SHOW_CHECK_SECONDS = True
 # ----------------------------
 # Webhook Integration
 # ----------------------------
-# Discord API limits (for reference and validation)
+# Discord and ntfy limits (for reference and validation)
 WEBHOOK_FIELD_VALUE_LIMIT = 1024
 WEBHOOK_FIELD_NAME_LIMIT = 256
 WEBHOOK_EMBED_DESCRIPTION_LIMIT = 4096
 WEBHOOK_EMBED_TITLE_LIMIT = 256
 WEBHOOK_MAX_FIELDS = 25
+NTFY_MESSAGE_LIMIT_BYTES = 4096
 
-# Enable webhook notifications (Discord-compatible)
+# Enable webhook notifications through Discord or ntfy
 # Can also be enabled via the --webhook flag
 WEBHOOK_ENABLED = False
 
-# Webhook URL (Discord webhook URL or compatible endpoint)
+# Available providers: discord, ntfy
+WEBHOOK_PROVIDER = "discord"
+
+# Discord webhook URL or complete ntfy topic URL
 # For Discord: Right-click channel -> Edit Channel -> Integrations -> Webhooks -> Copy Webhook URL
+# For ntfy: use a hard-to-guess topic URL such as https://ntfy.sh/your-private-topic
 WEBHOOK_URL = ""
 
 # Webhook username to display (leave empty for default)
@@ -561,13 +567,15 @@ WEBHOOK_TEMPLATE = {
     }]
 }
 
-# Webhook request headers as a dictionary, but it can be empty.
+# Optional static request headers for advanced webhook integrations
+# Prefer NTFY_ACCESS_TOKEN in an environment variable or dotenv file for ntfy Bearer authentication
 # Some examples:
 #   {
 #       "Content-Type": "application/json",
 #       "Authorization": "Bearer tk_redacted"
 #   }
 WEBHOOK_HEADERS = {}
+NTFY_ACCESS_TOKEN = ""
 
 # Transformations to apply to WEBHOOK_TEMPLATE and WEBHOOK_HEADERS as a list of tuples, but it can be empty
 # tuple format is: (field_to_target, method_name, *optional_arguments)
@@ -668,10 +676,16 @@ def _format_config_value(value, prefer_double_quotes: bool) -> str:
     return repr(value)
 
 
-# Renders CONFIG_BLOCK with current runtime globals substituted into simple one-line assignments
-def generate_config_with_current_values() -> str:
+# Validates Python config content without executing it
+def validate_config_content(content: str, filename: str = "<generated-config>") -> None:
+    compile(content, filename, "exec")
+
+
+# Renders CONFIG_BLOCK with selected runtime values substituted into simple one-line assignments
+def generate_config_with_current_values(values=None) -> str:
     import re
 
+    current_values = globals() if values is None else values
     assign_re = re.compile(r"^([A-Z][A-Z0-9_]*)\s*=\s*(.*)$")
     out_lines: list[str] = []
 
@@ -691,23 +705,139 @@ def generate_config_with_current_values() -> str:
         expr, comment = _split_inline_comment_preserving_strings(rhs)
         expr_stripped = expr.strip()
 
+        if var in SENSITIVE_CONFIG_KEYS:
+            out_lines.append(line)
+            continue
+
         # Avoid rewriting multiline structures (keep template as-is)
         if expr_stripped.endswith(("{", "[", "(")) and not any(c in expr_stripped for c in ("}", "]", ")")):
             out_lines.append(line)
             continue
 
-        if var not in globals():
+        if var not in current_values:
             out_lines.append(line)
             continue
 
         prefer_double_quotes = expr_stripped.startswith('"')
-        new_expr = _format_config_value(globals()[var], prefer_double_quotes=prefer_double_quotes)
+        new_expr = _format_config_value(current_values[var], prefer_double_quotes=prefer_double_quotes)
         new_line = f"{var} = {new_expr}"
         if comment:
             new_line = f"{new_line}  {comment}"
         out_lines.append(new_line)
 
-    return "\n".join(out_lines) + "\n"
+    rendered = "\n".join(out_lines) + "\n"
+    validate_config_content(rendered)
+    return rendered
+
+
+# Writes validated config content atomically and backs up an existing destination
+def write_config_file(destination, content: str):
+    destination_path = Path(destination).expanduser()
+    validate_config_content(content, str(destination_path))
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    backup_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", prefix=f".{destination_path.name}.", suffix=".tmp", dir=str(destination_path.parent), delete=False) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        if destination_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            for collision_index in range(1000):
+                collision_suffix = "" if collision_index == 0 else f"-{collision_index:02d}"
+                candidate = destination_path.with_name(f"{destination_path.name}.{timestamp}{collision_suffix}.bak")
+                try:
+                    with destination_path.open("rb") as source_file, candidate.open("xb") as backup_file:
+                        shutil.copyfileobj(source_file, backup_file)
+                        backup_file.flush()
+                        os.fsync(backup_file.fileno())
+                    backup_path = candidate
+                    break
+                except FileExistsError:
+                    continue
+                except Exception:
+                    if candidate.exists():
+                        candidate.unlink()
+                    raise
+            if backup_path is None:
+                raise FileExistsError(f"Could not create a unique backup for '{destination_path}'")
+
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+    return {"path": str(destination_path), "backup_path": str(backup_path) if backup_path is not None else None}
+
+
+# Quotes one secret value for lossless parsing by python-dotenv
+def _format_dotenv_value(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("Dotenv secret values must be strings")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+# Updates allowed secrets in a dotenv file through an atomic replacement
+def update_dotenv_file(destination, updates):
+    if not hasattr(updates, "items"):
+        raise TypeError("Dotenv updates must be a mapping")
+    update_items = list(updates.items())
+    for key, value in update_items:
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key not in SECRET_KEYS:
+            raise ValueError(f"Unsupported dotenv key: {key!r}")
+        if not isinstance(value, str):
+            raise TypeError(f"Dotenv value for {key} must be a string")
+
+    destination_path = Path(destination).expanduser()
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines = destination_path.read_text(encoding="utf-8").splitlines() if destination_path.exists() else []
+    update_keys = {key for key, _ in update_items}
+    values_by_key = dict(update_items)
+    seen_keys = set()
+    output_lines = []
+    assignment_pattern = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+    for line in existing_lines:
+        match = assignment_pattern.match(line)
+        key = match.group(1) if match else None
+        if key not in update_keys:
+            output_lines.append(line)
+            continue
+        if key in seen_keys:
+            continue
+        output_lines.append(f"{key}={_format_dotenv_value(values_by_key[key])}")
+        seen_keys.add(key)
+
+    for key, value in update_items:
+        if key not in seen_keys:
+            output_lines.append(f"{key}={_format_dotenv_value(value)}")
+            seen_keys.add(key)
+
+    content = "\n".join(output_lines)
+    if output_lines:
+        content += "\n"
+
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", prefix=f".{destination_path.name}.", suffix=".tmp", dir=str(destination_path.parent), delete=False) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        if os.name == "posix":
+            os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+    return {"path": str(destination_path), "updated_keys": tuple(key for key, _ in update_items)}
 
 
 # Default dummy values so linters shut up
@@ -784,6 +914,14 @@ DOTENV_FILE = ""
 FIREFOX_MACOS_COOKIE = ""
 FIREFOX_WINDOWS_COOKIE = ""
 FIREFOX_LINUX_COOKIE = ""
+CONTAINER_FIREFOX_HOSTS = {
+    "macos": ("macOS", '"${HOME}/Library/Application Support/Firefox/Profiles:/home/instagram/.mozilla/firefox:ro"'),
+    "linux": ("Linux with a standard Firefox package", '"$HOME/.mozilla/firefox:/home/instagram/.mozilla/firefox:ro"'),
+    "linux-snap": ("Linux with Firefox from Snap", '"$HOME/snap/firefox/common/.mozilla/firefox:/home/instagram/.mozilla/firefox:ro"'),
+    "linux-flatpak": ("Linux with Firefox from Flatpak", '"$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox:/home/instagram/.mozilla/firefox:ro"'),
+    "windows-powershell": ("Windows PowerShell", '"$env:APPDATA\\Mozilla\\Firefox:/home/instagram/.mozilla/firefox:ro"'),
+    "windows-cmd": ("Windows Command Prompt", '"%APPDATA%\\Mozilla\\Firefox:/home/instagram/.mozilla/firefox:ro"'),
+}
 INSTA_LOGFILE = ""
 OUTPUT_DIR = ""
 DISABLE_LOGGING = False
@@ -796,8 +934,13 @@ MULTI_TARGET_STAGGER_JITTER = 0
 MULTI_TARGET_SERIALIZE_HTTP = False
 WEBHOOK_ENABLED = False
 WEBHOOK_URL = ""
+WEBHOOK_PROVIDER = "discord"
+WEBHOOK_EMBED_TITLE_LIMIT = 256
+NTFY_MESSAGE_LIMIT_BYTES = 4096
 WEBHOOK_USERNAME = "Instagram Monitor"
 WEBHOOK_AVATAR_URL = ""
+WEBHOOK_HEADERS = {}
+NTFY_ACCESS_TOKEN = ""
 WEBHOOK_STATUS_NOTIFICATION = True
 WEBHOOK_FOLLOWERS_NOTIFICATION = True
 WEBHOOK_ERROR_NOTIFICATION = False
@@ -831,7 +974,10 @@ exec(CONFIG_BLOCK, globals())
 DEFAULT_CONFIG_FILENAME = "instagram_monitor.conf"
 
 # List of secret keys to load from env/config
-SECRET_KEYS = ("SESSION_PASSWORD", "SMTP_PASSWORD", "WEBHOOK_URL", "PROXY_URL")
+SECRET_KEYS = ("SESSION_PASSWORD", "SMTP_PASSWORD", "WEBHOOK_URL", "PROXY_URL", "NTFY_ACCESS_TOKEN")
+
+# Config values that must retain safe template defaults during generated output
+SENSITIVE_CONFIG_KEYS = frozenset((*SECRET_KEYS, "WEBHOOK_HEADERS"))
 
 # List of error substrings that unambiguously indicate the session account or IP has been flagged (challenge/checkpoint/shadowban)
 FLAGGED_TRIGGERS = ("detected automated checks", "checkpoint_required")
@@ -862,6 +1008,16 @@ CLI_CONFIG_PATH = None
 
 # To solve the issue: 'SyntaxError: f-string expression part cannot include a backslash'
 nl_ch = "\n"
+
+DOCUMENTATION_URL = "https://misiektoja.github.io/instagram_monitor"
+QUICK_START_GUIDE_URL = DOCUMENTATION_URL + "/setup-and-first-run/"
+CONFIG_FILE_GUIDE_URL = DOCUMENTATION_URL + "/configuration/#configuration-file"
+SESSION_IMPORT_GUIDE_URL = DOCUMENTATION_URL + "/configuration/#option-3-session-login-using-browser-cookies-recommended"
+SMTP_GUIDE_URL = DOCUMENTATION_URL + "/configuration/#smtp-settings"
+WEBHOOK_GUIDE_URL = DOCUMENTATION_URL + "/usage/#webhook-notifications"
+PROXY_GUIDE_URL = DOCUMENTATION_URL + "/usage/#routing-traffic-through-a-proxy"
+ANTI_DETECTION_INTERVAL_GUIDE_URL = DOCUMENTATION_URL + "/anti-detection/#keep-the-polling-interval-reasonable"
+ANTI_DETECTION_SESSION_GUIDE_URL = DOCUMENTATION_URL + "/anti-detection/#sign-in-using-session-mode-with-browser-cookies"
 
 # Progress Bar control items
 START_TIME = 0
@@ -911,6 +1067,22 @@ WEB_DASHBOARD_MONITOR_THREADS = {}  # Active monitoring threads by username
 WEB_DASHBOARD_STOP_EVENTS = {}  # Stop events for each monitoring thread
 WEB_DASHBOARD_RECHECK_EVENTS = {}  # Recheck events for each monitoring thread
 
+
+# ASCII art startup banner (pure ASCII for maximum terminal portability)
+STARTUP_BANNER = r"""
+ .-------------.    ___           _
+|  O        .  |   |_ _|_ __  ___| |_ __ _  __ _ _ __ __ _ _ __ ___
+|    .-----.   |    | || '_ \/ __| __/ _` |/ _` | '__/ _` | '_ ` _ \
+|   |  ( )  |  |    | || | | \__ \ || (_| | (_| | | | (_| | | | | | |
+|    '-----'   |   |___|_| |_|___/\__\__,_|\__, |_|  \__,_|_| |_| |_|
+ '-------------'                           |___/
+                    __  __             _ _
+                   |  \/  | ___  _ __ (_) |_ ___  _ __
+                   | |\/| |/ _ \| '_ \| | __/ _ \| '__|
+                   | |  | | (_) | | | | | || (_) | |
+                   |_|  |_|\___/|_| |_|_|\__\___/|_|"""
+
+
 import sys
 import signal
 
@@ -930,6 +1102,10 @@ import time
 import string
 import json
 import os
+import tempfile
+import getpass
+import importlib.util
+import shlex
 from os.path import expanduser, dirname, basename
 from datetime import datetime, timezone, timedelta
 from dateutil import relativedelta
@@ -1046,6 +1222,179 @@ def _apply_instaloader_graphql_profile_patch() -> None:
 
 
 _apply_instaloader_graphql_profile_patch()
+
+
+# Instaloader 4.15.1 Post metadata GraphQL doc_id 8845758582119845 (xdt_shortcode_media) went dead after
+# Instagram API changes (June 2026): it returns {"data": null} with an "execution error", so
+# Post._obtain_metadata crashes with "TypeError: 'NoneType' object is not subscriptable" the moment any field
+# outside the timeline node (e.g. tagged_users) is read. It is port of instaloader PR #2706: migrate to doc_id
+# 27128499623469141 (PolarisPostRootQuery), which returns v1/iPhone-format media and reshape it into the
+# legacy field names the rest of Post expects.
+# Self-deactivating: skipped once upstream stops referencing the dead doc_id in _obtain_metadata.
+_INSTALOADER_POST_METADATA_PATCH_APPLIED = False
+
+
+# Monkey-patch Instaloader Post metadata onto the working doc_id (no site-packages edit)
+def _apply_instaloader_post_metadata_patch() -> None:
+    global _INSTALOADER_POST_METADATA_PATCH_APPLIED
+    if _INSTALOADER_POST_METADATA_PATCH_APPLIED:
+        return
+
+    try:
+        from instaloader.structures import Post
+        from instaloader.exceptions import BadResponseException, PostChangedException
+    except ImportError:
+        return
+
+    original = getattr(Post, "_obtain_metadata", None)
+    if original is None:
+        _INSTALOADER_POST_METADATA_PATCH_APPLIED = True
+        return
+
+    # Self-deactivate once upstream migrates off the dead doc_id (the fixed method no longer references it)
+    try:
+        import inspect
+        if "8845758582119845" not in inspect.getsource(original):
+            _INSTALOADER_POST_METADATA_PATCH_APPLIED = True
+            return
+    except (OSError, TypeError):
+        pass
+
+    new_doc_id = "27128499623469141"
+    media_types = {1: "GraphImage", 2: "GraphVideo", 8: "GraphSidecar"}
+
+    def _patched_obtain_metadata(self):  # type: ignore[no-untyped-def]
+        if self._full_metadata_dict:
+            return
+        resp = self._context.doc_id_graphql_query(
+            new_doc_id,
+            {"shortcode": self.shortcode, "__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": False},
+        )
+        web_info = (resp.get("data") or {}).get("xdt_api__v1__media__shortcode__web_info") or {}
+        items = web_info.get("items")
+        if not items:
+            raise BadResponseException("Fetching Post metadata failed.")
+        media = items[0]
+        media_type = media.get("media_type")
+        typename = media_types.get(media_type)
+        if not typename:
+            raise BadResponseException(f"Unknown media_type in metadata: {media_type}.")
+        pic_json = {
+            "shortcode": media["code"],
+            "id": media["pk"],
+            "__typename": typename,
+            "is_video": media_type == 2,
+            "taken_at_timestamp": media["taken_at"],
+            "owner": {"id": media["user"]["pk"], "username": media["user"].get("username", ""), "full_name": media["user"].get("full_name", "")},
+        }
+        candidates = (media.get("image_versions2") or {}).get("candidates") or []
+        if candidates:
+            pic_json["display_url"] = candidates[0]["url"]
+        video_versions = media.get("video_versions") or []
+        if video_versions:
+            pic_json["video_url"] = video_versions[0]["url"]
+        if media.get("video_duration") is not None:
+            pic_json["video_duration"] = media["video_duration"]
+        if media.get("view_count") is not None:
+            pic_json["video_view_count"] = media["view_count"]
+        if media.get("play_count") is not None:
+            pic_json["video_play_count"] = media["play_count"]
+        caption = media.get("caption")
+        caption_text = caption.get("text") if isinstance(caption, dict) else None
+        pic_json["edge_media_to_caption"] = {"edges": [{"node": {"text": caption_text}}]} if caption_text is not None else {"edges": []}
+        pic_json["edge_media_preview_like"] = {"count": media.get("like_count") or 0}
+        pic_json["edge_media_to_parent_comment"] = {"count": media.get("comment_count") or 0, "edges": []}
+        if media.get("has_liked") is not None:
+            pic_json["viewer_has_liked"] = media["has_liked"]
+        if media.get("accessibility_caption") is not None:
+            pic_json["accessibility_caption"] = media["accessibility_caption"]
+        if media.get("location"):
+            pic_json["location"] = media["location"]
+        carousel = media.get("carousel_media") or []
+        if carousel:
+            carousel_nodes = []
+            for item in carousel:
+                item_type = item.get("media_type", 1)
+                node = {"shortcode": item.get("code", ""), "__typename": media_types.get(item_type, "GraphImage"), "is_video": item_type == 2}
+                item_candidates = (item.get("image_versions2") or {}).get("candidates") or []
+                node["display_url"] = item_candidates[0]["url"] if item_candidates else ""
+                item_videos = item.get("video_versions") or []
+                node["video_url"] = item_videos[0]["url"] if item_videos else None
+                if item.get("accessibility_caption") is not None:
+                    node["accessibility_caption"] = item["accessibility_caption"]
+                carousel_nodes.append({"node": node})
+            pic_json["edge_sidecar_to_children"] = {"edges": carousel_nodes}
+        tagged = (media.get("usertags") or {}).get("in") or []
+        if tagged:
+            pic_json["edge_media_to_tagged_user"] = {"edges": [{"node": {"user": {"username": t["user"]["username"].lower()}}} for t in tagged if (t.get("user") or {}).get("username")]}
+        self._full_metadata_dict = pic_json
+        if DEBUG_MODE:
+            debug_print(f"instaloader post metadata doc_id patch fired (shortcode {self.shortcode})")
+        if self.shortcode != self._full_metadata_dict["shortcode"]:
+            self._node.update(self._full_metadata_dict)
+            raise PostChangedException
+
+    Post._obtain_metadata = _patched_obtain_metadata  # type: ignore[method-assign]
+
+    # PR #2706 also guards these so the new shape missing a field (e.g. a reel without a view count) returns None
+    def _patched_video_view_count(self):  # type: ignore[no-untyped-def]
+        if self.is_video:
+            try:
+                return self._field("video_view_count")
+            except KeyError:
+                return None
+        return None
+
+    def _patched_video_play_count(self):  # type: ignore[no-untyped-def]
+        if self.is_video:
+            try:
+                return self._field("video_play_count")
+            except KeyError:
+                return None
+        return None
+
+    Post.video_view_count = property(_patched_video_view_count)  # type: ignore[assignment]
+    Post.video_play_count = property(_patched_video_play_count)  # type: ignore[assignment]
+
+    _INSTALOADER_POST_METADATA_PATCH_APPLIED = True
+
+
+_apply_instaloader_post_metadata_patch()
+
+
+# Instaloader logs every intermittent retry (e.g. "JSON Query to graphql/query: 403 Forbidden ...
+# [retrying; skip with ^C]") straight to stderr via InstaloaderContext.error(), which the quiet flag does not
+# suppress. These are transient and usually succeed on a later attempt, so drop just that retry noise; the
+# final failure is raised as an exception, not logged here. Verbose/debug keep the full chatter.
+_INSTALOADER_RETRY_NOISE_PATCH_APPLIED = False
+
+
+# Silence Instaloader's intermittent retry messages on stderr while keeping final errors
+def _apply_instaloader_quiet_retry_patch() -> None:
+    global _INSTALOADER_RETRY_NOISE_PATCH_APPLIED
+    if _INSTALOADER_RETRY_NOISE_PATCH_APPLIED:
+        return
+
+    try:
+        from instaloader.instaloadercontext import InstaloaderContext
+    except ImportError:
+        return
+
+    original_error = getattr(InstaloaderContext, "error", None)
+    if original_error is None:
+        _INSTALOADER_RETRY_NOISE_PATCH_APPLIED = True
+        return
+
+    def _patched_error(self, msg, repeat_at_end=True):  # type: ignore[no-untyped-def]
+        if isinstance(msg, str) and "[retrying; skip with ^C]" in msg and not VERBOSE_MODE and not DEBUG_MODE:
+            return
+        return original_error(self, msg, repeat_at_end=repeat_at_end)
+
+    InstaloaderContext.error = _patched_error  # type: ignore[method-assign]
+    _INSTALOADER_RETRY_NOISE_PATCH_APPLIED = True
+
+
+_apply_instaloader_quiet_retry_patch()
 
 
 # ---------------------------------------------------------------------------
@@ -1216,7 +1565,7 @@ def _install_http_backend() -> None:
     if real_requests is None or isinstance(real_requests, _RequestsBackendShim):
         _CURL_CFFI_BACKEND_INSTALLED = True
         return
-    _ilc.requests = _RequestsBackendShim(real_requests)
+    setattr(_ilc, "requests", _RequestsBackendShim(real_requests))
     _CURL_CFFI_BACKEND_INSTALLED = True
 
 
@@ -1256,7 +1605,8 @@ from typing import Optional, Tuple, Any, Callable, Dict, List, TypeVar, cast
 from glob import glob
 import sqlite3
 from sqlite3 import OperationalError, connect
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from dataclasses import dataclass
 from functools import wraps
 import traceback
 import copy
@@ -1665,8 +2015,8 @@ def create_web_dashboard_app():
         if not os.path.isdir(template_dir):
             print("\n" + "*" * HORIZONTAL_LINE)
             print(f"* Error: Web Dashboard template directory not found: {template_dir}\n")
-            print(f"  Please check the WEB_DASHBOARD_TEMPLATE_DIR setting or --web-dashboard-template-dir flag")
-            print(f"  The directory must exist and contain index.html\n")
+            print("Please check the WEB_DASHBOARD_TEMPLATE_DIR setting or --web-dashboard-template-dir flag")
+            print("The directory must exist and contain index.html\n")
             print(f"* Web Dashboard will NOT be available!")
             print("*" * HORIZONTAL_LINE)
             return None
@@ -1711,15 +2061,15 @@ def create_web_dashboard_app():
     if not template_dir:
         print("\n" + "*" * HORIZONTAL_LINE)
         print(f"* Error: Web Dashboard templates not found\n")
-        print(f"  The tool searched for templates in the following locations:")
+        print("The tool searched for templates in the following locations:")
         for candidate in candidate_dirs:
-            print(f"     - {candidate}")
+            print(f"- {candidate}")
         print()
-        print(f"  To fix this, you can:")
-        print(f"    1. Ensure templates/ directory exists in the script directory")
-        print(f"    2. Set WEB_DASHBOARD_TEMPLATE_DIR in your config file")
-        print(f"    3. Use --web-dashboard-template-dir flag to specify the template directory")
-        print(f"    4. If installed via pip, ensure the package includes the templates directory\n")
+        print("To fix this, you can:")
+        print("1. Ensure templates/ directory exists in the script directory")
+        print("2. Set WEB_DASHBOARD_TEMPLATE_DIR in your config file")
+        print("3. Use --web-dashboard-template-dir flag to specify the template directory")
+        print("4. If installed via pip, ensure the package includes the templates directory\n")
         print(f"* Web Dashboard will NOT be available!")
         print("*" * HORIZONTAL_LINE)
         return None
@@ -1729,7 +2079,7 @@ def create_web_dashboard_app():
     if not os.path.isfile(index_path):
         print("\n" + "*" * HORIZONTAL_LINE)
         print(f"* Error: Template file 'index.html' not found in: {template_dir}\n")
-        print(f"  The template directory exists, but is missing the required index.html file\n")
+        print("The template directory exists but is missing the required index.html file\n")
         print(f"* Web Dashboard will NOT be available!")
         print("*" * HORIZONTAL_LINE)
         return None
@@ -1756,7 +2106,7 @@ def create_web_dashboard_app():
         data['username'] = SESSION_USERNAME if SESSION_USERNAME else None
         data['skip_session'] = SKIP_SESSION
 
-        # Force active to False if Mode 1
+        # Force active to False in No-login mode
         if SKIP_SESSION or not SESSION_USERNAME:
             data['active'] = False
 
@@ -2037,7 +2387,7 @@ def create_web_dashboard_app():
         Apply settings from Web UI payload to globals
         """
         global INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH
-        global STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, WEBHOOK_ENABLED, WEBHOOK_URL
+        global STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_PROVIDER
         global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, PROXY_REFRESH_VERSION
         global FOLLOWERS_CHURN_DETECTION, DEBUG_MODE, SESSION_USERNAME, VERBOSE_MODE
         global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_SSL, SENDER_EMAIL, RECEIVER_EMAIL
@@ -2085,6 +2435,11 @@ def create_web_dashboard_app():
                     if processed_val and not validate_webhook_url(processed_val):
                         print(f"* Error: Invalid webhook URL format. Must be HTTPS or HTTP URL. '{processed_val}'")
                         return current_val
+                elif key == 'webhook_provider':
+                    processed_val = normalized_webhook_provider(processed_val)
+                    if not processed_val:
+                        print("* Error: Invalid webhook provider. Must be 'discord' or 'ntfy'.")
+                        return current_val
                 elif key == 'proxy_url':
                     if processed_val and not validate_webhook_url(processed_val):
                         print(f"* Error: Invalid proxy URL format. Must be HTTPS or HTTP URL. '{mask_url_credentials(processed_val)}'")
@@ -2120,6 +2475,7 @@ def create_web_dashboard_app():
 
         WEBHOOK_ENABLED = bool(update_setting('webhook_enabled', WEBHOOK_ENABLED, bool))
         WEBHOOK_URL = str(update_setting('webhook_url', WEBHOOK_URL, str))
+        WEBHOOK_PROVIDER = str(update_setting('webhook_provider', WEBHOOK_PROVIDER, str))
         WEBHOOK_STATUS_NOTIFICATION = bool(update_setting('webhook_status', WEBHOOK_STATUS_NOTIFICATION, bool))
         WEBHOOK_FOLLOWERS_NOTIFICATION = bool(update_setting('webhook_followers', WEBHOOK_FOLLOWERS_NOTIFICATION, bool))
         WEBHOOK_ERROR_NOTIFICATION = bool(update_setting('webhook_errors', WEBHOOK_ERROR_NOTIFICATION, bool))
@@ -2218,7 +2574,7 @@ def create_web_dashboard_app():
     @app.route('/api/settings', methods=['GET', 'POST'])  # type: ignore[misc]
     def api_settings():  # type: ignore[return]
         global INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH
-        global STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, WEBHOOK_ENABLED, WEBHOOK_URL
+        global STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_PROVIDER
         global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS
         global FOLLOWERS_CHURN_DETECTION, DEBUG_MODE, SESSION_USERNAME, VERBOSE_MODE
         global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_SSL, SENDER_EMAIL, RECEIVER_EMAIL
@@ -2242,6 +2598,7 @@ def create_web_dashboard_app():
                 'error_notifications': ERROR_NOTIFICATION,
                 'webhook_enabled': WEBHOOK_ENABLED,
                 'webhook_url': WEBHOOK_URL,
+                'webhook_provider': normalized_webhook_provider() or WEBHOOK_PROVIDER,
                 'webhook_status': WEBHOOK_STATUS_NOTIFICATION,
                 'webhook_followers': WEBHOOK_FOLLOWERS_NOTIFICATION,
                 'webhook_errors': WEBHOOK_ERROR_NOTIFICATION,
@@ -2353,7 +2710,7 @@ def create_web_dashboard_app():
                 return jsonify({'success': False, 'error': 'No data provided'}), 400  # type: ignore
 
             username = data.get('username', '').strip()
-            method = data.get('method', 'firefox')
+            method = data.get('method', 'saved')
 
             if username:
                 SESSION_USERNAME = username
@@ -2362,7 +2719,7 @@ def create_web_dashboard_app():
                     WEB_DASHBOARD_DATA['session'] = {'username': username, 'active': False, 'method': method}
 
                 msg = f"Session configured for: {username} (Method: {method})"
-                mode_msg = "Session mode switched to: Mode 2 (Logged In)"
+                mode_msg = "Session mode switched to: Logged in"
                 log_activity(msg)
                 print(f"\n* {msg}")
                 print(f"* {mode_msg}")
@@ -2376,77 +2733,78 @@ def create_web_dashboard_app():
     @app.route('/api/session/firefox/profiles', methods=['GET'])
     def api_firefox_profiles():  # type: ignore
         try:
-            default_cookiefile = {
-                "Windows": FIREFOX_WINDOWS_COOKIE,
-                "Darwin": FIREFOX_MACOS_COOKIE,
-            }.get(system(), FIREFOX_LINUX_COOKIE)
-
-            cookiefiles = glob(expanduser(default_cookiefile))
-            profiles = []
-            for path in cookiefiles:
-                profiles.append({
-                    'name': basename(dirname(path)),
-                    'path': path
-                })
+            profiles = [{'name': p['name'], 'path': p['path']} for p in list_firefox_profiles()]
             return jsonify({'success': True, 'profiles': profiles})  # type: ignore
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500  # type: ignore
 
+    @app.route('/api/session/chromium/profiles', methods=['GET'])
+    def api_chromium_profiles():  # type: ignore
+        browser = (flask_request.args.get('browser') or 'chrome').lower()  # type: ignore
+        if browser not in CHROMIUM_IMPORT_BROWSERS:
+            return jsonify({'success': False, 'error': f'Unsupported browser: {browser}'}), 400  # type: ignore
+        if system() == "Windows":
+            return jsonify({'success': False, 'error': chromium_windows_unsupported_message(browser)}), 400  # type: ignore
+        try:
+            profiles = [{'dir': p['dir'], 'name': p['name']} for p in list_chromium_profiles(browser)]
+            return jsonify({'success': True, 'profiles': profiles})  # type: ignore
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500  # type: ignore
+
+    # Runs a dashboard browser import, updates global session state and returns a Flask JSON response
+    def _handle_browser_import(browser, cookiefile=None, profile=None):
+        global SESSION_USERNAME, SKIP_SESSION
+        try:
+            username = import_browser_session_dashboard(browser, cookiefile, profile=profile)
+        except CookieImportError as e:
+            return jsonify({'success': False, 'error': str(e)}), 400  # type: ignore
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500  # type: ignore
+
+        SESSION_USERNAME = username
+        SKIP_SESSION = False
+
+        with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
+            WEB_DASHBOARD_DATA['session'] = {'username': username, 'active': True, 'method': browser}
+
+        msg = f"Imported session from {browser_label(browser)} for: {username}"
+        mode_msg = "Session mode switched to: Logged in"
+        log_activity(msg)
+        print(f"\n* {msg}")
+        print(f"* {mode_msg}")
+        print_cur_ts(newline=True)
+
+        SESSION_REFRESHED_EVENT.set()
+        SESSION_REFRESHED_EVENT.clear()
+        return jsonify({'success': True, 'username': username})  # type: ignore
+
     @app.route('/api/session/firefox/import', methods=['POST'])
     def api_firefox_import():  # type: ignore
-        global SESSION_USERNAME, SKIP_SESSION
         data = flask_request.get_json()  # type: ignore
         if not data or 'path' not in data:
             return jsonify({'success': False, 'error': 'Cookie file path required'}), 400  # type: ignore
+        return _handle_browser_import('firefox', data['path'])
 
-        cookiefile = data['path']
-        try:
-            # We use a temporary instaloader instance to detect the username
-            L = Instaloader(user_agent=USER_AGENT, max_connection_attempts=1)
-            # Re-use parts of import_session logic but without SystemExit
-            try:
-                with connect(f"file:{cookiefile}?immutable=1", uri=True) as conn:
-                    try:
-                        cookie_iter = conn.execute(
-                            "SELECT name, value FROM moz_cookies WHERE baseDomain='instagram.com'"
-                        )
-                    except OperationalError:
-                        cookie_iter = conn.execute(
-                            "SELECT name, value FROM moz_cookies WHERE host LIKE '%instagram.com'"
-                        )
-                    cookie_dict = dict(cookie_iter)
-            except sqlite3.DatabaseError:
-                return jsonify({'success': False, 'error': 'Invalid Firefox cookies.sqlite file'}), 400  # type: ignore
+    @app.route('/api/session/browser/import', methods=['POST'])
+    def api_browser_import():  # type: ignore
+        data = flask_request.get_json()  # type: ignore
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400  # type: ignore
 
-            L.context._session.cookies.update(cookie_dict)
-            username = L.test_login()
+        browser = (data.get('browser') or 'firefox').lower()
+        if browser not in IMPORT_BROWSERS:
+            return jsonify({'success': False, 'error': f'Unsupported browser: {browser}'}), 400  # type: ignore
 
-            if not username:
-                return jsonify({'success': False, 'error': 'Not logged in in Firefox'}), 400  # type: ignore
+        cookiefile = None
+        profile = None
+        if browser == 'firefox':
+            cookiefile = data.get('path')
+            if not cookiefile:
+                return jsonify({'success': False, 'error': 'Cookie file path required'}), 400  # type: ignore
+        else:
+            profile = data.get('profile') or None
 
-            # Save session - without arguments to saveto standard config directory
-            L.context.username = username
-            L.save_session_to_file()
-
-            # Update global state
-            SESSION_USERNAME = username
-            SKIP_SESSION = False
-
-            with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
-                WEB_DASHBOARD_DATA['session'] = {'username': username, 'active': True, 'method': 'firefox'}
-
-            msg = f"Imported session from Firefox for: {username}"
-            mode_msg = "Session mode switched to: Mode 2 (Logged In)"
-            log_activity(msg)
-            print(f"\n* {msg}")
-            print(f"* {mode_msg}")
-            print_cur_ts(newline=True)
-
-            SESSION_REFRESHED_EVENT.set()
-            SESSION_REFRESHED_EVENT.clear()
-            return jsonify({'success': True, 'username': username})  # type: ignore
-        except Exception as e:
-            return jsonify({'success': False, 'error': str(e)}), 500  # type: ignore
+        return _handle_browser_import(browser, cookiefile, profile=profile)
 
     @app.route('/api/session/test', methods=['POST'])
     def api_test_session():  # type: ignore
@@ -2603,7 +2961,7 @@ def create_web_dashboard_app():
             WEB_DASHBOARD_DATA['session'] = {'username': None, 'active': False}
 
         msg = f"Session cleared for: {username}"
-        mode_msg = "Session mode switched to: Mode 1 (Anonymous)"
+        mode_msg = "Session mode switched to: No login"
         log_activity(msg)
         print(f"\n* {msg}")
         print(f"* {mode_msg}")
@@ -2903,6 +3261,16 @@ def recheck_all_targets():
     return True
 
 
+# Returns a browser-safe URL instead of exposing a wildcard server bind address
+def _web_dashboard_browser_url(host=None, port=None) -> str:
+    selected_host = str(host if host is not None else WEB_DASHBOARD_HOST).strip() or "127.0.0.1"
+    selected_port = port if port is not None else WEB_DASHBOARD_PORT
+    browser_host = "127.0.0.1" if selected_host in ("0.0.0.0", "::", "[::]") else selected_host
+    if ":" in browser_host and not browser_host.startswith("["):
+        browser_host = f"[{browser_host}]"
+    return f"http://{browser_host}:{selected_port}/"
+
+
 # Starts the Flask web server in a background thread
 def start_web_dashboard_server():
     global WEB_DASHBOARD_APP, WEB_DASHBOARD_THREAD, WEB_DASHBOARD_TEMPLATE_DIR, VERSION
@@ -2929,7 +3297,12 @@ def start_web_dashboard_server():
     WEB_DASHBOARD_THREAD = threading.Thread(target=run_server, daemon=True, name="web_ui_server")
     WEB_DASHBOARD_THREAD.start()
 
-    print(f"\n* Web Dashboard available at:\t\thttp://{WEB_DASHBOARD_HOST}:{WEB_DASHBOARD_PORT}/")
+    print(f"\n* Open Web Dashboard in your browser:\t{_web_dashboard_browser_url()}")
+    if _running_in_container():
+        if WEB_DASHBOARD_PORT == 8000:
+            print("* Docker port publishing:\t\tUse -p 127.0.0.1:8000:8000 or Compose --service-ports")
+        else:
+            print(f"* Docker port publishing:\t\tPublish container port {WEB_DASHBOARD_PORT} to the host")
     return True
 
 
@@ -3253,11 +3626,11 @@ _MSG_WITH_USER_RE = re.compile(r"^\[(.+?)\] (.*)$")
 _FROM_TO_COUNT_RE = re.compile(r"(from\s+)(\d+)(\s+to\s+)(\d+)")
 _DIFF_COUNT_UP_RE = re.compile(r"(\(\+\d+\))")
 _DIFF_COUNT_DOWN_RE = re.compile(r"(\(-\d+\))")
-_USER_TAG_RE = re.compile(r"((?:for|by|of|Session|Initial|Monitoring\s+Instagram)\s+user:?|Username:|Target:|Tracking:?|(?:Starting\s+)?check\s+#\d+\s+(?:completed\s+)?for|paused\s+for|resuming\s+for|Firefox\s+for:|User(?=\s+[\w._-]+\s+has))([\t ]+)([\w._-]+)", re.IGNORECASE)
+_USER_TAG_RE = re.compile(r"((?:for|by|of|Session|Initial|Monitoring\s+Instagram)\s+user:?|Username:|Target:|Tracking:?|(?:Starting\s+)?check\s+#\d+\s+(?:completed\s+)?for|paused\s+for|resuming\s+for|(?:Firefox|Chrome|Brave|Chromium)\s+for:|User(?=\s+[\w._-]+\s+has))([\t ]+)([\w._-]+)", re.IGNORECASE)
 _STATUS_LINE_RE = re.compile(r"^(\*?\s*(?:STATUS|Status):\s+)(.*)$")
 _DURATION_RE = re.compile(r"(\d+\s+(seconds?|minutes?|hours?|days?|weeks?|months?|years?))", re.IGNORECASE)
 _LONG_DATE_RE = re.compile(r"\b(?:\w{3}\s+)?\d{1,2}\s+\w{3}(?:\s+\d{2,4})?[\s,]*\d{2}:\d{2}(:\d{2})?(\s*[AP]M)?\b", re.IGNORECASE)
-_TIME_ONLY_RE = re.compile(r"(~?\d{2}:\d{2}(:\d{2})?(\s*[AP]M)?)", re.IGNORECASE)
+_TIME_ONLY_RE = re.compile(r"(?<![\w:])(~?(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:\s*[AP]M)?)(?![\w:])", re.IGNORECASE)
 _SHORT_RANGE_DATE_RE = re.compile(r"\(\w{3}\s+\d{1,2}\s+\w{3}\s+\d{2}:\d{2}(\s*[AP]M)?\s*-\s*\d{2}:\d{2}(\s*[AP]M)?\)", re.IGNORECASE)
 _DATE_RANGE_RE = re.compile(r"\b\w{3}\s+\d{1,2}\s+\w{3}\s+\d{2}:\d{2}(\s*[AP]M)?\s*-\s*\d{2}:\d{2}(\s*[AP]M)?\b", re.IGNORECASE)
 _HOUR_RANGE_RE = re.compile(r"\b\d{2}:\d{2}(\s*[AP]M)?\s*-\s*\d{2}:\d{2}(\s*[AP]M)?\b", re.IGNORECASE)
@@ -3360,6 +3733,12 @@ def colorize_status(status_text):
     return colorize(key, status_text)
 
 
+# Prints the ASCII art startup banner with the tagline and version, honoring color settings
+def print_startup_banner() -> None:
+    print(colorize("header", STARTUP_BANNER))
+    print(colorize("info", f"                   v{VERSION}\n"))
+
+
 # Helper to apply a block style while preserving internal highlights
 def _apply_style_nested(line, style_name):
     start_style = _COLOR_STYLES.get(style_name)
@@ -3393,6 +3772,10 @@ def _colorize_line(line):
             return line
         else:
             return _apply_style_nested(line, "proxy_ip")
+
+    # Session mode value is free-form text (e.g. "No login ...") - keep it plain so words like "No" are not mistaken for an offline/boolean keyword
+    if line.startswith("* Session Mode:"):
+        return line
 
     # Case for list items (e.g. - username [ link ]) - color username yellow
     if line.strip().startswith("- ") and " [ http" in line:
@@ -3619,6 +4002,36 @@ class Logger(object):
                         handle.write(clean_message)
                         handle.flush()
 
+    # Writes a message to the terminal only (honouring colour), bypassing all log files
+    def terminal_only(self, message):
+        with STDOUT_LOCK:
+            message = apply_privacy_substitutions(message)
+            colorized_message = apply_color_to_text(message)
+            self.terminal.write(colorized_message)
+            self.terminal.flush()
+
+    # Writes a message to the log file(s) only (ANSI stripped), bypassing the terminal
+    def log_only(self, message):
+        with STDOUT_LOCK:
+            message = apply_privacy_substitutions(message)
+            colorized_message = apply_color_to_text(message)
+            clean_message = ANSI_ESCAPE_RE.sub("", colorized_message).expandtabs(8)
+            if self.main_log:
+                self.main_log.write(clean_message)
+                self.main_log.flush()
+            target = self._get_current_target()
+            if target:
+                handle = self._ensure_log_open(target)
+                if handle:
+                    handle.write(clean_message)
+                    handle.flush()
+            else:
+                for t in list(self.target_paths.keys()):
+                    handle = self._ensure_log_open(t)
+                    if handle:
+                        handle.write(clean_message)
+                        handle.flush()
+
     def flush(self):
         self.terminal.flush()
         if self.main_log:
@@ -3644,6 +4057,14 @@ class ColorStream(object):
         coloured = apply_color_to_text(apply_privacy_substitutions(message))
         self.terminal.write(coloured)
         self.terminal.flush()
+
+    # Writes a message to the terminal only (honouring colour), matching the Logger interface
+    def terminal_only(self, message):
+        self.write(message)
+
+    # No-op log sink for the logging-disabled path, matching the Logger interface
+    def log_only(self, message):
+        return
 
     def flush(self):
         self.terminal.flush()
@@ -3886,6 +4307,8 @@ def send_email(subject, body, body_html, use_ssl, image_file="", image_name="ima
         smtpObj.quit()
     except Exception as e:
         print(f"Error sending email: {e}")
+        print(colorize("info", "To fix: verify SMTP_HOST, SMTP_PORT and SMTP_SSL plus SMTP_USER / SMTP_PASSWORD. For Gmail and similar providers use an app password, not your normal login password. Test with --send-test-email."))
+        print(f"Guide: {SMTP_GUIDE_URL}")
         return 1
     return 0
 
@@ -3904,6 +4327,27 @@ def validate_webhook_url(url):
         return True
     except Exception:
         return False
+
+
+# Converts a complete ntfy URL or valid ntfy.sh topic name into a complete topic URL
+def normalize_ntfy_topic_url(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if validate_webhook_url(normalized):
+        return normalized
+    if re.fullmatch(r"[-_A-Za-z0-9]{1,64}", normalized):
+        return f"https://ntfy.sh/{normalized}"
+    return ""
+
+
+# Returns the normalized configured webhook provider or an empty string when unsupported
+def normalized_webhook_provider(provider=None) -> str:
+    selected_provider = WEBHOOK_PROVIDER if provider is None else provider
+    if not isinstance(selected_provider, str):
+        return ""
+    normalized = selected_provider.strip().casefold()
+    return normalized if normalized in ("discord", "ntfy") else ""
 
 
 # Escapes Discord markdown for display-only text
@@ -3929,10 +4373,21 @@ def show_follow_info(followers_reported: int, followers_actual: int, followings_
         debug_print(f"* Followers: reported ({followers_reported}) actual ({followers_actual}). Followings: reported ({followings_reported}) actual ({followings_actual})")
 
 
+# Compares follower or following lists, logs changes and returns formatted notification fragments
 def compare_and_log_follower_changes(user, change_type, old_list, new_list, csv_file_name):
-    a, b = set(old_list), set(new_list)
-    removed = list(a - b)
-    added = list(b - a)
+    old_set, new_set = set(old_list), set(new_list)
+    removed_seen = set()
+    added_seen = set()
+    removed = []
+    added = []
+    for item in old_list:
+        if item not in new_set and item not in removed_seen:
+            removed.append(item)
+            removed_seen.add(item)
+    for item in new_list:
+        if item not in old_set and item not in added_seen:
+            added.append(item)
+            added_seen.add(item)
 
     added_list = ""
     removed_list = ""
@@ -4031,7 +4486,7 @@ def send_follower_change_webhook(user, change_type, old_count, new_count, added_
     )
 
 
-# Sends webhook notification (Discord-compatible)
+# Applies configured placeholders recursively to a webhook template
 def format_payload(template, payload):
     if isinstance(template, dict):
         return {k: format_payload(v, payload) for k, v in template.items()}
@@ -4050,6 +4505,84 @@ def format_payload(template, payload):
     return template
 
 
+# Truncates text to a UTF-8 byte limit without returning a partial character
+def truncate_utf8_bytes(text: str, max_bytes: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+# Builds one bounded ntfy title and message pair from the shared webhook content
+def build_ntfy_webhook_message(title: str, description: str, fields=None, image_url: str = "") -> tuple[str, str]:
+    safe_title = str(title)[:WEBHOOK_EMBED_TITLE_LIMIT] or "Instagram Monitor"
+    message_parts = [str(description)] if description else []
+    if fields:
+        message_parts.extend(f"{field['name']}: {field['value']}" for field in fields)
+    if image_url:
+        message_parts.append(f"Image: {image_url}")
+    safe_message = truncate_utf8_bytes("\n\n".join(message_parts), NTFY_MESSAGE_LIMIT_BYTES)
+    return safe_title, safe_message
+
+
+# Returns a safe validation error for one custom webhook header mapping
+def _validate_webhook_header_mapping(headers) -> Optional[str]:
+    if not isinstance(headers, dict):
+        return "WEBHOOK_HEADERS must be a dictionary of string header names and values"
+    normalized_names = set()
+    for name, value in headers.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name):
+            return "WEBHOOK_HEADERS contains an invalid HTTP header name"
+        normalized_name = name.casefold()
+        if normalized_name in normalized_names:
+            return "WEBHOOK_HEADERS contains duplicate case-insensitive header names"
+        normalized_names.add(normalized_name)
+        if not isinstance(value, str):
+            return f"WEBHOOK_HEADERS value for {name} must be a string"
+        if "\r" in value or "\n" in value:
+            return f"WEBHOOK_HEADERS value for {name} must not contain line breaks"
+    return None
+
+
+# Returns a safe configuration error for custom webhook headers or ntfy access tokens
+def validate_webhook_headers(provider=None) -> Optional[str]:
+    header_error = _validate_webhook_header_mapping(WEBHOOK_HEADERS)
+    if header_error is not None:
+        return header_error
+    if normalized_webhook_provider(provider) == "ntfy":
+        if not isinstance(NTFY_ACCESS_TOKEN, str):
+            return "NTFY_ACCESS_TOKEN must be a string"
+        token = NTFY_ACCESS_TOKEN.strip()
+        if "\r" in token or "\n" in token:
+            return "NTFY_ACCESS_TOKEN must not contain line breaks"
+        if token.casefold().startswith(("bearer ", "basic ")):
+            return "NTFY_ACCESS_TOKEN must contain only the access token without an Authorization scheme"
+    return None
+
+
+# Builds provider-specific headers while formatting placeholders and applying private ntfy authentication
+def build_webhook_headers(provider: str, payload: dict) -> dict[str, str]:
+    validation_error = validate_webhook_headers(provider)
+    if validation_error is not None:
+        raise ValueError(validation_error)
+    formatted_headers = format_payload(WEBHOOK_HEADERS, payload)
+    formatted_error = _validate_webhook_header_mapping(formatted_headers)
+    if formatted_error is not None:
+        raise ValueError(formatted_error)
+    headers: dict[str, str] = dict(cast(dict[str, str], formatted_headers))
+    if not any(name.casefold() == "user-agent" for name in headers):
+        headers["User-Agent"] = f"InstagramMonitor/{VERSION}"
+    if provider == "ntfy":
+        headers = {name: value for name, value in headers.items() if name.casefold() != "content-type"}
+        headers["Content-Type"] = "text/plain; charset=utf-8"
+        token = NTFY_ACCESS_TOKEN.strip()
+        if token:
+            headers = {name: value for name, value in headers.items() if name.casefold() != "authorization"}
+            headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+# Sends one webhook notification through the selected provider
 def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None, local_image_file=None, notification_type="status"):
     if not WEBHOOK_ENABLED or not WEBHOOK_URL:
         return 1
@@ -4062,6 +4595,11 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
         debug_print("* Webhook error: Invalid webhook URL format")
         return 1
 
+    provider = normalized_webhook_provider()
+    if not provider:
+        print("* Webhook error: WEBHOOK_PROVIDER must be discord or ntfy")
+        return 1
+
     # Check if this notification type is enabled
     if notification_type == "status" and not WEBHOOK_STATUS_NOTIFICATION:
         return 1
@@ -4070,97 +4608,88 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
     elif notification_type == "error" and not WEBHOOK_ERROR_NOTIFICATION:
         return 1
 
+    sanitized_fields = []
+    if fields:
+        for field in fields[:WEBHOOK_MAX_FIELDS]:  # type: ignore
+            sanitized_name = apply_privacy_substitutions(str(field.get("name", "")))  # type: ignore
+            sanitized_value = apply_privacy_substitutions(str(field.get("value", "")))  # type: ignore
+            sanitized_fields.append({
+                "name": sanitized_name[:WEBHOOK_FIELD_NAME_LIMIT],  # type: ignore
+                "value": sanitized_value[:WEBHOOK_FIELD_VALUE_LIMIT],  # type: ignore
+                "inline": field.get("inline", False)
+            })
+
+    webhook_image_url = str(image_url) if image_url else ""
+    payload = {
+        "title": title[:WEBHOOK_EMBED_TITLE_LIMIT] if title else "Instagram Monitor",  # type: ignore
+        "description": description[:WEBHOOK_EMBED_DESCRIPTION_LIMIT] if description else "",  # type: ignore
+        "version": VERSION,
+        "image_url": webhook_image_url,
+        "fields": sanitized_fields,
+        "fields_str": "\n".join([f"{f['name']}: {f['value']}" for f in sanitized_fields]) if sanitized_fields else "",
+        "color": color,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+    if webhook_image_url:
+        payload["image"] = {"url": webhook_image_url}
+    elif local_image_file and os.path.isfile(local_image_file):
+        filename = os.path.basename(local_image_file)
+        payload["image"] = {"url": f"attachment://{filename}"}
+
+    if WEBHOOK_USERNAME:
+        payload["username"] = WEBHOOK_USERNAME
+
+    if WEBHOOK_AVATAR_URL:
+        payload["avatar_url"] = WEBHOOK_AVATAR_URL
+
+    for transform in WEBHOOK_TRANSFORMS:  # type: ignore
+        field = transform[0]
+        method_name = transform[1]
+        args = transform[2:]
+        if field in payload and isinstance(payload[field], str):
+            try:
+                method = getattr(payload[field], method_name)
+                payload[field] = method(*args)
+            except (AttributeError, TypeError) as e:
+                print(f"* Transformation error on {field}.{method_name}: {e}")
+
+    try:
+        final_headers = build_webhook_headers(provider, payload)
+    except ValueError as e:
+        print(f"* Webhook error: {e}")
+        return 1
+
+    if PROXY_ENABLED and PROXY_WEBHOOKS:
+        final_post_proxy = get_proxies()
+        final_post_proxy_ssl = get_proxies_ssl()
+    else:
+        final_post_proxy = {}
+        final_post_proxy_ssl = True
+
     max_retries = 3
-    retry_delay = 30 # jmk
+    retry_delay = 30 #jmk
 
     for attempt in range(max_retries):
         try:
-            sanitized_fields = []
-            if fields:
-                for field in fields[:WEBHOOK_MAX_FIELDS]:  # type: ignore
-                    sanitized_name = apply_privacy_substitutions(str(field.get("name", "")))  # type: ignore
-                    sanitized_value = apply_privacy_substitutions(str(field.get("value", "")))  # type: ignore
-                    sanitized_fields.append({
-                        "name": sanitized_name[:WEBHOOK_FIELD_NAME_LIMIT],  # type: ignore
-                        "value": sanitized_value[:WEBHOOK_FIELD_VALUE_LIMIT],  # type: ignore
-                        "inline": field.get("inline", False)
-                    })
-
-            webhook_image_url = str(image_url) if image_url else ""
-
-            # Load all possible items into payload for use in formatting the WEBHOOK_TEMPLATE and WEBHOOK_HEADERS
-            payload = {
-                "title": title[:WEBHOOK_EMBED_TITLE_LIMIT] if title else "Instagram Monitor",  # type: ignore
-                "description": description[:WEBHOOK_EMBED_DESCRIPTION_LIMIT] if description else "",  # type: ignore
-                "version": VERSION,
-                "image_url": webhook_image_url,
-                "fields": sanitized_fields,
-                "fields_str": "\n".join([f"{f['name']}: {f['value']}" for f in sanitized_fields]) if sanitized_fields else "",
-                "color": color,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-
-            if webhook_image_url:
-                payload["image"] = {"url": webhook_image_url}
-            elif local_image_file and os.path.isfile(local_image_file):
-                # If using local file, use attachment:// syntax
-                filename = os.path.basename(local_image_file)
-                payload["image"] = {"url": f"attachment://{filename}"}
-
-            if WEBHOOK_USERNAME:
-                payload["username"] = WEBHOOK_USERNAME
-
-            if WEBHOOK_AVATAR_URL:
-                payload["avatar_url"] = WEBHOOK_AVATAR_URL
-
-            # Apply optional transformations to payload, primarily the title and description
-            for transform in WEBHOOK_TRANSFORMS:  # type: ignore
-                field = transform[0]
-                method_name = transform[1]
-                args = transform[2:]  # Remaining items are method arguments
-
-                if field in payload and isinstance(payload[field], str):
+            if provider == "ntfy":
+                ntfy_title, ntfy_message = build_ntfy_webhook_message(str(payload["title"]), str(payload["description"]), payload["fields"], webhook_image_url)
+                response = req.post(str(WEBHOOK_URL), headers=final_headers, data=ntfy_message.encode("utf-8"), params={"title": ntfy_title}, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
+            else:
+                final_payload = format_payload(WEBHOOK_TEMPLATE, payload)  # type: ignore
+                if local_image_file and os.path.isfile(local_image_file) and isinstance(final_payload, dict) and "embeds" in final_payload:
+                    filename = os.path.basename(local_image_file)
                     try:
-                        # Get the method (e.g. .replace) from the string object
-                        method = getattr(payload[field], method_name)
-                        # Call it with the provided arguments
-                        payload[field] = method(*args)
-                    except (AttributeError, TypeError) as e:
-                        print(f"* Transformation error on {field}.{method_name}: {e}")
-
-            # Apply substitutions to WEBHOOK_TEMPLATE and WEBHOOK_HEADERS
-            final_payload = format_payload(WEBHOOK_TEMPLATE, payload)  # type: ignore
-            final_headers: dict = format_payload(WEBHOOK_HEADERS, payload)  # type: ignore
-
-            # Ensure we have a proper User-Agent to avoid being blocked by some services
-            if 'User-Agent' not in final_headers:
-                final_headers['User-Agent'] = f"InstagramMonitor/{VERSION}"
-
-            # Some proxies don't have support for POST
-            if PROXY_ENABLED and PROXY_WEBHOOKS:
-                final_post_proxy = get_proxies()
-                final_post_proxy_ssl = get_proxies_ssl()
-            else:
-                final_post_proxy = {}
-                final_post_proxy_ssl = True
-
-            # Handle Discord-style Local Files (embeds with image attachment)
-            if local_image_file and os.path.isfile(local_image_file) and isinstance(final_payload, dict) and "embeds" in final_payload:
-                filename = os.path.basename(local_image_file)
-                try:
-                    final_payload["embeds"][0]["image"]["url"] = f"attachment://{filename}"  # type: ignore
-                except (KeyError, IndexError, TypeError):
-                    # Template doesn't have expected Discord embed structure, skip image attachment
-                    pass
-                with open(local_image_file, 'rb') as f:
-                    files = {
-                        "file": (filename, f, "image/jpeg"),
-                        "payload_json": (None, json.dumps(final_payload))
-                    }
-                    response = req.post(str(WEBHOOK_URL), headers=final_headers, files=files, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
-            # Handle other types
-            else:
-                if isinstance(final_payload, str):
+                        final_payload["embeds"][0]["image"]["url"] = f"attachment://{filename}"  # type: ignore
+                    except (KeyError, IndexError, TypeError):
+                        pass
+                    with open(local_image_file, 'rb') as f:
+                        files = {
+                            "file": (filename, f, "image/jpeg"),
+                            "payload_json": (None, json.dumps(final_payload))
+                        }
+                        response = req.post(str(WEBHOOK_URL), headers=final_headers, files=files, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
+                elif isinstance(final_payload, str):
                     response = req.post(WEBHOOK_URL, headers=final_headers, data=final_payload, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
                 else:
                     response = req.post(WEBHOOK_URL, headers=final_headers, json=final_payload, timeout=10, verify=final_post_proxy_ssl, proxies=final_post_proxy)
@@ -4168,11 +4697,12 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
             if response.status_code in (200, 204):
                 print("* Webhook notification sent successfully")
                 return 0
-            else:
-                print(f"* Webhook error: HTTP {response.status_code} - {response.text[:200]}")
-                # Don't retry on client errors (4xx) unless it's 429
-                if response.status_code != 429:
-                    return 1
+
+            print(f"* Webhook error: HTTP {response.status_code} - {response.text[:200]}")
+            if response.status_code != 429:
+                print(colorize("info", "To fix: check that WEBHOOK_PROVIDER matches the saved Discord or ntfy URL then test it with --send-test-webhook."))
+                print(f"Guide: {WEBHOOK_GUIDE_URL}")
+                return 1
 
         except (req.exceptions.RequestException, req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
             if attempt < max_retries - 1:
@@ -4790,7 +5320,7 @@ def reload_secrets_signal_handler(sig, frame):
             else:
                 env_path = find_dotenv()
             if env_path:
-                load_dotenv(env_path, override=True)
+                load_dotenv(env_path, override=True, interpolate=False)
             else:
                 print("* No .env file found, skipping env-var reload")
         except ImportError:
@@ -5099,10 +5629,15 @@ def profile_from_username_resilient(bot: instaloader.Instaloader, username: str)
 def latest_post_reel(user: str, bot: instaloader.Instaloader) -> Optional[Tuple[instaloader.Post, str]]:
     profile = profile_from_username_resilient(bot, user)
 
-    # Max 3 pinned posts + the latest one
-    posts = [(p, "post") for p in islice(profile.get_posts(), 4)]
+    try:
+        # Max 3 pinned posts + the latest one
+        posts = [(p, "post") for p in islice(profile.get_posts(), 4)]
 
-    reels = [(r, "reel") for r in islice(profile.get_reels(), 4)]
+        reels = [(r, "reel") for r in islice(profile.get_reels(), 4)]
+    except TypeError as e:
+        # Instaloader subscripts a null GraphQL "data" field when Instagram deprecates a doc_id or
+        # temporarily blocks the session/IP; surface a clean, actionable error instead of a raw TypeError
+        raise RuntimeError("Instagram returned empty data for posts/reels (a GraphQL query may be deprecated or the session/IP is temporarily blocked)") from e
 
     candidates = posts + reels
 
@@ -5135,7 +5670,7 @@ def latest_post_mobile(user: str, bot: instaloader.Instaloader):
 
     if data.get("status") == "fail":
         ig_message = data.get("message", "unknown error")
-        hint = " (try using Firefox session login with --import-firefox-session)" if not bot.context.is_logged_in else ""
+        hint = " (try using browser session login with --import-browser-session)" if not bot.context.is_logged_in else ""
         raise RuntimeError(f"Instagram API error: {ig_message}{hint}")
 
     if "data" not in data or not isinstance(data.get("data"), dict):
@@ -5527,41 +6062,91 @@ def get_real_reel_code(bot: instaloader.Instaloader, username: str) -> Optional[
         return None
 
 
+# Returns Firefox cookie patterns for the active platform including Linux package variants
+def firefox_cookie_patterns():
+    selected_system = system()
+    configured_pattern = {"Windows": FIREFOX_WINDOWS_COOKIE, "Darwin": FIREFOX_MACOS_COOKIE}.get(selected_system, FIREFOX_LINUX_COOKIE)
+    patterns = [configured_pattern]
+    if selected_system == "Linux":
+        patterns.extend(("~/snap/firefox/common/.mozilla/firefox/*/cookies.sqlite", "~/.var/app/org.mozilla.firefox/.mozilla/firefox/*/cookies.sqlite"))
+    return tuple(dict.fromkeys(patterns))
+
+
+# Lists available Firefox profiles with their directory, friendly name and cookies.sqlite path
+def list_firefox_profiles():
+    profiles = []
+    seen_paths = set()
+    for cookie_pattern in firefox_cookie_patterns():
+        for path in sorted(glob(expanduser(cookie_pattern))):
+            normalized_path = os.path.realpath(path)
+            if normalized_path in seen_paths:
+                continue
+            seen_paths.add(normalized_path)
+            profile_dir = basename(dirname(path))
+            # Firefox profile dirs look like "<random>.default-release"; the part after the first dot is the friendly name
+            friendly = profile_dir.split(".", 1)[1] if "." in profile_dir else profile_dir
+            profiles.append({"dir": profile_dir, "name": friendly, "path": path})
+    return profiles
+
+
 # Finds (or prompts you to select) your Firefox cookies.sqlite file
 def get_firefox_cookiefile():
-    default_cookiefile = {
-        "Windows": FIREFOX_WINDOWS_COOKIE,
-        "Darwin": FIREFOX_MACOS_COOKIE,
-    }.get(system(), FIREFOX_LINUX_COOKIE)
+    profiles = list_firefox_profiles()
 
-    cookiefiles = glob(expanduser(default_cookiefile))
-
-    if not cookiefiles:
+    if not profiles:
         raise SystemExit("No Firefox cookies.sqlite file found, use --cookie-file COOKIEFILE flag")
 
-    if len(cookiefiles) == 1:
-        return cookiefiles[0]
+    if len(profiles) == 1:
+        return profiles[0]["path"]
 
+    print()
     print("Multiple Firefox profiles found:")
 
-    for idx, path in enumerate(cookiefiles, start=1):
-        profile = basename(dirname(path))
-        print(f"  {idx}) {profile}  -  {path}")
+    for idx, p in enumerate(profiles, start=1):
+        print(f"  {idx}) {p['name']}  -  {p['path']}")
 
     try:
         choice = int(input("Select profile number (0 to exit): "))
         if choice == 0:
             raise SystemExit("No profile selected, aborting ...")
-        cookiefile = cookiefiles[choice - 1]
+        return profiles[choice - 1]["path"]
     except (ValueError, IndexError):
         raise SystemExit("Invalid profile selection !")
-    return cookiefile
 
 
-# Imports Instagram cookie into Instaloader, checks login and saves the session
-def import_session(cookiefile, sessionfile):
-    print(f"Using cookies from '{cookiefile}' file\n")
+# Resolves a Firefox profile name (directory or friendly name) to its cookies.sqlite path
+def resolve_firefox_profile(name):
+    profiles = list_firefox_profiles()
+    for p in profiles:
+        if name.lower() in (p["dir"].lower(), p["name"].lower()):
+            return p["path"]
+    available = ", ".join(p["name"] for p in profiles) or "none found"
+    raise CookieImportError(f"Firefox profile '{name}' not found (available: {available})")
 
+
+# Browsers supported by the session importer (Firefox uses the built-in SQLite reader, the rest go through pycookiecheat)
+IMPORT_BROWSERS = ("firefox", "chrome", "brave", "chromium")
+CHROMIUM_IMPORT_BROWSERS = ("chrome", "brave", "chromium")
+
+
+# Human-friendly display name for a supported import browser
+def browser_label(browser):
+    return "Firefox" if browser == "firefox" else browser.capitalize()
+
+
+# Returns the unsupported Windows message for a Chromium-based browser
+def chromium_windows_unsupported_message(browser):
+    label = browser_label(browser)
+    return f"Importing {label} cookies is not supported on Windows because Chrome's app-bound encryption blocks external access. Use Firefox instead: instagram_monitor --import-browser-session --browser firefox"
+
+
+# Raised when browser session cookies cannot be read or imported
+class CookieImportError(Exception):
+    pass
+
+
+# Reads Instagram session cookies from a Firefox cookies.sqlite file and returns them as a name to value dict
+def get_firefox_cookie_dict(cookiefile):
     try:
         with connect(f"file:{cookiefile}?immutable=1", uri=True) as conn:
             try:
@@ -5572,20 +6157,198 @@ def import_session(cookiefile, sessionfile):
                 cookie_iter = conn.execute(
                     "SELECT name, value FROM moz_cookies WHERE host LIKE '%instagram.com'"
                 )
-
-            cookie_dict = dict(cookie_iter)
-
+            return dict(cookie_iter)
     except sqlite3.DatabaseError:
-        raise SystemExit(
-            f"Error: '{cookiefile}' is not a valid Firefox cookies.sqlite file"
+        raise CookieImportError(f"'{cookiefile}' is not a valid Firefox cookies.sqlite file")
+
+
+# Reads Instagram session cookies from a Chromium-based browser via pycookiecheat and returns them as a name to value dict
+# Default Chromium-family user-data directories (parent of the per-profile folders) by OS and browser
+CHROMIUM_USER_DATA_DIRS = {
+    "Darwin": {
+        "chrome": "~/Library/Application Support/Google/Chrome",
+        "chromium": "~/Library/Application Support/Chromium",
+        "brave": "~/Library/Application Support/BraveSoftware/Brave-Browser",
+    },
+    "Linux": {
+        "chrome": "~/.config/google-chrome",
+        "chromium": "~/.config/chromium",
+        "brave": "~/.config/BraveSoftware/Brave-Browser",
+    },
+}
+
+
+# Returns the user-data directory for a Chromium-based browser on this OS, or None if unsupported
+def get_chromium_user_data_dir(browser):
+    return CHROMIUM_USER_DATA_DIRS.get(system(), {}).get(browser)
+
+
+# Resolves the cookie database path for a Chromium profile dir, preferring the modern Network layout over the legacy one
+def chromium_profile_cookie_file(base_path, profile_dir):
+    for rel in (("Network", "Cookies"), ("Cookies",)):
+        candidate = os.path.join(base_path, profile_dir, *rel)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+# Lists available profiles for a Chromium-based browser with their directory and friendly display name
+def list_chromium_profiles(browser):
+    base = get_chromium_user_data_dir(browser)
+    if not base:
+        return []
+    base_path = expanduser(base)
+    if not os.path.isdir(base_path):
+        return []
+
+    # Friendly names live in the Local State JSON under profile.info_cache keyed by the profile dir name
+    names = {}
+    try:
+        with open(os.path.join(base_path, "Local State"), "r", encoding="utf-8") as f:
+            info_cache = json.load(f).get("profile", {}).get("info_cache", {})
+        names = {d: (info.get("name") or d) for d, info in info_cache.items()}
+    except (OSError, ValueError):
+        pass
+
+    profiles = []
+    for entry in sorted(os.listdir(base_path)):
+        if entry != "Default" and not entry.startswith("Profile "):
+            continue
+        cookie_file = chromium_profile_cookie_file(base_path, entry)
+        if cookie_file:
+            profiles.append({"dir": entry, "name": names.get(entry, entry), "cookie_file": cookie_file})
+    return profiles
+
+
+# Reads Instagram session cookies from a Chromium-based browser via pycookiecheat and returns them as a name to value dict
+def get_chromium_cookie_dict(browser, profile=None, cookie_file=None):
+    label = browser_label(browser)
+
+    if system() == "Windows":
+        raise CookieImportError(chromium_windows_unsupported_message(browser))
+
+    try:
+        from pycookiecheat import BrowserType, get_cookies
+    except (ImportError, ModuleNotFoundError):
+        executable = sys.executable or ("python" if system() == "Windows" else "python3")
+        install_command = _wizard_render_command([executable, "-m", "pip", "install", "pycookiecheat>=0.8"])
+        raise CookieImportError(
+            f"Importing {label} cookies requires the 'pycookiecheat' library !\n\n"
+            f"To install it, run:\n    {install_command}\n\n"
+            "Once installed, re-run this tool"
         )
 
-    instaloader = Instaloader(max_connection_attempts=1)
+    browser_type = {
+        "chrome": BrowserType.CHROME,
+        "brave": BrowserType.BRAVE,
+        "chromium": BrowserType.CHROMIUM,
+    }[browser]
+
+    # Resolve the cookie DB ourselves so we honour the chosen profile and the modern Network/Cookies layout
+    # (pycookiecheat's profile_name is Firefox-only and its default path ignores the Network subfolder)
+    if cookie_file:
+        cookie_file = expanduser(cookie_file)
+        if not os.path.isfile(cookie_file):
+            raise CookieImportError(f"{label} cookie file '{cookie_file}' not found")
+    else:
+        base = get_chromium_user_data_dir(browser)
+        if base:
+            base_path = expanduser(base)
+            cookie_file = chromium_profile_cookie_file(base_path, profile or "Default")
+            if cookie_file is None and profile:
+                available = ", ".join(p["dir"] for p in list_chromium_profiles(browser)) or "none found"
+                raise CookieImportError(f"{label} profile '{profile}' not found (available: {available})")
+        # if base is unknown or Default is missing, leave cookie_file None and let pycookiecheat try its own default
+
+    try:
+        cookies = get_cookies("https://www.instagram.com", browser=browser_type, cookie_file=cookie_file)
+    except Exception as e:
+        raise CookieImportError(
+            f"Could not read {label} cookies: {e}\nMake sure {label} is installed and you are logged in to Instagram in it"
+        )
+
+    # get_cookies returns a name to value dict by default (as_cookies is False), coerce defensively to keep a plain dict
+    cookie_dict = cookies if isinstance(cookies, dict) else {c.name: c.value for c in cookies}
+
+    if not cookie_dict:
+        where = f" (profile '{profile}')" if profile else ""
+        raise CookieImportError(f"No Instagram cookies found in {label}{where} - are you logged in to Instagram in {label}?")
+
+    return cookie_dict
+
+
+# Returns Instagram session cookies for the given browser, dispatching to the Firefox or Chromium reader
+def get_browser_cookie_dict(browser, cookiefile=None, profile=None):
+    if browser == "firefox":
+        return get_firefox_cookie_dict(cookiefile)
+    return get_chromium_cookie_dict(browser, profile=profile, cookie_file=cookiefile)
+
+
+# Prompts to choose a Chromium profile when several exist and none was given, mirroring the Firefox profile picker
+def select_chromium_profile_cli(browser, explicit_profile):
+    if explicit_profile:
+        return explicit_profile
+    if system() == "Windows":
+        raise SystemExit(f"Error: {chromium_windows_unsupported_message(browser)}")
+
+    profiles = list_chromium_profiles(browser)
+    if not profiles:
+        raise SystemExit(f"No {browser_label(browser)} profiles found - is it installed and are you logged in to Instagram?")
+    if len(profiles) == 1:
+        return profiles[0]["dir"]
+
+    print()
+    print(f"Multiple {browser_label(browser)} profiles found:")
+    for idx, p in enumerate(profiles, start=1):
+        print(f"  {idx}) {p['dir']}  -  {p['name']}")
+
+    try:
+        choice = int(input("Select profile number (0 to exit): "))
+        if choice == 0:
+            raise SystemExit("No profile selected, aborting ...")
+        return profiles[choice - 1]["dir"]
+    except (ValueError, IndexError):
+        raise SystemExit("Invalid profile selection !")
+
+
+# Imports a browser session for the web dashboard, saves it via Instaloader and returns the logged-in username
+def import_browser_session_dashboard(browser, cookiefile=None, profile=None):
+    cookie_dict = get_browser_cookie_dict(browser, cookiefile, profile=profile)
+
+    L = Instaloader(user_agent=USER_AGENT, max_connection_attempts=1)
+    L.context._session.cookies.update(cookie_dict)
+    username = L.test_login()
+
+    if not username:
+        raise CookieImportError(f"Not logged in - are you logged in successfully in {browser_label(browser)}?")
+
+    L.context.username = username
+    L.save_session_to_file()
+    return username
+
+
+# Imports Instagram cookies from the given browser into Instaloader, checks login and saves the session
+def import_session(browser, cookiefile, sessionfile, profile=None):
+    label = browser_label(browser)
+
+    if browser == "firefox":
+        print(f"Using cookies from '{cookiefile}' file\n")
+    elif profile:
+        print(f"Using cookies from {label} browser (profile '{profile}')\n")
+    else:
+        print(f"Using cookies from {label} browser\n")
+
+    try:
+        cookie_dict = get_browser_cookie_dict(browser, cookiefile, profile=profile)
+    except CookieImportError as e:
+        raise SystemExit(f"Error: {e}")
+
+    instaloader = Instaloader(user_agent=USER_AGENT, max_connection_attempts=1)
     instaloader.context._session.cookies.update(cookie_dict)
     username = instaloader.test_login()
 
     if not username:
-        raise SystemExit("Not logged in - are you logged in successfully in Firefox?")
+        raise SystemExit(f"Not logged in - are you logged in successfully in {label}?")
 
     print(f"Imported session cookies for {username}")
 
@@ -5597,13 +6360,22 @@ def import_session(cookiefile, sessionfile):
         instaloader.save_session_to_file()
 
     # Emit the warning in red only when colour output is enabled and supported, otherwise plain text
-    invert_text = True
+    RED = f"\033[{_STYLE_CODES['red']}m" if COLOR_ENABLED else ""
+    RESET = ANSI_RESET if COLOR_ENABLED else ""
+
+    border = "*" * 69
+    warning_lines = [
+        f" Do not use Instagram in {label} while the script is running.",
+        " Simultaneous browser and tool activity can get the account flagged.",
+        f" Tip: you might want to clear Instagram cookies in {label} now.",
+    ]
+
     print("")
-    print_red(f"*************************************************************************", invert=invert_text)
-    print_red(f"*  Do not use Instagram in Firefox while the script is running.         *", invert=invert_text)
-    print_red(f"*  Simultaneous browser and tool activity can get the account flagged.  *", invert=invert_text)
-    print_red(f"*  Tip: you might want to clear Instagram cookies in Firefox now.       *", invert=invert_text)
-    print_red(f"*************************************************************************", invert=invert_text)
+    print(f"{RED}{border}{RESET}")
+    for line in warning_lines:
+        print(f"{RED}{line.ljust(len(border))}{RESET}")
+    print(f"{RED}{border}{RESET}")
+    return username
 
 
 # Finds an optional config file
@@ -5770,7 +6542,7 @@ def get_random_mobile_user_agent() -> str:
     return (f"Instagram {app_major}.{app_minor}.{app_patch}.{app_revision} ({device}{model}; iOS {os_major}_{os_minor}; {language}; {locale}; scale={scale:.2f}; {width}x{height}; {device_id}) AppleWebKit/420+")
 
 
-# Extracts usernames from a JSON response, automatically detecting if the data is for 'following' or 'followers'
+# Extracts usernames from a follower or following JSON response and returns [] for malformed shapes
 def extract_usernames_safely(data_dict):
     usernames = []
 
@@ -5778,24 +6550,27 @@ def extract_usernames_safely(data_dict):
     # The value is the path segment needed to reach the 'edges' list
     possible_keys = ['edge_followed_by', 'edge_follow']
 
-    # Safely access the 'user' dictionary
-    try:
-        user_data = data_dict['data']['user']
-    except KeyError as e:
-        # print(f"Format Check Failed: Missing essential key {e} in top level. Skipping.")
+    if not isinstance(data_dict, dict):
+        return []
+
+    data = data_dict.get('data')
+    if not isinstance(data, dict):
+        return []
+
+    user_data = data.get('user')
+    if not isinstance(user_data, dict):
         return []
 
     # Iterate through possible keys to find the correct list
     edges = None
     for key in possible_keys:
-        if key in user_data:
-            try:
-                edges = user_data[key]['edges']
-                break
-            except KeyError:
-                # This handles the case where the key exists but 'edges' is missing
-                # print(f"Warning: Found '{key}' but 'edges' list is missing inside it. Trying next key.")
-                continue
+        edge_group = user_data.get(key)
+        if not isinstance(edge_group, dict):
+            continue
+        if 'edges' not in edge_group:
+            continue
+        edges = edge_group.get('edges')
+        break
 
     # Check if any edges were found and if it's a list
     if edges is None:
@@ -5808,13 +6583,14 @@ def extract_usernames_safely(data_dict):
 
     # 4. Extract usernames from the list of edges
     for edge in edges:
-        try:
-            # The node structure is consistent: edge -> 'node' -> 'username'
-            username = edge['node']['username']
-            usernames.append(username)
-        except KeyError:
-            # Handle a malformed single entry by skipping it
+        if not isinstance(edge, dict):
             continue
+        node = edge.get('node')
+        if not isinstance(node, dict):
+            continue
+        username = node.get('username')
+        if isinstance(username, str):
+            usernames.append(username)
 
     return usernames
 
@@ -6421,6 +7197,7 @@ def generate_config_dashboard(target_data, config_data):
         ("CSV Logging", config_data.get('csv_logging', '-')),
         ("Output Dir", config_data.get('output_dir', '-')),
         ("Webhook", str(config_data.get('webhook_enabled', '-'))),
+        ("Webhook Provider", str(config_data.get('webhook_provider', '-'))),
         ("Webhook Status", str(config_data.get('webhook_status', '-'))),
         ("Webhook Followers", str(config_data.get('webhook_followers', '-'))),
         ("Webhook Errors", str(config_data.get('webhook_errors', '-'))),
@@ -6541,7 +7318,7 @@ def update_dashboard():
         if WEB_DASHBOARD_ENABLED and not DASHBOARD_DATA.get('targets_list', []):
             loading_text.append("⌛ Waiting for targets...\n\n", style="yellow")
             loading_text.append("* Web UI: ", style="dim")
-            loading_text.append(f"http://{WEB_DASHBOARD_HOST or '127.0.0.1'}:{WEB_DASHBOARD_PORT or '8000'}/\n\n", style="bold cyan")
+            loading_text.append(f"{_web_dashboard_browser_url()}\n\n", style="bold cyan")
             loading_text.append("No initial targets specified on command line.\n", style="dim")
             loading_text.append("Please open the Web UI above to manually add Instagram users for monitoring.\n", style="dim")
             loading_text.append("You can also configure sessions and settings directly from the dashboard.\n\n", style="dim")
@@ -6604,7 +7381,7 @@ def init_dashboard():
     if WEB_DASHBOARD_ENABLED and not DASHBOARD_DATA.get('targets_list', []):
         loading_text.append("⌛ Waiting for targets...\n\n", style="yellow")
         loading_text.append("* Web UI: ", style="dim")
-        loading_text.append(f"http://{WEB_DASHBOARD_HOST or '127.0.0.1'}:{WEB_DASHBOARD_PORT or '8000'}/\n\n", style="bold cyan")
+        loading_text.append(f"{_web_dashboard_browser_url()}\n\n", style="bold cyan")
         loading_text.append("No initial targets specified on command line.\n", style="dim")
         loading_text.append("Please open the Web UI above to manually add Instagram users for monitoring.\n", style="dim")
         loading_text.append("You can also configure sessions and settings directly from the dashboard.\n\n", style="dim")
@@ -7216,6 +7993,7 @@ def get_dashboard_config_data(final_log_path=None, imgcat_exe=None, profile_pic_
         'local_timezone': LOCAL_TIMEZONE,
         'webhook_enabled': WEBHOOK_ENABLED,
         'webhook_url': WEBHOOK_URL,
+        'webhook_provider': normalized_webhook_provider() or WEBHOOK_PROVIDER,
         'webhook_status': WEBHOOK_STATUS_NOTIFICATION,
         'webhook_followers': WEBHOOK_FOLLOWERS_NOTIFICATION,
         'webhook_errors': WEBHOOK_ERROR_NOTIFICATION,
@@ -7255,6 +8033,57 @@ def format_error_message(e: Exception) -> str:
         return "Instagram may have detected automated checks and requires a challenge or re-login (if session is used) or has temporarily shadow banned the IP. The API response is missing expected data."
 
     return f"{error_type}: {error_str}"
+
+
+# Returns the browser session import command matching the current installation
+def session_recovery_command() -> str:
+    return _firefox_import_cmd(_wizard_install_method())
+
+
+# Returns a short actionable next-step hint for a known error message or an empty string when none applies
+def error_fix_hint(error_msg: str, is_logged_in: bool = False) -> str:
+    m = (error_msg or "").lower()
+
+    # Rate limiting or TLS-fingerprint blocks
+    if any(t in m for t in ("429", "too many requests", "wait a few minutes", "rate limit", "please wait")):
+        return f"To fix: Instagram is rate-limiting you. Raise the check interval (-c / INSTA_CHECK_INTERVAL), add jitter (--enable-jitter) and monitor fewer users.\nGuide: {ANTI_DETECTION_INTERVAL_GUIDE_URL}"
+
+    # Challenge, checkpoint or shadowban
+    if any(t in m for t in ("challenge", "checkpoint", "automated", "shadow ban", "shadowban", "missing expected data")):
+        return f"To fix: Instagram wants this session or IP to pass a challenge. Open Instagram in your browser, clear any checkpoint then re-import the session with '{session_recovery_command()}'. Also raise the check interval.\nGuide: {ANTI_DETECTION_SESSION_GUIDE_URL}"
+
+    # Missing session file
+    if "session file" in m:
+        return f"To fix: no saved session was found for this account. Create one with '{session_recovery_command()}' after logging in via Firefox or with 'instaloader -l <your_user>'. In the Web Dashboard you can import from the Session page.\nGuide: {SESSION_IMPORT_GUIDE_URL}"
+
+    # Invalid or expired session
+    if any(t in m for t in ("login_required", "loginrequired", "not logged in", "redirected", "forbidden", "401", "403", "bad credentials", "badcredentials", "wrong password", "checkpoint_required")):
+        return f"To fix: your Instagram session looks invalid or expired. Re-import it with '{session_recovery_command()}' after logging in via Firefox or recreate it with 'instaloader -l <your_user>'. In the Web Dashboard you can re-import from the Session page.\nGuide: {SESSION_IMPORT_GUIDE_URL}"
+
+    # Profile not found
+    if any(t in m for t in ("profilenotexists", "does not exist", "not found", "404")):
+        hint = "To fix: check the target username is spelled correctly and the account still exists and is reachable."
+        if is_logged_in:
+            hint += " If the username is correct, your session or IP may be temporarily flagged."
+        return hint
+
+    # Network or connectivity problems
+    if any(t in m for t in ("connection", "timed out", "timeout", "temporary failure", "name resolution", "network is unreachable", "max retries", "ssl")):
+        return f"To fix: this looks like a network problem. Check your internet connection and proxy settings if --enable-proxy is set then try again.\nGuide: {PROXY_GUIDE_URL}"
+
+    # Deprecated GraphQL doc_id returning null data, or a temporary block
+    if any(t in m for t in ("empty data for posts", "fetching post metadata failed", "not subscriptable")):
+        return "To fix: Instagram returned empty data for this query. This is usually a temporary block (raise the check interval with -c and add --enable-jitter) or an Instagram API change (update instagram_monitor to the latest version; if you are already current, report it at https://github.com/misiektoja/instagram_monitor/issues)."
+
+    return ""
+
+
+# Prints an actionable fix hint for the given error to the console when one is available
+def print_fix_hint(error_msg: str) -> None:
+    is_logged_in = bool(SESSION_USERNAME) and not SKIP_SESSION
+    hint = error_fix_hint(error_msg, is_logged_in)
+    if hint:
+        print(colorize("info", hint))
 
 
 # Returns True when the formatted error indicates a profile could not be found (deleted/renamed target or a flagged session masking every profile)
@@ -7765,6 +8594,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             except Exception as e:
                 error_msg = format_error_message(e)
                 print(f"* Session error for {user}: {error_msg}")
+                print_fix_hint(error_msg)
                 print_cur_ts(newline=True)
                 log_activity(f"Session error: {error_msg}", user=user)
 
@@ -7955,11 +8785,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         error_msg = format_error_message(e)
         print(f"* Error: {error_msg}")
 
+        # Detect a flagged session/IP up front so the specific flagged guidance below replaces the generic fix hint
+        session_flagged = is_session_flagged(error_msg, bot)
+        if not session_flagged:
+            print_fix_hint(error_msg)
         print_cur_ts(newline=True)
         log_activity(f"Error: {error_msg}", user=user)
 
         # Handle session recovery for automated checks/challenge errors
-        if is_session_flagged(error_msg, bot):
+        if session_flagged:
             err_str = f"Session account '{SESSION_USERNAME or '<anonymous>'}' has been flagged. Log into Instagram and clear warnings."
             update_ui_data(targets={user: {'status': f'Paused: {err_str}'}})
             print(f"* Error: {err_str}")
@@ -8184,6 +9018,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             close_pbar()
             error_msg = format_error_message(e)
             print(f"* Error while getting followers: {error_msg}")
+            print_fix_hint(error_msg)
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
             if threading.current_thread() is threading.main_thread():
                 sys.exit(1)
@@ -8332,6 +9167,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             close_pbar()
             error_msg = format_error_message(e)
             print(f"* Error while getting followings: {error_msg}")
+            print_fix_hint(error_msg)
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
             if threading.current_thread() is threading.main_thread():
                 sys.exit(1)
@@ -8577,6 +9413,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             except Exception as e:
                 error_msg = format_error_message(e)
                 print(f"* Error while processing story items: {error_msg}")
+                print_fix_hint(error_msg)
                 update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
                 if threading.current_thread() is threading.main_thread():
                     sys.exit(1)
@@ -8649,6 +9486,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         except Exception as e:
             error_msg = format_error_message(e)
             print(f"* Error while processing posts/reels: {error_msg}")
+            print_fix_hint(error_msg)
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
             if threading.current_thread() is threading.main_thread():
                 sys.exit(1)
@@ -9022,6 +9860,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     'follower_notif': FOLLOWERS_NOTIFICATION,
                     'error_notif': ERROR_NOTIFICATION,
                     'webhook_enabled': WEBHOOK_ENABLED,
+                    'webhook_provider': normalized_webhook_provider() or WEBHOOK_PROVIDER,
                     'proxy_enabled': PROXY_ENABLED,
                     'human_mode': BE_HUMAN,
                     'enable_jitter': ENABLE_JITTER,
@@ -9118,15 +9957,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                             skip_getting_posts_details = SKIP_GETTING_POSTS_DETAILS
                             get_more_post_details = GET_MORE_POST_DETAILS
 
-                            # Reload session into bot context or clear if Mode 1
+                            # Reload session into bot context or clear in No-login mode
                             with SESSION_FILE_LOCK:
                                 try:
                                     if skip_session:
-                                        # Clear session context for Mode 1
+                                        # Clear session context for No-login mode
                                         bot.context._session.cookies.clear()
                                         with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
                                             WEB_DASHBOARD_DATA['session']['active'] = False
-                                        log_activity("Session cleared for Mode 1", user=user)
+                                        log_activity("Session cleared for No-login mode", user=user)
                                     else:
                                         bot.load_session_from_file(SESSION_USERNAME)
                                         with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
@@ -9142,7 +9981,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     continue  # Retry the main loop
 
                 if 'Redirected' in str(e) or 'login' in str(e) or 'Forbidden' in str(e) or 'Wrong' in str(e) or 'Bad Request' in str(e):
-                    print("* Session might not be valid anymore!")
+                    print("* Session might not be valid anymore! Re-import it with --import-browser-session --browser firefox or from the Web Dashboard Session page.")
                     if ERROR_NOTIFICATION and not email_sent:
                         m_subject = f"instagram_monitor: session error! (session: {session_label()}, target: {user})"
 
@@ -9170,7 +10009,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
             if (next((s for s in get_thread_output() if "HTTP redirect from" in s), None)):
                 r_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
-                print("* Session might not be valid anymore!")
+                print("* Session might not be valid anymore! Re-import it with --import-browser-session --browser firefox or from the Web Dashboard Session page.")
                 print(f"Retrying in {display_time(r_sleep_time)}")
                 if ERROR_NOTIFICATION and not email_sent:
                     m_subject = f"instagram_monitor: session error! (session: {session_label()}, target: {user})"
@@ -9958,7 +10797,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     error_msg = format_error_message(e)
                     print(f"* Error, retrying in {display_time(r_sleep_time)}: {error_msg}")
                     if 'Redirected' in str(e) or 'login' in str(e) or 'Forbidden' in str(e) or 'Wrong' in str(e) or 'Bad Request' in str(e):
-                        print("* Session might not be valid anymore!")
+                        print("* Session might not be valid anymore! Re-import it with --import-browser-session --browser firefox or from the Web Dashboard Session page.")
                         if ERROR_NOTIFICATION and not email_sent:
                             m_subject = f"instagram_monitor: session error! (session: {session_label()}, target: {user})"
 
@@ -10343,6 +11182,1098 @@ def get_target_paths(user):
     return target_csv, target_log
 
 
+# Returns whether the process is running inside the supported container image
+def _running_in_container() -> bool:
+    return os.path.exists("/.dockerenv") or bool(os.environ.get("INSTAGRAM_MONITOR_DOCKER"))
+
+
+# Detects how the tool was launched so the wizard can show matching commands (compose is the docker-compose.yml service, which exports INSTAGRAM_MONITOR_COMPOSE)
+def _wizard_install_method() -> str:
+    if _running_in_container():
+        return "compose" if os.environ.get("INSTAGRAM_MONITOR_COMPOSE") else "docker"
+    prog = os.path.basename(sys.argv[0] or "")
+    if prog.endswith(".py"):
+        return "manual"
+    return "pip"
+
+
+# Returns local command arguments using friendly names or exact runtime paths
+def _wizard_local_command_args(method: str, exact: bool = False) -> List[str]:
+    if exact:
+        executable = sys.executable or ("python" if system() == "Windows" else "python3")
+        if method == "pip":
+            return [executable, "-m", "instagram_monitor"]
+        return [executable, str(Path(__file__).resolve())]
+    path_class = PureWindowsPath if system() == "Windows" else Path
+    executable_name = path_class(sys.executable).name or ("python" if system() == "Windows" else "python3")
+    if system() == "Windows" and executable_name.casefold().endswith(".exe"):
+        executable_name = executable_name[:-4]
+    script_name = path_class(__file__).name
+    return [executable_name, script_name] if method == "manual" else ["instagram_monitor"]
+
+
+# Renders command arguments for the active host shell
+def _wizard_render_command(arguments) -> str:
+    values = [str(argument) for argument in arguments]
+    return subprocess.list2cmdline(values) if system() == "Windows" else shlex.join(values)
+
+
+# Quotes one command argument for the active host shell
+def _wizard_quote_argument(value) -> str:
+    return _wizard_render_command([str(value)])
+
+
+# Returns the command prefix used to invoke the tool for the detected install method
+def _wizard_cmd_prefix(method: str, web_dashboard: bool = False, exact: bool = False, host_os: Optional[str] = None, web_dashboard_port: Optional[int] = None) -> str:
+    selected_web_port = web_dashboard_port if web_dashboard_port is not None else WEB_DASHBOARD_PORT
+    if method == "compose":
+        port_flag = ""
+        if web_dashboard:
+            port_flag = " --service-ports" if selected_web_port == 8000 else f" -p 127.0.0.1:{selected_web_port}:{selected_web_port}"
+        return f"docker compose run --rm{port_flag} instagram_monitor"
+    if method == "docker":
+        web_port_flag = f" -p 127.0.0.1:{selected_web_port}:{selected_web_port}" if web_dashboard else ""
+        linux_user_mapping = host_os in ("linux", "linux-snap", "linux-flatpak") or (host_os is None and hasattr(os, "getuid") and os.getuid() != 10001)
+        user_flag = ' --user "$(id -u):$(id -g)"' if linux_user_mapping else ""
+        current_directory = "%cd%" if host_os == "windows-cmd" else "${PWD}"
+        return (f'docker run --rm -it --init{user_flag} -v "{current_directory}:/data:z" -v instagram_monitor_session:/home/instagram/.config/instaloader{web_port_flag} misiektoja/instagram-monitor')
+    return _wizard_render_command(_wizard_local_command_args(method, exact=exact))
+
+
+# Rejects container setup destinations that would disappear with the temporary container
+def _wizard_validate_destination(method: str, path, label: str) -> Path:
+    if method in ("docker", "compose"):
+        expanded = Path(path).expanduser()
+        portable = PurePosixPath(expanded.as_posix())
+        try:
+            relative = portable.relative_to(PurePosixPath("/data"))
+        except ValueError:
+            raise ValueError(f"{label} must be inside /data so it remains on the host after the setup container exits")
+        if ".." in relative.parts:
+            raise ValueError(f"{label} must be inside /data so it remains on the host after the setup container exits")
+        return Path(PurePosixPath("/data", *relative.parts).as_posix())
+    return Path(path).expanduser().resolve()
+
+
+# Converts a wizard destination into the matching path inside the data container mount
+def _wizard_container_path(path) -> str:
+    expanded = Path(path).expanduser()
+    portable = PurePosixPath(expanded.as_posix())
+    try:
+        relative = portable.relative_to(PurePosixPath("/data"))
+        if ".." not in relative.parts:
+            return PurePosixPath("/data", *relative.parts).as_posix()
+    except ValueError:
+        pass
+    resolved = expanded.resolve()
+    try:
+        relative = resolved.relative_to(Path.cwd().resolve())
+    except ValueError:
+        raise ValueError(f"Container path '{resolved}' is outside the /data bind mount") from None
+    return str(PurePosixPath("/data") / PurePosixPath(relative.as_posix()))
+
+
+# Builds one install-aware action command with safe paths and optional targets
+def _wizard_action_command(method: str, action: str, config_path, env_path, targets=(), web_dashboard: bool = False, host_os: Optional[str] = None) -> str:
+    parts = [_wizard_cmd_prefix(method, web_dashboard=web_dashboard, exact=True, host_os=host_os)]
+    if action:
+        parts.append(action)
+    parts.extend(_wizard_quote_argument(target) for target in targets)
+    if config_path is not None:
+        selected_config = _wizard_container_path(config_path) if method in ("docker", "compose") else str(Path(config_path).expanduser().resolve())
+        parts.extend(("--config-file", _wizard_quote_argument(selected_config)))
+    if env_path is not None:
+        selected_env = "none" if str(env_path).casefold() == "none" else _wizard_container_path(env_path) if method in ("docker", "compose") else str(Path(env_path).expanduser().resolve())
+        parts.extend(("--env-file", _wizard_quote_argument(selected_env)))
+    return " ".join(parts)
+
+
+# Prints the install-aware monitoring command after a successful Doctor run
+def _wizard_print_monitor_after_doctor(config_path, env_path, targets=(), web_dashboard: bool = False) -> None:
+    method = _wizard_install_method()
+    command = _wizard_action_command(method, "", config_path, env_path, targets, web_dashboard=web_dashboard)
+    print(colorize("header", "\nNext steps\n"))
+    print("After Doctor passes, start monitoring:")
+    print(colorize("section", f"    {command}\n"))
+    if web_dashboard:
+        print(f"Then open {colorize('link', _web_dashboard_browser_url())} in your browser.\n")
+
+
+# Returns the full Firefox import command with an optional exact dotenv destination
+def _firefox_import_cmd(method: str, env_path=None, exact: bool = False, host_os: Optional[str] = None, config_path=None, targets=()) -> str:
+    selected_host = host_os or "linux"
+    prefix = _wizard_cmd_prefix(method, exact=exact, host_os=selected_host if method in ("docker", "compose") else host_os)
+    if method not in ("docker", "compose"):
+        command = f"{prefix} --import-browser-session --browser firefox"
+        if env_path is not None:
+            command += f" --env-file {_wizard_quote_argument(str(Path(env_path).expanduser().resolve()))}"
+        return command
+    ff_mount = f"-v {CONTAINER_FIREFOX_HOSTS[selected_host][1]}"
+    if method == "docker":
+        with_mount = prefix.replace("misiektoja/instagram-monitor", f"{ff_mount} misiektoja/instagram-monitor")
+    else:
+        base, _, svc = prefix.rpartition(" ")
+        with_mount = f"{base} {ff_mount} {svc}"
+    command = f"{with_mount} --import-browser-session --browser firefox"
+    command += "".join(f" {_wizard_quote_argument(target)}" for target in targets)
+    if config_path is not None:
+        selected_config = _wizard_container_path(config_path) if method in ("docker", "compose") else str(Path(config_path).expanduser().resolve())
+        command += f" --config-file {_wizard_quote_argument(selected_config)}"
+    if env_path is not None:
+        command += f" --env-file {_wizard_quote_argument(_wizard_container_path(env_path))}"
+    return command
+
+
+# Browsers the setup wizard can import from in this environment (Chromium-family needs OS keyring access, unavailable on Windows and inside containers, so those get Firefox only)
+def _wizard_import_browsers(method: str) -> list:
+    if system() == "Windows" or method in ("docker", "compose"):
+        return ["firefox"]
+    return list(IMPORT_BROWSERS)
+
+
+# One-line wizard menu description for an import browser choice
+def _wizard_browser_desc(browser: str) -> str:
+    if browser == "firefox":
+        return "Built-in reader for macOS, Linux and Windows with no extra packages."
+    return f"Import from the signed-in {browser_label(browser)} profile."
+
+
+# Returns whether Chromium browser import support is available in the active Python environment
+def _wizard_chromium_dependency_available() -> bool:
+    try:
+        return importlib.util.find_spec("pycookiecheat") is not None
+    except (AttributeError, ImportError, ValueError):
+        return False
+
+
+# Installs Chromium browser import support into the active Python environment
+def _wizard_install_chromium_dependency(method: str) -> bool:
+    requirement = "pycookiecheat>=0.8"
+    executable = sys.executable or ("python" if system() == "Windows" else "python3")
+    command = [executable, "-m", "pip", "install", requirement]
+    print(f"Installing Chromium browser support with:\n    {_wizard_render_command(command)}\n")
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as exc:
+        print(colorize("warning", f"  Installation could not start: {exc}"))
+        return False
+    importlib.invalidate_caches()
+    if result.returncode == 0 and _wizard_chromium_dependency_available():
+        print(colorize("info", "\nChromium browser support was installed successfully."))
+        return True
+    print(colorize("warning", "\nChromium browser support could not be installed. Choose Firefox or another login method."))
+    return False
+
+
+# Builds the --help examples epilog using commands that match the detected install method (manual, pip, docker, compose)
+def _build_help_epilog() -> str:
+    method = _wizard_install_method()
+    prefix = _wizard_cmd_prefix(method)
+    web_prefix = _wizard_cmd_prefix(method, web_dashboard=True)
+    # Inside a container the host OS is not knowable (the container is always Linux), so the Firefox mount example assumes a Linux host and is labelled as such
+    if method in ("docker", "compose"):
+        ff_comment = "  # Logged in via Firefox - full detail (Linux host shown; mount your Firefox profile)\n"
+    else:
+        ff_comment = "  # Logged in via Firefox - full detail (stories, reels, follower churn)\n"
+    return (
+        "Examples:\n"
+        "  # Guided setup (recommended for the first run)\n"
+        f"  {prefix} --setup\n"
+        "\n"
+        "  # No login (new posts, bio and follower counts)\n"
+        f"  {prefix} <username>\n"
+        "\n"
+        f"{ff_comment}"
+        f"  {_firefox_import_cmd(method)}\n"
+        f"  {prefix} -u <your_user> <username>\n"
+        "\n"
+        "  # Point-and-click web dashboard (add targets in the browser)\n"
+        f"  {web_prefix} --web-dashboard\n"
+    )
+
+
+# Reads a single line of input, exiting cleanly if the user aborts with Ctrl+C or Ctrl+D
+def _wizard_input(prompt_text: str) -> str:
+    try:
+        return input(prompt_text)
+    except (EOFError, KeyboardInterrupt):
+        print("\n" + colorize("warning", "Setup cancelled."))
+        sys.exit(1)
+
+
+# Prompts for a line of text, returning the default on empty input and re-asking when a required value is blank
+def _wizard_ask_text(question: str, default: str = "", required: bool = False) -> str:
+    suffix = f" [{default}]" if default else ""
+    while True:
+        raw = _wizard_input(colorize("info", f"{question}{suffix}: ")).strip()
+        if not raw:
+            raw = default
+        if raw or not required:
+            return raw
+        print(colorize("warning", "  This value is required."))
+
+
+# Reads a required secret through getpass without echoing the entered value
+def _wizard_ask_secret(question: str) -> str:
+    while True:
+        try:
+            value = getpass.getpass(f"{question}: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n" + colorize("warning", "Setup cancelled."))
+            raise SystemExit(1) from None
+        if value:
+            return value
+        print(colorize("warning", "  This secret is required and cannot be empty."))
+
+
+# Prompts a yes/no question and returns the boolean answer
+def _wizard_ask_yes_no(question: str, default: bool = True) -> bool:
+    hint = "[Y/n]" if default else "[y/N]"
+    while True:
+        raw = _wizard_input(colorize("info", f"{question} {hint}: ")).strip().lower()
+        if not raw:
+            return default
+        if raw in ("y", "yes"):
+            return True
+        if raw in ("n", "no"):
+            return False
+        print(colorize("warning", "  Please answer 'y' or 'n'."))
+
+
+# Prints a numbered menu and returns the zero-based index the user selected
+def _wizard_ask_choice(question: str, options, default_index: int = 0) -> int:
+    print()
+    print(colorize("info", question))
+    for i, (label, desc) in enumerate(options, start=1):
+        marker = colorize("info", " (default)") if (i - 1) == default_index else ""
+        print(f"  {colorize('username', str(i))}. {label}{marker}")
+        if desc:
+            for desc_line in desc.split("\n"):
+                print(f"     {desc_line}")
+    while True:
+        raw = _wizard_input(colorize("info", f"Choose [1-{len(options)}]: ")).strip()
+        if not raw:
+            return default_index
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return int(raw) - 1
+        print(colorize("warning", f"  Enter a number between 1 and {len(options)}."))
+
+
+# Returns a secret from the selected dotenv file or environment without displaying it
+def _wizard_secret_value(key: str, env_path: Path) -> Optional[str]:
+    value = None
+    if env_path.is_file():
+        try:
+            from dotenv import dotenv_values
+            value = dotenv_values(env_path, interpolate=False).get(key)
+        except Exception:
+            value = None
+    if value is None:
+        value = os.environ.get(key)
+    return value if isinstance(value, str) else None
+
+
+# Returns whether a non-placeholder secret exists in the selected dotenv file or environment
+def _wizard_existing_secret(key: str, env_path: Path, placeholders=()) -> bool:
+    value = _wizard_secret_value(key, env_path)
+    return value is not None and bool(value.strip()) and value not in placeholders
+
+
+# Collects an optional ntfy access token without displaying or contacting the service
+def _wizard_collect_ntfy_access_token(secret_updates: dict, env_path: Path) -> None:
+    existing_token = _wizard_existing_secret("NTFY_ACCESS_TOKEN", env_path)
+    if existing_token:
+        choice = _wizard_ask_choice("Which ntfy authentication should be used?", [("Keep the saved access token", "Keeps the private value without displaying or changing it."), ("Paste a new access token", "Uses a hidden prompt then saves the replacement in .env."), ("Do not use an access token", "Disables the saved token. Authentication in the topic URL still works.")])
+        if choice == 0:
+            return
+        if choice == 2:
+            secret_updates["NTFY_ACCESS_TOKEN"] = ""
+            print("  The saved ntfy access token will be disabled without being displayed.")
+            return
+    elif not _wizard_ask_yes_no("Authenticate this ntfy topic with a separate access token?", default=False):
+        print("  No separate access token selected. Authentication already present in the topic URL still works.")
+        return
+    while True:
+        token = _wizard_ask_secret("Paste the ntfy access token only").strip()
+        if token and "\r" not in token and "\n" not in token and not token.casefold().startswith(("bearer ", "basic ")):
+            break
+        print("  Paste only the access token without a Bearer or Basic prefix.")
+    secret_updates["NTFY_ACCESS_TOKEN"] = token
+
+
+# Config values reset before one setup section is collected again
+WIZARD_LOGIN_CONFIG_KEYS = ("SESSION_USERNAME", "SKIP_SESSION")
+WIZARD_INTERFACE_CONFIG_KEYS = ("WEB_DASHBOARD_ENABLED", "DASHBOARD_ENABLED", "WEB_DASHBOARD_HOST")
+WIZARD_WEBHOOK_CONFIG_KEYS = ("WEBHOOK_ENABLED", "WEBHOOK_PROVIDER", "WEBHOOK_STATUS_NOTIFICATION")
+WIZARD_EMAIL_CONFIG_KEYS = ("SMTP_HOST", "SMTP_PORT", "SMTP_SSL", "SMTP_USER", "SENDER_EMAIL", "RECEIVER_EMAIL", "STATUS_NOTIFICATION")
+
+
+# Holds editable setup answers until the user explicitly saves them
+@dataclass
+class WizardSetupState:
+    config_path: Path
+    env_path: Path
+    baseline_values: dict
+    config_values: dict
+    secret_updates: dict
+    targets: List[str]
+    persist_targets: bool
+    logged_in: bool
+    login_method: str
+    session_username: str
+    import_browser: Optional[str]
+    container_host: Optional[str]
+    want_web: bool
+    want_terminal: bool
+    want_webhook: bool
+    want_email: bool
+
+
+# Selects one supported Docker host and Firefox profile layout for deferred import
+def _wizard_select_container_firefox_host() -> Optional[str]:
+    options = [
+        ("macOS", "Use the Firefox profiles under Library/Application Support."),
+        ("Linux with a standard Firefox package", "Use the profiles under ~/.mozilla/firefox."),
+        ("Linux with Firefox from Snap", "Use the profiles under ~/snap/firefox."),
+        ("Linux with Firefox from Flatpak", "Use the profiles under ~/.var/app/org.mozilla.firefox."),
+        ("Windows PowerShell", "Use the Firefox profiles under $env:APPDATA."),
+        ("Windows Command Prompt", "Use the Firefox profiles under %APPDATA%."),
+        ("Another system", "Firefox import after Docker setup is not currently available for this host."),
+    ]
+    selected = _wizard_ask_choice("Which host environment runs Docker?", options)
+    if selected == len(options) - 1:
+        print()
+        print("  Firefox import after Docker setup is not currently available for this host.")
+        print("  Choose another login method or no login.")
+        return None
+    return ("macos", "linux", "linux-snap", "linux-flatpak", "windows-powershell", "windows-cmd")[selected]
+
+
+# Restores one editable section to its setup-start values and drops pending secrets
+def _wizard_reset_section(state: WizardSetupState, config_keys, secret_keys) -> None:
+    for key in config_keys:
+        if key in state.baseline_values:
+            state.config_values[key] = state.baseline_values[key]
+        else:
+            state.config_values.pop(key, None)
+    for key in secret_keys:
+        state.secret_updates.pop(key, None)
+
+
+# Confirms replacement or selects another config destination before answers are collected
+def _wizard_choose_config_destination(config_path: Path) -> Path:
+    selected = config_path.expanduser().resolve()
+    while selected.exists() and not _wizard_ask_yes_no(f"Configuration file '{selected}' exists. Replace it with a fresh configuration built from defaults and create a timestamped backup?", default=False):
+        alternative = _wizard_ask_text("Another config destination or leave empty to cancel")
+        if not alternative:
+            print(colorize("warning", "Setup cancelled. Destination files were not changed."))
+            raise SystemExit(1)
+        selected = Path(alternative).expanduser().resolve()
+    return selected
+
+
+# Collects monitored targets and whether they should be persisted
+def _wizard_collect_target_section(state: WizardSetupState) -> None:
+    default_targets = ", ".join(state.targets)
+    targets = []
+    while not targets:
+        targets_raw = _wizard_ask_text("Which Instagram account(s) or target(s) do you want to monitor?", default=default_targets, required=True)
+        targets = [target.strip().lstrip("@") for target in targets_raw.split(",") if target.strip()]
+    state.targets = targets
+    print()
+    state.persist_targets = _wizard_ask_yes_no("Save the target(s) in the config file too?", default=state.persist_targets)
+    state.config_values["TARGET_USERNAMES"] = list(targets) if state.persist_targets else []
+
+
+# Collects one login method with separate Firefox and Chromium paths
+def _wizard_collect_login_section(state: WizardSetupState, method: str) -> None:
+    _wizard_reset_section(state, WIZARD_LOGIN_CONFIG_KEYS, ("SESSION_PASSWORD",))
+    supported_browsers = _wizard_import_browsers(method)
+    chromium_browsers = [browser for browser in supported_browsers if browser in CHROMIUM_IMPORT_BROWSERS]
+    while True:
+        firefox_label = "Import from Firefox after setup, recommended" if method in ("docker", "compose") else "Import from Firefox, recommended"
+        options = [("No login", "Sees new posts, bio and follower counts."), (firefox_label, "Reuses a signed-in host Firefox profile through one read-only import command." if method in ("docker", "compose") else "Reuses a signed-in Firefox session with no additional package.")]
+        actions = ["no-login", "firefox"]
+        if chromium_browsers:
+            chromium_description = "Import from a signed-in Chrome, Brave or Chromium profile." if _wizard_chromium_dependency_available() else "Setup can install the required pycookiecheat package now."
+            options.append(("Import from Chrome, Brave or Chromium", chromium_description))
+            actions.append("chromium")
+        options.extend((("Use an existing Instaloader session", "You previously created a session with Instaloader."), ("Username and password", "Least safe. The password is stored in .env and never in the config.")))
+        actions.extend(("existing", "password"))
+        default_index = actions.index(state.login_method) if state.login_method in actions else 0
+        action = actions[_wizard_ask_choice("How do you want to access Instagram?", options, default_index=default_index)]
+        if action == "chromium" and not _wizard_chromium_dependency_available():
+            print()
+            if not _wizard_ask_yes_no("Chromium browser import requires pycookiecheat. Install it now?", default=True):
+                print(colorize("info", "  Chromium import was not selected. Choose Firefox or another login method."))
+                continue
+            if not _wizard_install_chromium_dependency(method):
+                continue
+        container_host = None
+        if action == "firefox" and method in ("docker", "compose"):
+            container_host = _wizard_select_container_firefox_host()
+            if container_host is None:
+                continue
+        break
+
+    state.login_method = action
+    state.logged_in = action != "no-login"
+    state.import_browser = None
+    state.container_host = container_host
+    state.session_username = ""
+    if action == "no-login":
+        state.config_values.update({"SKIP_SESSION": True, "SESSION_USERNAME": ""})
+        return
+    if action == "firefox":
+        state.import_browser = "firefox"
+    elif action == "chromium":
+        browser_index = _wizard_ask_choice("Which Chromium browser should be imported?", [(browser_label(browser), _wizard_browser_desc(browser)) for browser in chromium_browsers])
+        state.import_browser = chromium_browsers[browser_index]
+
+    print()
+    can_detect_username = state.import_browser is not None and method not in ("docker", "compose")
+    if can_detect_username:
+        state.session_username = _wizard_ask_text(f"Your Instagram username (leave empty to detect it from {browser_label(state.import_browser)} import)").lstrip("@")
+    else:
+        state.session_username = _wizard_ask_text("Your Instagram username (the account you log in WITH)", required=True).lstrip("@")
+    if action == "password":
+        state.secret_updates["SESSION_PASSWORD"] = _wizard_ask_secret("Instagram password (stored in .env)")
+    state.config_values.update({"SKIP_SESSION": False, "SESSION_USERNAME": state.session_username})
+
+
+# Collects the preferred monitoring interface
+def _wizard_collect_interface_section(state: WizardSetupState, method: str) -> None:
+    _wizard_reset_section(state, WIZARD_INTERFACE_CONFIG_KEYS, ())
+    default_index = 0 if state.want_web else 1 if state.want_terminal else 2
+    interface = _wizard_ask_choice("How do you want to view activity?", [("Web dashboard - point and click in your browser", "Add or remove targets and change settings without the command line."), ("Terminal dashboard - live stats in your terminal", "Rich full-screen view in the terminal."), ("Plain text logs", "Simple sequential output for background or headless runs.")], default_index=default_index)
+    state.want_web = interface == 0
+    state.want_terminal = interface == 1
+    state.config_values.update({"WEB_DASHBOARD_ENABLED": state.want_web, "DASHBOARD_ENABLED": state.want_terminal})
+    if state.want_web and not FLASK_AVAILABLE:
+        print(colorize("warning", "  Note: flask is not installed, so the web dashboard will remain unavailable until it is installed."))
+    if state.want_terminal and not RICH_AVAILABLE:
+        print(colorize("warning", "  Note: rich is not installed, so the terminal dashboard will remain unavailable until it is installed."))
+
+
+# Collects webhook settings and hidden secrets
+def _wizard_collect_webhook_section(state: WizardSetupState) -> None:
+    _wizard_reset_section(state, WIZARD_WEBHOOK_CONFIG_KEYS, ("WEBHOOK_URL", "NTFY_ACCESS_TOKEN"))
+    print()
+    if not _wizard_ask_yes_no("Set up webhook alerts (Discord, ntfy etc.)?", default=state.want_webhook):
+        state.want_webhook = False
+        state.config_values.update({"WEBHOOK_ENABLED": False, "WEBHOOK_STATUS_NOTIFICATION": False})
+        return
+    provider_choice = _wizard_ask_choice("Which webhook service should receive alerts?", [("Discord", "Sends a Discord embed with supported image attachments."), ("ntfy", "Sends a native notification to one ntfy topic URL.")], default_index=0 if state.config_values.get("WEBHOOK_PROVIDER", "discord") == "discord" else 1)
+    provider = "discord" if provider_choice == 0 else "ntfy"
+    state.config_values["WEBHOOK_PROVIDER"] = provider
+    if provider == "discord":
+        print(colorize("info", "  In Discord: Server Settings > Integrations > Webhooks > New Webhook > Copy Webhook URL."))
+        webhook_prompt = "Paste the Discord webhook URL (stored in .env)"
+    else:
+        print(colorize("info", "  In ntfy: choose a hard-to-guess topic. Paste its name for ntfy.sh or use the complete URL for a self-hosted server."))
+        webhook_prompt = "Paste the ntfy topic URL or ntfy.sh topic name (stored in .env)"
+    existing_webhook = _wizard_existing_secret("WEBHOOK_URL", state.env_path)
+    replace_webhook = True
+    if existing_webhook:
+        replace_webhook = _wizard_ask_choice("Which webhook URL should be used?", [("Keep the saved URL", "Keeps the private value without displaying or changing it."), ("Paste a new URL", "Uses a hidden prompt then saves the replacement in .env.")]) == 1
+    if replace_webhook:
+        while True:
+            webhook_input = _wizard_ask_secret(webhook_prompt)
+            webhook_url = normalize_ntfy_topic_url(webhook_input) if provider == "ntfy" else webhook_input.strip()
+            if validate_webhook_url(webhook_url):
+                break
+            if provider == "ntfy":
+                print(colorize("warning", "  Enter a complete HTTP(S) ntfy topic URL or a topic name containing up to 64 letters, numbers, dashes or underscores."))
+            else:
+                print(colorize("warning", "  That does not look like a complete HTTP(S) webhook URL. Copy it from the service and try again."))
+        state.secret_updates["WEBHOOK_URL"] = webhook_url
+    if provider == "ntfy":
+        _wizard_collect_ntfy_access_token(state.secret_updates, state.env_path)
+    state.want_webhook = True
+    state.config_values.update({"WEBHOOK_ENABLED": True, "WEBHOOK_STATUS_NOTIFICATION": True})
+
+
+# Collects email settings and the hidden SMTP password
+def _wizard_collect_email_section(state: WizardSetupState) -> None:
+    _wizard_reset_section(state, WIZARD_EMAIL_CONFIG_KEYS, ("SMTP_PASSWORD",))
+    print()
+    if not _wizard_ask_yes_no("Set up email (SMTP) alerts now?", default=state.want_email):
+        state.want_email = False
+        state.config_values["STATUS_NOTIFICATION"] = False
+        return
+    host = _wizard_ask_text("SMTP server host (e.g. smtp.gmail.com)", required=True)
+    port_text = _wizard_ask_text("SMTP port", default=str(state.config_values.get("SMTP_PORT") or 587))
+    try:
+        port = int(port_text)
+    except ValueError:
+        port = 587
+    use_ssl = _wizard_ask_yes_no("Enable TLS/SSL for SMTP?", default=bool(state.config_values.get("SMTP_SSL", True)))
+    user = _wizard_ask_text("SMTP username", required=True)
+    state.secret_updates["SMTP_PASSWORD"] = _wizard_ask_secret("SMTP password (stored in .env)")
+    sender = _wizard_ask_text("Sender email (From)", required=True)
+    receiver = _wizard_ask_text("Recipient email (To)", required=True)
+    state.config_values.update({"SMTP_HOST": host, "SMTP_PORT": port, "SMTP_SSL": use_ssl, "SMTP_USER": user, "SENDER_EMAIL": sender, "RECEIVER_EMAIL": receiver, "STATUS_NOTIFICATION": True})
+    state.want_email = True
+
+
+# Lets the user change output files and recollects secret-dependent sections when needed
+def _wizard_collect_destination_section(state: WizardSetupState, method: str) -> None:
+    while True:
+        config_text = _wizard_ask_text("Configuration file destination", default=str(state.config_path), required=True)
+        try:
+            selected_config = _wizard_validate_destination(method, config_text, "Configuration destination")
+            break
+        except ValueError as exc:
+            print(colorize("warning", f"  {exc}."))
+    if selected_config != state.config_path:
+        state.config_path = _wizard_choose_config_destination(selected_config)
+    while True:
+        env_text = _wizard_ask_text("Dotenv file destination", default=str(state.env_path), required=True)
+        if env_text.casefold() == "none":
+            print(colorize("warning", "  Setup needs a writable dotenv file and cannot use 'none'."))
+            continue
+        try:
+            selected_env = _wizard_validate_destination(method, env_text, "Dotenv destination")
+            break
+        except ValueError as exc:
+            print(colorize("warning", f"  {exc}."))
+    state.config_values["DOTENV_FILE"] = str(selected_env)
+    if selected_env == state.env_path:
+        return
+    state.env_path = selected_env
+    print(colorize("info", "  The dotenv destination changed. Re-enter login and notification settings that may contain secrets."))
+    _wizard_collect_login_section(state, method)
+    _wizard_collect_email_section(state)
+    _wizard_collect_webhook_section(state)
+
+
+# Prints the current editable setup answers without exposing secrets
+def _wizard_print_setup_summary(state: WizardSetupState, method: str) -> None:
+    interface = "web dashboard" if state.want_web else "terminal dashboard" if state.want_terminal else "plain text logs"
+    session_summary = state.session_username if state.logged_in and state.session_username else "detect during browser import" if state.logged_in else "none"
+    print(colorize("header", "\nSetup summary\n"))
+    print(f"  Targets: {', '.join(state.targets)}")
+    print(f"  Persist targets: {'yes' if state.persist_targets else 'no'}")
+    print(f"  Login: {state.login_method}")
+    print(f"  Session username: {session_summary}")
+    if state.import_browser:
+        print(f"  Browser: {browser_label(state.import_browser)}")
+    if state.container_host:
+        print(f"  Docker host: {CONTAINER_FIREFOX_HOSTS[state.container_host][0]}")
+    print(f"  Interface: {interface}")
+    print(f"  Email: {'enabled' if state.want_email else 'disabled'}")
+    print(f"  Webhook: {'enabled' if state.want_webhook else 'disabled'}")
+    print(f"  Config destination: {state.config_path}")
+    print(f"  Dotenv destination: {state.env_path}")
+    print(f"  Install method: {method}")
+
+
+# Opens one selected setup section then returns to the summary
+def _wizard_edit_setup_section(state: WizardSetupState, method: str) -> None:
+    section = _wizard_ask_choice("Which setup section should be changed?", [("Targets and persistence", "Change monitored accounts and whether they are saved."), ("Login and session", "Change no-login, browser or credential settings."), ("Interface", "Change the dashboard or plain text mode."), ("Email alerts", "Change SMTP settings."), ("Webhook alerts", "Change Discord or ntfy settings."), ("File destinations", "Change the config or dotenv path."), ("Return to summary", "Keep every current answer.")])
+    if section == 0:
+        print()
+        _wizard_collect_target_section(state)
+    elif section == 1:
+        _wizard_collect_login_section(state, method)
+    elif section == 2:
+        _wizard_collect_interface_section(state, method)
+    elif section == 3:
+        _wizard_collect_email_section(state)
+    elif section == 4:
+        _wizard_collect_webhook_section(state)
+    elif section == 5:
+        print()
+        _wizard_collect_destination_section(state, method)
+
+
+# Reviews editable answers until the user saves or confirms a discard
+def _wizard_review_setup(state: WizardSetupState, method: str) -> bool:
+    while True:
+        _wizard_print_setup_summary(state, method)
+        action = _wizard_ask_choice("What would you like to do?", [("Save settings", "Write the displayed settings to the selected files."), ("Review or change settings", "Edit one section without losing the other answers."), ("Discard answers and exit", "Leave the destination files unchanged.")])
+        if action == 0:
+            return True
+        if action == 1:
+            _wizard_edit_setup_section(state, method)
+            continue
+        print()
+        if _wizard_ask_yes_no("Discard all entered answers and exit?", default=False):
+            return False
+        print(colorize("info", "  Setup answers retained."))
+
+
+# Completes a confirmed browser import before the final config is rendered
+def _wizard_finish_browser_import(state: WizardSetupState, method: str) -> bool:
+    if not state.import_browser:
+        return True
+    label = browser_label(state.import_browser)
+    retry_hint = f"{_wizard_cmd_prefix(method, exact=True, host_os=state.container_host)} --import-browser-session --browser {state.import_browser} --env-file {_wizard_quote_argument(str(state.env_path))}"
+    if method in ("docker", "compose"):
+        state.config_values["SESSION_USERNAME"] = state.session_username
+        return False
+    import_completed = False
+    if _wizard_ask_yes_no(f"Import the {label} session now? (log in to Instagram in {label} first)", default=True):
+        try:
+            imported_username = None
+            if state.import_browser == "firefox":
+                cookie_path = os.path.expanduser(get_firefox_cookiefile())
+                if not os.path.isfile(cookie_path):
+                    print(colorize("warning", f"Could not find Firefox cookies at '{cookie_path}'. You can import later with: {retry_hint}"))
+                else:
+                    imported_username = import_session("firefox", cookie_path, None)
+            else:
+                profile = select_chromium_profile_cli(state.import_browser, None)
+                imported_username = import_session(state.import_browser, None, None, profile=profile)
+            if imported_username:
+                if state.session_username and imported_username != state.session_username:
+                    print(colorize("warning", f"Imported session belongs to '{imported_username}', updating SESSION_USERNAME in the generated config."))
+                elif not state.session_username:
+                    print(colorize("info", f"Detected username '{imported_username}' from the imported session."))
+                state.session_username = imported_username
+                import_completed = True
+        except (SystemExit, Exception) as exc:
+            print(colorize("warning", f"{label} import failed: {exc}"))
+            print(f"You can retry later with: {retry_hint}")
+    else:
+        print(colorize("info", f"You can import later with: {retry_hint}"))
+    if not state.session_username:
+        print(colorize("warning", "No username was detected from the browser session."))
+        state.session_username = _wizard_ask_text("Your Instagram username (the account you log in WITH)", required=True).lstrip("@")
+    state.config_values["SESSION_USERNAME"] = state.session_username
+    return import_completed
+
+
+# Resolves setup files to the container data mount or the local working directory
+def _wizard_destinations(method: str, config_file=None, env_file=None):
+    default_root = Path("/data") if method in ("docker", "compose") else Path.cwd()
+    config_path = Path(config_file) if config_file is not None else default_root / DEFAULT_CONFIG_FILENAME
+    env_path = Path(env_file) if env_file is not None else default_root / ".env"
+    return _wizard_validate_destination(method, config_path, "Configuration destination"), _wizard_validate_destination(method, env_path, "Dotenv destination")
+
+
+# Starts monitoring with a Windows-safe child process or a POSIX process replacement
+def _wizard_launch_monitor(arguments) -> int:
+    command = [str(argument) for argument in arguments]
+    if system() == "Windows":
+        try:
+            return subprocess.run(command, check=False).returncode
+        except KeyboardInterrupt:
+            return 0
+    os.execv(command[0], command)
+    return 0
+
+
+# Runs the interactive first-run setup with staged answers and safe persistence
+def run_setup_wizard(config_file=None, env_file=None) -> None:
+    global CLI_CONFIG_PATH, DOTENV_FILE
+    if not sys.stdin.isatty():
+        print(colorize("warning", "The setup wizard needs an interactive terminal (TTY)."))
+        print("Run it from an interactive shell or use --generate-config and edit the config file by hand.")
+        raise SystemExit(1)
+
+    method = _wizard_install_method()
+    try:
+        config_path, env_path = _wizard_destinations(method, config_file, env_file)
+    except ValueError as exc:
+        print(colorize("error", f"Setup cannot start: {exc}."))
+        raise SystemExit(1) from None
+
+    print(colorize("header", "\nSetup Wizard\n"))
+    print("This asks a few questions and writes a ready-to-run configuration.")
+    print("Press Enter to accept the shown default. Ctrl+C cancels.\n")
+    print("Secrets go to the dotenv file. Non-secret settings go to the config file.")
+    print("No-login mode is simplest. Firefox session import is recommended for full monitoring.\n")
+    print("Use a dedicated Instagram account for session login mode and follow the anti-detection guidance.")
+    print(f"Session login guide: {SESSION_IMPORT_GUIDE_URL}\n")
+    print(f"Detected install method: {colorize('username', method)}")
+    print(f"Configuration:          {config_path}")
+    print(f"Dotenv:                 {env_path}\n")
+
+    config_path = _wizard_choose_config_destination(config_path)
+    for secret_key in SECRET_KEYS:
+        existing_secret = _wizard_secret_value(secret_key, env_path)
+        if existing_secret is not None:
+            globals()[secret_key] = existing_secret
+    baseline_values = dict(globals())
+    config_values = dict(baseline_values)
+    config_values["DOTENV_FILE"] = str(env_path)
+    state = WizardSetupState(config_path, env_path, baseline_values, config_values, {}, [], True, False, "no-login", "", None, None, True, False, False, False)
+
+    print()
+    _wizard_collect_target_section(state)
+    _wizard_collect_login_section(state, method)
+    _wizard_collect_interface_section(state, method)
+    _wizard_collect_email_section(state)
+    _wizard_collect_webhook_section(state)
+    if not _wizard_review_setup(state, method):
+        print(colorize("warning", "Setup cancelled. Destination files were not changed."))
+        raise SystemExit(1)
+
+    print()
+    browser_import_complete = _wizard_finish_browser_import(state, method)
+    state.config_values.update({"TARGET_USERNAMES": list(state.targets) if state.persist_targets else [], "SESSION_USERNAME": state.session_username, "SKIP_SESSION": not state.logged_in, "DOTENV_FILE": str(state.env_path)})
+    config_content = generate_config_with_current_values(state.config_values)
+    try:
+        write_status = write_config_file(state.config_path, config_content)
+    except Exception as exc:
+        print(colorize("error", f"Could not write config file '{state.config_path}': {exc}"))
+        raise SystemExit(1) from None
+
+    if state.secret_updates or not state.env_path.exists():
+        try:
+            update_status = update_dotenv_file(state.env_path, state.secret_updates)
+        except Exception as exc:
+            print(colorize("error", f"Configuration was saved but secrets could not be written to '{state.env_path}': {exc}"))
+            print(colorize("warning", "Setup is incomplete and monitoring was not started."))
+            raise SystemExit(1) from None
+    else:
+        update_status = None
+
+    globals().update(state.config_values)
+    for secret_key in SECRET_KEYS:
+        saved_secret = _wizard_secret_value(secret_key, state.env_path)
+        globals()[secret_key] = saved_secret if saved_secret is not None else ""
+    globals().update(state.secret_updates)
+    CLI_CONFIG_PATH = str(state.config_path)
+    DOTENV_FILE = str(state.env_path)
+
+    print(colorize("header", "\nSaved files\n"))
+    print(f"  Configuration: {write_status['path']}")
+    if write_status["backup_path"]:
+        print(f"  Backup:        {write_status['backup_path']}")
+    if update_status is not None:
+        label = "Secrets" if state.secret_updates else "Dotenv"
+        print(f"  {label + ':':<15}{update_status['path']}")
+
+    container_browser_import_pending = method in ("docker", "compose") and state.import_browser == "firefox" and state.container_host is not None and not browser_import_complete
+    local_browser_import_pending = method not in ("docker", "compose") and bool(state.import_browser) and not browser_import_complete
+    doctor_failures = 0
+    doctor_ran = False
+    print()
+    if not container_browser_import_pending and _wizard_ask_yes_no("Run doctor now? It writes no files and offers real delivery tests only with separate approval.", default=True):
+        doctor_ran = True
+        doctor_failures = run_doctor(state.targets)
+
+    command_targets = [] if state.persist_targets else state.targets
+    run_command = _wizard_action_command(method, "", state.config_path, state.env_path, command_targets, web_dashboard=state.want_web, host_os=state.container_host)
+    doctor_command = _wizard_action_command(method, "--doctor", state.config_path, state.env_path, command_targets, host_os=state.container_host)
+    print(colorize("header", "\nNext steps\n"))
+    if container_browser_import_pending:
+        selected_host = cast(str, state.container_host)
+        host_label = CONTAINER_FIREFOX_HOSTS[selected_host][0]
+        print("Before import, open https://www.instagram.com/ in Firefox on the host and sign in to the Instagram account used for monitoring.\n")
+        print(f"Import Instagram login from Firefox on {host_label}:")
+        print(colorize("section", f"    {_firefox_import_cmd(method, state.env_path, exact=True, host_os=selected_host, config_path=state.config_path, targets=command_targets)}\n"))
+        print("After the import succeeds, check setup:")
+    else:
+        print("Check setup again:")
+    print(colorize("section", f"    {doctor_command}\n"))
+    print("After Doctor passes, start monitoring:" if container_browser_import_pending or local_browser_import_pending else "Start monitoring:")
+    print(colorize("section", f"    {run_command}\n"))
+    if state.want_web:
+        print(f"Then open {colorize('link', 'http://127.0.0.1:8000/')} in your browser.\n")
+    if state.want_email:
+        print(f"Test email anytime with: {colorize('section', _wizard_action_command(method, '--send-test-email', state.config_path, state.env_path, host_os=state.container_host))}")
+    if state.want_webhook:
+        print(f"Test webhook anytime with: {colorize('section', _wizard_action_command(method, '--send-test-webhook', state.config_path, state.env_path, host_os=state.container_host))}")
+
+    if doctor_failures:
+        print(colorize("warning", "Setup was saved but doctor found failures. Fix them before starting monitoring."))
+    elif method not in ("docker", "compose") and (not local_browser_import_pending or doctor_ran) and _wizard_ask_yes_no("Start monitoring now? Monitoring will continue until Ctrl+C.", default=True):
+        launch_arguments = _wizard_local_command_args(method, exact=True)
+        launch_arguments.extend(command_targets)
+        launch_arguments.extend(("--config-file", str(state.config_path), "--env-file", str(state.env_path)))
+        sys.stdout.flush()
+        raise SystemExit(_wizard_launch_monitor(launch_arguments))
+    elif local_browser_import_pending and not doctor_ran:
+        print(colorize("warning", "Monitoring was not offered because browser import has not completed. Import the session or run Doctor to validate an existing session first."))
+    raise SystemExit(0)
+
+
+# Prints a short welcome with the most common commands and offers to launch the setup wizard
+def _wizard_welcome(parser) -> None:
+    method = _wizard_install_method()
+    prefix = _wizard_cmd_prefix(method)
+    web_prefix = _wizard_cmd_prefix(method, web_dashboard=True)
+    interactive = sys.stdin.isatty()
+    print("Quickest start (no setup, no login):")
+    print(colorize("section", f"    {prefix} <username>\n"))
+    print("Easiest start (guided setup wizard):")
+    setup_hint = colorize("info", "   (or just answer Y below)") if interactive else ""
+    print(colorize("section", f"    {prefix} --setup") + setup_hint + "\n")
+    print("Point-and-click (no command line):")
+    print(colorize("section", f"    {web_prefix} --web-dashboard      then open http://127.0.0.1:8000\n"))
+    print(f"Full options: {colorize('section', prefix + ' --help')}")
+    print(f"\nGuide:        {colorize('link', QUICK_START_GUIDE_URL)}\n")
+    if interactive and _wizard_ask_yes_no("Run the guided setup wizard now?", default=True):
+        run_setup_wizard()
+
+
+# Returns whether a launch has no saved operation and should offer first-run setup
+def _wizard_should_offer_first_run(arguments, configured_targets, web_dashboard_enabled: bool) -> bool:
+    return len(arguments) == 1 and not configured_targets and not web_dashboard_enabled
+
+
+# Prints one doctor check line with a status marker and an optional detail or hint
+def _doctor_line(status: str, label: str, detail: str = "") -> None:
+    marks = {"ok": ("[ OK ]", "boolean_true"), "warn": ("[WARN]", "warning"), "fail": ("[FAIL]", "error"), "info": ("[ -- ]", "info")}
+    mark, theme = marks.get(status, ("[ -- ]", "info"))
+    print(f"{colorize(theme, mark)} {label}")
+    if detail:
+        print(detail)
+
+
+# Prints an inline 'doing X...' status that the upcoming result line overwrites, on interactive terminals only
+def _doctor_progress(text: str) -> None:
+    if not sys.stdout.isatty():
+        return
+    line = f"{text} ..."
+    _doctor_progress.width = len(line)  # type: ignore[attr-defined]
+    sys.stdout.write("\r" + colorize("info", line))
+    sys.stdout.flush()
+
+
+# Clears the inline _doctor_progress status so the result line can replace it, on interactive terminals only
+def _doctor_progress_clear() -> None:
+    width = getattr(_doctor_progress, "width", 0)
+    if sys.stdout.isatty() and width:
+        sys.stdout.write("\r" + " " * width + "\r")
+        sys.stdout.flush()
+        _doctor_progress.width = 0  # type: ignore[attr-defined]
+
+
+# Prompts for explicit doctor delivery consent and defaults safely to no
+def _doctor_ask_yes_no(question: str) -> bool:
+    while True:
+        try:
+            raw = input(colorize("info", f"{question} [y/N]: ")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n" + colorize("info", "Delivery test skipped."))
+            return False
+        if not raw or raw in ("n", "no"):
+            return False
+        if raw in ("y", "yes"):
+            return True
+        print(colorize("warning", "  Please answer 'y' or 'n'."))
+
+
+# Sends one approved doctor webhook while restoring its configured enabled state
+def _doctor_send_test_webhook() -> int:
+    global WEBHOOK_ENABLED
+    previous_enabled = WEBHOOK_ENABLED
+    try:
+        WEBHOOK_ENABLED = True
+        return send_webhook("Instagram Monitor doctor test", "This test notification was sent after approval in --doctor. Your webhook delivery settings work.", color=0x7289DA, notification_type="doctor")
+    finally:
+        WEBHOOK_ENABLED = previous_enabled
+
+
+# Offers separate real delivery tests only after interactive confirmation
+def _doctor_offer_notification_tests(smtp_ready: bool, webhook_ready: bool) -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty() or not (smtp_ready or webhook_ready):
+        return 0
+    print(colorize("section", "\nOptional delivery tests"))
+    print("Doctor will not write files. Each approved test sends one real message.")
+    failures = 0
+    if smtp_ready:
+        if _doctor_ask_yes_no("Send one test email now? This will deliver a real message"):
+            result = send_email("instagram_monitor: doctor test email", "This test email was sent after approval in --doctor. Your SMTP delivery settings work.", "This test email was sent after approval in <b>--doctor</b>. Your SMTP delivery settings work.", SMTP_SSL, smtp_timeout=5)
+            if result == 0:
+                _doctor_line("ok", "Doctor test email delivered", "One real test email was sent after confirmation")
+            else:
+                failures += 1
+                _doctor_line("fail", "Doctor test email delivery failed", "The approved test email could not be delivered")
+        else:
+            _doctor_line("info", "Test email skipped", "No email was sent")
+    if webhook_ready:
+        provider = normalized_webhook_provider()
+        if _doctor_ask_yes_no(f"Send one test webhook through {provider} now? This will publish a real notification"):
+            if _doctor_send_test_webhook() == 0:
+                _doctor_line("ok", "Doctor test webhook delivered", "One real test webhook was sent after confirmation")
+            else:
+                failures += 1
+                _doctor_line("fail", "Doctor test webhook delivery failed", "The approved test webhook could not be delivered")
+        else:
+            _doctor_line("info", "Test webhook skipped", "No webhook was sent")
+    return failures
+
+
+# Runs preflight checks plus approved delivery tests and returns the number of failures
+def run_doctor(targets) -> int:
+    import importlib.util
+
+    fails = 0
+    warns = 0
+
+    print(colorize("header", f"\nInstagram Monitor v{VERSION} - Doctor\n"))
+    print("Running preflight checks. No files will be written. Interactive email and webhook tests run only after separate approval.\n")
+
+    # Environment and optional dependencies
+    print(colorize("section", "Environment"))
+    _doctor_line("info", f"Python {platform.python_version()}")
+    deps = [
+        ("curl_cffi", _CURL_CFFI_AVAILABLE, "browser TLS impersonation that avoids first-request 429 blocks"),
+        ("rich", RICH_AVAILABLE, "the Terminal Dashboard"),
+        ("flask", FLASK_AVAILABLE, "the Web Dashboard"),
+        ("pycookiecheat", importlib.util.find_spec("pycookiecheat") is not None, "session import from Chromium-based browsers"),
+    ]
+    for name, present, what in deps:
+        if present:
+            _doctor_line("ok", f"{name} installed", f"Enables {what}")
+        else:
+            warns += 1
+            _doctor_line("warn", f"{name} not installed", f"Optional: enables {what}. Install with: pip install {name}")
+
+    # Configuration and secrets
+    print(colorize("section", "\nConfiguration"))
+    cfg = find_config_file(CLI_CONFIG_PATH)
+    if cfg:
+        _doctor_line("ok", "Config file", cfg)
+    else:
+        _doctor_line("info", "Config file", "none found - using defaults and CLI flags (create one with --setup)")
+    placeholders = ("", "your_smtp_password")
+    present_secrets = [k for k in SECRET_KEYS if globals().get(k) and globals().get(k) not in placeholders]
+    _doctor_line("info", "Secrets from environment/.env", ", ".join(present_secrets) if present_secrets else "none set")
+
+    # Build a single bot for the live checks (reuses the globally installed HTTP backend)
+    bot = None
+    try:
+        bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=True, quiet=True)
+        if PROXY_ENABLED:
+            set_instaloader_proxies(bot)
+    except Exception as e:
+        fails += 1
+        _doctor_line("fail", "Could not initialise Instaloader", format_error_message(e))
+
+    # Session
+    print(colorize("section", "\nSession"))
+    logged_in = bool(SESSION_USERNAME) and not SKIP_SESSION
+    if not logged_in:
+        _doctor_line("info", "No-login mode", "No session needed. Stories, reels and follower churn require Logged-in mode.")
+    elif bot is None:
+        warns += 1
+        _doctor_line("warn", "Skipped session check", "Instaloader could not be initialised")
+    else:
+        _doctor_progress(f"Validating session for {SESSION_USERNAME}")
+        try:
+            bot.load_session_from_file(SESSION_USERNAME)
+            who = bot.test_login()
+            _doctor_progress_clear()
+            if who:
+                _doctor_line("ok", f"Session valid for {who}")
+            else:
+                warns += 1
+                _doctor_line("warn", f"Session for {SESSION_USERNAME} is not logged in", error_fix_hint("login_required", True))
+        except FileNotFoundError:
+            _doctor_progress_clear()
+            fails += 1
+            _doctor_line("fail", f"No saved session for {SESSION_USERNAME}", error_fix_hint("session file not found", True))
+        except Exception as e:
+            _doctor_progress_clear()
+            fails += 1
+            msg = format_error_message(e)
+            _doctor_line("fail", f"Session check failed: {msg}", error_fix_hint(msg, True))
+
+    # Instagram connectivity
+    print(colorize("section", "\nConnectivity"))
+    if bot is None:
+        warns += 1
+        _doctor_line("warn", "Skipped connectivity check", "Instaloader could not be initialised")
+    else:
+        _doctor_progress("Contacting Instagram")
+        try:
+            profile_from_username_resilient(bot, FLAGGED_PROBE_USERNAME)
+            _doctor_progress_clear()
+            _doctor_line("ok", "Instagram reachable", f"Fetched public account '{FLAGGED_PROBE_USERNAME}'")
+        except Exception as e:
+            _doctor_progress_clear()
+            fails += 1
+            msg = format_error_message(e)
+            _doctor_line("fail", "Instagram not reachable or blocked", msg)
+            hint = error_fix_hint(msg, logged_in)
+            if hint:
+                print(hint)
+
+    # Targets
+    print(colorize("section", "\nTargets"))
+    if not targets:
+        _doctor_line("info", "No targets configured", "Add them on the CLI, in the config, or via the Web Dashboard.")
+    elif bot is None:
+        warns += 1
+        _doctor_line("warn", "Skipped target checks", "Instaloader could not be initialised")
+    else:
+        for t in targets:
+            _doctor_progress(f"Looking up '{t}'")
+            try:
+                profile_from_username_resilient(bot, t)
+                _doctor_progress_clear()
+                _doctor_line("ok", f"Target '{t}' found")
+            except Exception as e:
+                _doctor_progress_clear()
+                warns += 1
+                msg = format_error_message(e)
+                _doctor_line("warn", f"Target '{t}' could not be fetched", msg)
+
+    # Notifications
+    print(colorize("section", "\nNotifications"))
+    smtp_configured = (SMTP_HOST and SMTP_HOST != "your_smtp_server_ssl" and SMTP_USER and SMTP_USER != "your_smtp_user" and SMTP_PASSWORD and SMTP_PASSWORD != "your_smtp_password")
+    smtp_ready = False
+    if not smtp_configured:
+        _doctor_line("info", "Email notifications not configured")
+    else:
+        _doctor_progress(f"Connecting to SMTP server {SMTP_HOST}")
+        try:
+            ctx = ssl.create_default_context()
+            smtp = smtplib.SMTP(SMTP_HOST, int(SMTP_PORT), timeout=5)
+            if SMTP_SSL:
+                smtp.starttls(context=ctx)
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.quit()
+            _doctor_progress_clear()
+            smtp_ready = True
+            _doctor_line("ok", "Email (SMTP) login works", "No email was sent during this passive check")
+        except Exception as e:
+            _doctor_progress_clear()
+            fails += 1
+            _doctor_line("fail", f"Email (SMTP) check failed: {e}", "Verify SMTP_HOST, SMTP_PORT and SMTP_SSL, and SMTP_USER/SMTP_PASSWORD. Gmail and similar need an app password.")
+
+    webhook_ready = False
+    if not WEBHOOK_URL:
+        if WEBHOOK_ENABLED:
+            warns += 1
+            _doctor_line("warn", "Webhook enabled but WEBHOOK_URL is empty", "Set WEBHOOK_URL (or via .env), or disable webhooks.")
+        else:
+            _doctor_line("info", "Webhook notifications not configured")
+    elif not normalized_webhook_provider():
+        fails += 1
+        _doctor_line("fail", "Webhook provider is invalid", "Set WEBHOOK_PROVIDER to 'discord' or 'ntfy'.")
+    elif not validate_webhook_url(WEBHOOK_URL):
+        fails += 1
+        _doctor_line("fail", "Webhook URL is not a valid HTTP(S) URL", "Check WEBHOOK_URL.")
+    else:
+        header_error = validate_webhook_headers(normalized_webhook_provider())
+        if header_error is not None:
+            fails += 1
+            _doctor_line("fail", "Webhook headers are invalid", header_error)
+        else:
+            webhook_ready = True
+            _doctor_line("ok", f"Webhook URL and headers look valid for {normalized_webhook_provider()}", "No webhook was sent during this passive check")
+
+    fails += _doctor_offer_notification_tests(smtp_ready, webhook_ready)
+
+    # Summary
+    print(colorize("header", "\nSummary"))
+    if fails:
+        print(colorize("error", f"  {fails} check(s) failed, {warns} warning(s). Fix the failures above before relying on the tool."))
+    elif warns:
+        print(colorize("warning", f"  All critical checks passed with {warns} warning(s). Review the warnings above."))
+    else:
+        print(colorize("boolean_true", "  All checks passed. You are good to go!"))
+    print()
+    return fails
+
+
 def acquire_dir_lock():
     import psutil
 
@@ -10368,9 +12299,11 @@ def acquire_dir_lock():
     
     # print(f"Directory lock acquired (PID {os.getpid()})")
     
+
+# Parses configuration and command-line options then starts the selected operation
 def run_main():
     global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
-    global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
+    global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_PROVIDER, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H
     global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, ADVANCED_FOLLOWER_FETCH, ADVANCED_FOLLOWEE_FETCH
 
@@ -10412,17 +12345,19 @@ def run_main():
     early_dashboard_enabled = "--dashboard" in sys.argv and "--no-dashboard" not in sys.argv
 
     # Clear screen BEFORE printing the header
-    clear_screen(CLEAR_SCREEN)
+    keep_cli_history = any(flag in sys.argv for flag in ("--import-browser-session", "--import-firefox-session", "--doctor"))
+    clear_screen(CLEAR_SCREEN and not keep_cli_history)
 
     if not (early_dashboard_enabled and RICH_AVAILABLE):
-        print(colorize("header", f"Instagram Monitoring Tool v{VERSION}\n"))
+        print_startup_banner()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     parser = argparse.ArgumentParser(
         prog="instagram_monitor",
-        description=("Monitor an Instagram user's activity and send customizable email alerts [ https://github.com/misiektoja/instagram_monitor/ ]"), formatter_class=argparse.RawTextHelpFormatter
+        description=("Monitor Instagram activity and send customizable email or webhook alerts [ https://github.com/misiektoja/instagram_monitor/ ]"), formatter_class=argparse.RawTextHelpFormatter,
+        epilog=_build_help_epilog()
     )
 
     # Positional targets (one or more)
@@ -10462,6 +12397,18 @@ def run_main():
         dest="env_file",
         metavar="PATH",
         help="Path to optional dotenv file (auto-search if not set, disable with 'none')",
+    )
+    conf.add_argument(
+        "--setup",
+        dest="setup",
+        action="store_true",
+        help="Run the interactive first-run setup wizard and exit",
+    )
+    conf.add_argument(
+        "--doctor",
+        dest="doctor",
+        action="store_true",
+        help="Run preflight checks with separately approved notification delivery tests and exit",
     )
 
     # Session login credentials
@@ -10826,8 +12773,9 @@ def run_main():
         dest="webhook_url",
         metavar="URL",
         type=str,
-        help="Discord-compatible webhook URL for notifications"
+        help="Discord webhook or ntfy topic URL for notifications"
     )
+    webhook_grp.add_argument("--webhook-provider", choices=("discord", "ntfy"), help="Webhook request format (default: discord)")
     webhook_grp.add_argument(
         "--webhook-status",
         dest="webhook_status",
@@ -10856,18 +12804,36 @@ def run_main():
         help="Send test webhook notification to verify settings"
     )
 
-    # Firefox session import options
-    import_grp = parser.add_argument_group("Firefox session import")
+    # Browser session import options
+    import_grp = parser.add_argument_group("Browser session import")
+    import_grp.add_argument(
+        "--import-browser-session",
+        action="store_true",
+        help="Import browser session cookies into Instaloader (use --browser to pick the source)"
+    )
+    import_grp.add_argument(
+        "--browser",
+        dest="browser",
+        choices=list(IMPORT_BROWSERS),
+        default="firefox",
+        help="Browser to import the session from: firefox (default, all platforms), chrome (Google Chrome), brave or chromium (the standalone open-source Chromium browser, not Chrome). chrome, brave and chromium require the 'pycookiecheat' package and work only on macOS and Linux; Edge, Opera, Vivaldi and Arc are not supported"
+    )
+    import_grp.add_argument(
+        "--browser-profile",
+        dest="browser_profile",
+        metavar="PROFILE",
+        help="Profile to import from, for any browser: a Firefox profile name (e.g. 'default-release') or a Chromium profile directory (e.g. 'Default' or 'Profile 1'); if omitted and several exist, it will list them to choose from"
+    )
     import_grp.add_argument(
         "--import-firefox-session",
         action="store_true",
-        help="Import Firefox session cookies into Instaloader"
+        help="Deprecated alias for --import-browser-session --browser firefox"
     )
     import_grp.add_argument(
         "--cookie-file",
         dest="cookie_file",
         metavar="COOKIEFILE",
-        help="Path to Firefox cookies.sqlite; if omitted, it will list all available"
+        help="Advanced: explicit path to the cookie database (Firefox cookies.sqlite or a Chromium Cookies DB); overrides --browser-profile"
     )
     import_grp.add_argument(
         "--session-file",
@@ -10878,9 +12844,17 @@ def run_main():
 
     args = parser.parse_args()
 
-    if len(sys.argv) == 1:
-        parser.print_help(sys.stderr)
-        sys.exit(1)
+    import_requested = bool(args.import_firefox_session or args.import_browser_session)
+    requested_actions = [label for label, enabled in (("--setup", args.setup), ("--doctor", args.doctor), ("--import-browser-session", import_requested), ("--send-test-email", args.send_test_email), ("--send-test-webhook", args.send_test_webhook), ("--generate-config", args.generate_config is not None)) if enabled]
+    if len(requested_actions) > 1:
+        parser.error("standalone actions cannot be combined: " + ", ".join(requested_actions))
+    if args.setup:
+        if args.usernames or args.targets:
+            parser.error("--setup cannot be combined with monitoring targets")
+        if args.env_file and str(args.env_file).casefold() == "none":
+            parser.error("--setup requires a dotenv destination and cannot use --env-file none")
+        run_setup_wizard(config_file=args.config_file, env_file=args.env_file)
+        sys.exit(0)
 
     if args.config_file:
         CLI_CONFIG_PATH = os.path.expanduser(args.config_file)
@@ -10892,6 +12866,8 @@ def run_main():
 
     if not cfg_path and CLI_CONFIG_PATH:
         print(f"* Error: Config file '{CLI_CONFIG_PATH}' does not exist")
+        print(colorize("info", "To fix: check the path passed to --config-file or create a config with 'instagram_monitor --setup' or 'instagram_monitor --generate-config instagram_monitor.conf'."))
+        print(f"Guide: {CONFIG_FILE_GUIDE_URL}")
         sys.exit(1)
 
     if cfg_path:
@@ -10916,8 +12892,18 @@ def run_main():
                             sys.exit(1)
                     else:
                         raise e
+        except SyntaxError as e:
+            print(f"* Error loading config file '{cfg_path}':")
+            if e.lineno:
+                print(f"Line {e.lineno}: {(e.text or '').rstrip()}")
+            print(f"Parser: {e.msg}")
+            print(colorize("info", "To fix: check that line. Text values need matching quotes and Windows paths need forward slashes (/) or doubled backslashes (\\\\). You can also regenerate a clean config with 'instagram_monitor --generate-config instagram_monitor.conf' or 'instagram_monitor --setup'."))
+            print(f"Guide: {CONFIG_FILE_GUIDE_URL}")
+            sys.exit(1)
         except Exception as e:
-            print(f"* Error loading config file '{cfg_path}': {e}")
+            print(f"* Error loading config file '{cfg_path}': {type(e).__name__}: {e}")
+            print(colorize("info", "To fix: verify the file is readable and contains valid settings. You can regenerate a clean config with 'instagram_monitor --generate-config instagram_monitor.conf' or 'instagram_monitor --setup'."))
+            print(f"Guide: {CONFIG_FILE_GUIDE_URL}")
             sys.exit(1)
 
     if args.output_dir:
@@ -10940,11 +12926,11 @@ def run_main():
                 if not os.path.isfile(env_path):
                     print(f"* Warning: dotenv file '{env_path}' does not exist\n")
                 else:
-                    load_dotenv(env_path, override=True)
+                    load_dotenv(env_path, override=True, interpolate=False)
             else:
                 env_path = find_dotenv() or None
                 if env_path:
-                    load_dotenv(env_path, override=True)
+                    load_dotenv(env_path, override=True, interpolate=False)
         except ImportError:
             env_path = DOTENV_FILE if DOTENV_FILE else None
             if env_path:
@@ -10956,7 +12942,14 @@ def run_main():
             if val is not None:
                 globals()[secret] = val
 
-    if args.import_firefox_session:
+    if _wizard_should_offer_first_run(sys.argv, TARGET_USERNAMES, WEB_DASHBOARD_ENABLED):
+        _wizard_welcome(parser)
+        sys.exit(0 if sys.stdin.isatty() else 1)
+
+    if args.import_firefox_session or args.import_browser_session:
+
+        # Legacy --import-firefox-session always targets Firefox, otherwise honour --browser
+        browser = "firefox" if (args.import_firefox_session and not args.import_browser_session) else args.browser
 
         session_path = None
         if args.session_file:
@@ -10965,12 +12958,41 @@ def run_main():
             if not os.path.isdir(session_dir):
                 raise SystemExit(f"Error: Session directory '{session_dir}' not found !")
 
-        cookie_path = args.cookie_file or get_firefox_cookiefile()
-        cookie_path = os.path.expanduser(cookie_path)
-        if not os.path.isfile(cookie_path):
-            raise SystemExit(f"Error: Cookie file '{cookie_path}' not found !")
+        # Unified profile selection for every browser:
+        #   --cookie-file PATH  -> explicit cookie database (advanced override)
+        #   --browser-profile NAME -> pick a profile by name
+        #   neither             -> use the only profile, or prompt when several exist
+        cookie_path = None
+        profile = None
+        if args.cookie_file:
+            cookie_path = os.path.expanduser(args.cookie_file)
+            if browser == "firefox" and not os.path.isfile(cookie_path):
+                raise SystemExit(f"Error: Cookie file '{cookie_path}' not found !")
+        elif args.browser_profile:
+            if browser == "firefox":
+                try:
+                    cookie_path = resolve_firefox_profile(args.browser_profile)
+                except CookieImportError as e:
+                    raise SystemExit(f"Error: {e}")
+            else:
+                profile = args.browser_profile
+        else:
+            if browser == "firefox":
+                cookie_path = os.path.expanduser(get_firefox_cookiefile())
+            else:
+                profile = select_chromium_profile_cli(browser, None)
 
-        import_session(cookie_path, session_path)
+        import_session(browser, cookie_path, session_path, profile=profile)
+        if cfg_path:
+            method = _wizard_install_method()
+            selected_env = env_path or Path.cwd() / ".env"
+            doctor_command = _wizard_action_command(method, "--doctor", cfg_path, selected_env, args.usernames)
+            monitor_command = _wizard_action_command(method, "", cfg_path, selected_env, args.usernames, web_dashboard=WEB_DASHBOARD_ENABLED)
+            print(colorize("header", "\nNext steps\n"))
+            print("Check the imported session and setup:")
+            print(colorize("section", f"    {doctor_command}\n"))
+            print("After Doctor passes, start monitoring:")
+            print(colorize("section", f"    {monitor_command}\n"))
         sys.exit(0)
 
     local_tz = None
@@ -11037,7 +13059,7 @@ def run_main():
                 print(f"* Error: Proxy certificate file does not exist. '{PROXY_CERT_PATH}'")
                 sys.exit(1)
 
-    if not check_internet():
+    if not args.doctor and not check_internet():
         sys.exit(1)
 
     # Advanced Follower/Followee Fetching Settings
@@ -11079,6 +13101,9 @@ def run_main():
             sys.exit(1)
         WEBHOOK_URL = str(args.webhook_url or "")
         WEBHOOK_ENABLED = True
+
+    if args.webhook_provider:
+        WEBHOOK_PROVIDER = str(args.webhook_provider)
 
     if args.webhook_enabled is True:
         WEBHOOK_ENABLED = True
@@ -11174,8 +13199,12 @@ def run_main():
         # Resolve to absolute path immediately
         WEB_DASHBOARD_TEMPLATE_DIR = os.path.abspath(os.path.expanduser(args.web_dashboard_template_dir))
 
+    # Container bridge networking needs the service to listen beyond its own loopback interface
+    if WEB_DASHBOARD_ENABLED and _running_in_container() and WEB_DASHBOARD_HOST in ("127.0.0.1", "localhost", "::1"):
+        WEB_DASHBOARD_HOST = "0.0.0.0"
+
     # Allow empty targets with specific flags
-    if not targets and not WEB_DASHBOARD_ENABLED:
+    if not targets and not WEB_DASHBOARD_ENABLED and not args.doctor:
         utility_flags = {
             "--no-color", "-h", "--help",
             "--web-dashboard", "--version"
@@ -11250,9 +13279,24 @@ def run_main():
         GET_MORE_POST_DETAILS = False
         SKIP_GETTING_STORY_DETAILS = True
         BE_HUMAN = False
-        mode_of_the_tool = "1 (no session login - anonymous)"
+        mode_of_the_tool = "No login (limited data)"
     else:
-        mode_of_the_tool = "2 (session login)"
+        mode_of_the_tool = "Logged in (full data)"
+
+    # Run preflight checks once the effective session mode and targets are resolved
+    if getattr(args, "doctor", False):
+        doctor_failures = run_doctor(targets)
+        if not doctor_failures:
+            explicit_targets = bool(getattr(args, "targets", None) or getattr(args, "usernames", None))
+            command_targets = targets if explicit_targets else ()
+            selected_env = "none" if args.env_file and str(args.env_file).casefold() == "none" else env_path
+            if targets or WEB_DASHBOARD_ENABLED:
+                _wizard_print_monitor_after_doctor(cfg_path, selected_env, command_targets, web_dashboard=WEB_DASHBOARD_ENABLED)
+            else:
+                print(colorize("header", "\nNext steps\n"))
+                print("Doctor passed, but no monitoring target or Web Dashboard is configured.")
+                print(colorize("section", f"    {_wizard_cmd_prefix(_wizard_install_method())} --setup\n"))
+        sys.exit(1 if doctor_failures else 0)
 
     # Auto-disable Follower Churn Detection if session or lists are skipped
     if FOLLOWERS_CHURN_DETECTION:
@@ -11397,8 +13441,13 @@ def run_main():
         FOLLOWERS_NOTIFICATION = False
         ERROR_NOTIFICATION = False
 
-    # Print summary screen (will be suppressed from terminal by Logger when dashboard is active, but still logged to files)
-    print(f"* Instagram polling interval:\t\t[ {display_time(check_interval_low)} - {display_time(INSTA_CHECK_INTERVAL + RANDOM_SLEEP_DIFF_HIGH)} ]")
+    # Build the run summary as (text, show_in_concise, show_in_full) rows
+    # The concise terminal view leads with the targets and hides off/default rows; the full view (every row) is written to the log and also shown on the terminal under --verbose/--debug
+    summary_rows = []
+
+    summary_rows.append((f"* Targets:\t\t\t\t{', '.join(targets)}", True, True))
+    summary_rows.append((f"* Instagram polling interval:\t\t[ {display_time(check_interval_low)} - {display_time(INSTA_CHECK_INTERVAL + RANDOM_SLEEP_DIFF_HIGH)} ]", True, True))
+
     hours_ranges_str = ""
     if CHECK_POSTS_IN_HOURS_RANGE:
         ranges = []
@@ -11413,63 +13462,63 @@ def run_main():
             hours_ranges_str = "None (both ranges disabled)"
     else:
         hours_ranges_str = format_hour_range(0, 23)
-    print("* Hours for fetching updates:\t\t" + hours_ranges_str)
-    print(f"* Email notifications:\t\t\t[new posts/reels/stories/followings/bio/profile picture/visibility = {STATUS_NOTIFICATION}]\n*\t\t\t\t\t[followers = {FOLLOWERS_NOTIFICATION}] [errors = {ERROR_NOTIFICATION}]")
-    print(f"* Session Mode:\t\t\t\t{mode_of_the_tool}")
-    print(f"* Human mode:\t\t\t\t{BE_HUMAN}" + (f" (Verbose)" if BE_HUMAN_VERBOSE else ""))
-    print(f"* Skip session login:\t\t\t{SKIP_SESSION}")
-    print(f"* Skip fetching followers:\t\t{SKIP_FOLLOWERS}")
-    print(f"* Skip fetching followings:\t\t{SKIP_FOLLOWINGS}")
-    print(f"* Skip reporting follows changes:\t{SKIP_FOLLOW_CHANGES}")
-    print(f"* Skip stories details:\t\t\t{SKIP_GETTING_STORY_DETAILS}")
-    print(f"* Skip posts details:\t\t\t{SKIP_GETTING_POSTS_DETAILS}")
-    print(f"* Get more posts details:\t\t{GET_MORE_POST_DETAILS}")
-    print(f"* Detect collab posts (private):\t{DETECT_COLLAB_POSTS}")
+    summary_rows.append(("* Hours for fetching updates:\t\t" + hours_ranges_str, bool(CHECK_POSTS_IN_HOURS_RANGE), True))
+
+    # Concise one-line notifications summary (terminal only); the detailed rows below carry the full breakdown to the log/--verbose
+    email_on = bool(STATUS_NOTIFICATION or FOLLOWERS_NOTIFICATION or ERROR_NOTIFICATION)
+    summary_rows.append((f"* Notifications:\t\t\t[email = {'on' if email_on else 'off'}] [webhook = {'on' if WEBHOOK_ENABLED else 'off'}]", True, False))
+    summary_rows.append((f"* Email notifications:\t\t\t[new posts/reels/stories/followings/bio/profile picture/visibility = {STATUS_NOTIFICATION}]\n*\t\t\t\t\t[followers = {FOLLOWERS_NOTIFICATION}] [errors = {ERROR_NOTIFICATION}]", False, True))
+
+    summary_rows.append((f"* Session Mode:\t\t\t\t{mode_of_the_tool}", True, True))
+    summary_rows.append((f"* Human mode:\t\t\t\t{BE_HUMAN}" + (f" (Verbose)" if BE_HUMAN_VERBOSE else ""), bool(BE_HUMAN), True))
+    summary_rows.append((f"* Skip session login:\t\t\t{SKIP_SESSION}", bool(SKIP_SESSION), True))
+    summary_rows.append((f"* Skip fetching followers:\t\t{SKIP_FOLLOWERS}", bool(SKIP_FOLLOWERS), True))
+    summary_rows.append((f"* Skip fetching followings:\t\t{SKIP_FOLLOWINGS}", bool(SKIP_FOLLOWINGS), True))
+    summary_rows.append((f"* Skip reporting follows changes:\t{SKIP_FOLLOW_CHANGES}", bool(SKIP_FOLLOW_CHANGES), True))
+    summary_rows.append((f"* Skip stories details:\t\t\t{SKIP_GETTING_STORY_DETAILS}", bool(SKIP_GETTING_STORY_DETAILS), True))
+    summary_rows.append((f"* Skip posts details:\t\t\t{SKIP_GETTING_POSTS_DETAILS}", bool(SKIP_GETTING_POSTS_DETAILS), True))
+    summary_rows.append((f"* Get more posts details:\t\t{GET_MORE_POST_DETAILS}", bool(GET_MORE_POST_DETAILS), True))
+    summary_rows.append((f"* Detect collab posts (private):\t{DETECT_COLLAB_POSTS}", not DETECT_COLLAB_POSTS, True))
+
     churn_status = str(FOLLOWERS_CHURN_DETECTION)
     if FOLLOWERS_CHURN_AUTODISABLED:
         churn_status += f" ({FOLLOWERS_CHURN_AUTODISABLED_REASON})"
-    print(f"* Follower churn detection:\t\t{churn_status}")
-    print(f"* Browser user agent:\t\t\t{USER_AGENT}")
-    print(f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}")
+    summary_rows.append((f"* Follower churn detection:\t\t{churn_status}", bool(FOLLOWERS_CHURN_DETECTION or FOLLOWERS_CHURN_AUTODISABLED), True))
+
+    summary_rows.append((f"* Browser user agent:\t\t\t{USER_AGENT}", False, True))
+    summary_rows.append((f"* Mobile user agent:\t\t\t{USER_AGENT_MOBILE}", False, True))
     http_type = "Niquests" if USE_NIQUESTS else "Requests"
     if _curl_cffi_backend_active():
         impersonate_resolved = _curl_cffi_impersonate_target()
         impersonate_display = f"auto -> {impersonate_resolved}" if str(CURL_CFFI_IMPERSONATE or "auto").strip().lower() in ("", "auto") else impersonate_resolved
-        if USE_NIQUESTS:
-            print_red(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {impersonate_display}), with fallback to {http_type}", invert=True)
-        else:
-            print(f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {impersonate_display}), with fallback to {http_type}")
+        summary_rows.append((f"* HTTP backend:\t\t\t\tcurl_cffi (impersonate: {impersonate_display}), with fallback to {http_type})", True, True))
     else:
-        if USE_NIQUESTS:
-            print_red(f"* HTTP backend:\t\t\t\t" + f"{http_type}", invert=True)
-        else:
-            print(f"* HTTP backend:\t\t\t\t" + f"{http_type}")
-    print(f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}")
-    if HIDE_403_ERRORS:
-        print_red(f"* Hide 403 Errors:\t\t\t" + "Enabled", invert=True)
-    else:
-        print(f"* Hide 403 Errors:\t\t\t" + "Disabled")
-    if PROXY_ENABLED:
-        print(f"* Proxies:\t\t\t\t" + "Enabled")
-    else:
-        print_red(f"* Proxies:\t\t\t\t" + "Disabled", invert=True)
+        summary_rows.append((f"* HTTP backend:\t\t\t\t" + f"{http_type}", True, True))
+
+    summary_rows.append((f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}", bool(ENABLE_JITTER), True))
+
+    summary_rows.append(f"* Hide 403 Errors:\t\t\t" + ("Enabled" if HIDE_403_ERRORS else "Disabled"), bool(PROXY_ENABLED), True))
+    summary_rows.append((f"* Proxies:\t\t\t\t" + ("Enabled" if PROXY_ENABLED else "Disabled"), bool(PROXY_ENABLED), True))
     if PROXY_ENABLED:
         ipaddr = get_ip_address()
         masked_proxy_url = mask_url_credentials(PROXY_URL)
-        print(f"*   Proxy IP Address:\t\t\t{ipaddr}")
-        print(f"*   Proxy URL:\t\t\t\t{masked_proxy_url[:50]}")
-        print(f"*   Proxy Certificate:\t\t\t{PROXY_CERT_PATH or '-'}")
-        print(f"*   Proxy for Webhooks:\t\t\t" + ("Enabled" if PROXY_WEBHOOKS else "Disabled"))
+        summary_rows.append((f"*   Proxy IP Address:\t\t\t{ipaddr}", True, True))
+        summary_rows.append((f"*   Proxy URL:\t\t\t\t{masked_proxy_url[:50]}", True, True))
+        summary_rows.append((f"*   Proxy Certificate:\t\t\t{PROXY_CERT_PATH or '-'}", True, True))
+        summary_rows.append((f"*   Proxy for Webhooks:\t\t\t" + ("Enabled" if PROXY_WEBHOOKS else "Disabled"), True, True))
+
     follower_str = build_follow_string(ADVANCED_FOLLOWER_FETCH, FOLLOWER_LIMIT_TO_FETCH, FOLLOWERS_PER_BATCH, FOLLOWER_DELAY_PER_BATCH)
     followee_str = build_follow_string(ADVANCED_FOLLOWEE_FETCH, FOLLOWEE_LIMIT_TO_FETCH, FOLLOWEES_PER_BATCH, FOLLOWEE_DELAY_PER_BATCH)
-    print(f"* Advanced Follower Fetching:\t\t{follower_str}")
-    print(f"* Advanced Followee Fetching:\t\t{followee_str}")
-    print(f"* Liveness check:\t\t\t{bool(LIVENESS_CHECK_INTERVAL)}" + (f" ({display_time(LIVENESS_CHECK_INTERVAL)})" if LIVENESS_CHECK_INTERVAL else ""))
-    print(f"* Profile pic changes:\t\t\t{DETECT_CHANGED_PROFILE_PIC}")
-    print(f"* Display profile pics:\t\t\t{bool(imgcat_exe)}" + (f" (via {imgcat_exe})" if imgcat_exe else ""))
-    print(f"* Empty profile pic template:\t\t{profile_pic_file_exists}" + (f" ({PROFILE_PIC_FILE_EMPTY})" if profile_pic_file_exists else ""))
+    summary_rows.append((f"* Advanced Follower Fetching:\t\t{follower_str}", bool(ADVANCED_FOLLOWER_FETCH), True))
+    summary_rows.append((f"* Advanced Followee Fetching:\t\t{followee_str}", bool(ADVANCED_FOLLOWEE_FETCH), True))
+    summary_rows.append((f"* Liveness check:\t\t\t{bool(LIVENESS_CHECK_INTERVAL)}" + (f" ({display_time(LIVENESS_CHECK_INTERVAL)})" if LIVENESS_CHECK_INTERVAL else ""), not LIVENESS_CHECK_INTERVAL, True))
+    summary_rows.append((f"* Profile pic changes:\t\t\t{DETECT_CHANGED_PROFILE_PIC}", not DETECT_CHANGED_PROFILE_PIC, True))
+    summary_rows.append((f"* Display profile pics:\t\t\t{bool(imgcat_exe)}" + (f" (via {imgcat_exe})" if imgcat_exe else ""), bool(imgcat_exe), True))
+    summary_rows.append((f"* Empty profile pic template:\t\t{profile_pic_file_exists}" + (f" ({PROFILE_PIC_FILE_EMPTY})" if profile_pic_file_exists else ""), bool(profile_pic_file_exists), True))
+
     thumbnail_adnotation = " (forced by Web Dashboard)" if THUMBNAILS_FORCED_BY_WEB else ""
-    print(f"* Download thumbnail images:\t\t{DOWNLOAD_THUMBNAILS}{thumbnail_adnotation}")
+    summary_rows.append((f"* Download thumbnail images:\t\t{DOWNLOAD_THUMBNAILS}{thumbnail_adnotation}", (not DOWNLOAD_THUMBNAILS) or THUMBNAILS_FORCED_BY_WEB, True))
+
     # Dashboard status
     dashboard_status = DASHBOARD_ENABLED and RICH_AVAILABLE
     dashboard_reason = ""
@@ -11478,7 +13527,8 @@ def run_main():
             dashboard_reason = " (missing rich)"
         elif not DASHBOARD_ENABLED:
             dashboard_reason = " (disabled)"
-    print(f"* Dashboard:\t\t\t\t{dashboard_status}{dashboard_reason}")
+    summary_rows.append((f"* Dashboard:\t\t\t\t{dashboard_status}{dashboard_reason}", bool(DASHBOARD_ENABLED), True))
+
     # Web Dashboard status
     web_dashboard_status = WEB_DASHBOARD_ENABLED and FLASK_AVAILABLE
     web_dashboard_reason = ""
@@ -11487,38 +13537,64 @@ def run_main():
             web_dashboard_reason = " (disabled)"
         elif not FLASK_AVAILABLE:
             web_dashboard_reason = " (missing Flask)"
-    print(f"* Web Dashboard:\t\t\t{web_dashboard_status}{web_dashboard_reason}")
+    summary_rows.append((f"* Web Dashboard:\t\t\t{web_dashboard_status}{web_dashboard_reason}", bool(WEB_DASHBOARD_ENABLED), True))
+
     if len(targets) == 1:
-        print(f"* CSV logging enabled:\t\t\t{bool(CSV_FILE)}" + (f" ({CSV_FILE})" if CSV_FILE else ""))
+        summary_rows.append((f"* CSV logging enabled:\t\t\t{bool(CSV_FILE)}" + (f" ({CSV_FILE})" if CSV_FILE else ""), bool(CSV_FILE), True))
     else:
         if CSV_FILE:
-            print(f"* CSV logging enabled:\t\t\tTrue (per-user files, base: {CSV_FILE})")
+            summary_rows.append((f"* CSV logging enabled:\t\t\tTrue (per-user files, base: {CSV_FILE})", True, True))
         else:
-            print(f"* CSV logging enabled:\t\t\tFalse")
-    print(f"* Output logging enabled:\t\t{not DISABLE_LOGGING}" + (f" ({FINAL_LOG_PATH})" if not DISABLE_LOGGING else ""))
+            summary_rows.append((f"* CSV logging enabled:\t\t\tFalse", False, True))
+
+    summary_rows.append((f"* Output logging enabled:\t\t{not DISABLE_LOGGING}" + (f" ({FINAL_LOG_PATH})" if not DISABLE_LOGGING else ""), bool(DISABLE_LOGGING), True))
+
     if OUTPUT_DIR:
         output_dir_desc = "(root for user data & logs)" if len(targets) == 1 else "(container for per-user subdirectories & logs)"
-        print(f"* Output directory:\t\t\t{OUTPUT_DIR} {output_dir_desc}")
+        summary_rows.append((f"* Output directory:\t\t\t{OUTPUT_DIR} {output_dir_desc}", True, True))
     else:
-        print(f"* Output directory:\t\t\t{os.getcwd()} (current working directory)")
-    print(f"* Configuration file:\t\t\t{cfg_path}")
-    print(f"* Dotenv file:\t\t\t\t{env_path or 'None'}")
+        summary_rows.append((f"* Output directory:\t\t\t{os.getcwd()} (current working directory)", True, True))
+
+    summary_rows.append((f"* Configuration file:\t\t\t{cfg_path}", True, True))
+    summary_rows.append((f"* Dotenv file:\t\t\t\t{env_path or 'None'}", True, True))
+
     if WEB_DASHBOARD_ENABLED:
         if WEB_DASHBOARD_TEMPLATE_DIR:
             templates_display = WEB_DASHBOARD_TEMPLATE_DIR
         else:
             detected = _peek_web_dashboard_template_dir_autodetect()
             templates_display = "Auto-detect" + (f" ({detected})" if detected else "")
-        print(f"* Web Dashboard templates:\t\t{templates_display}")
-    print(f"* Webhook notifications:\t\t{WEBHOOK_ENABLED}" + (f" ({str(WEBHOOK_URL)[:50]}...)" if WEBHOOK_ENABLED and WEBHOOK_URL and len(str(WEBHOOK_URL)) > 50 else (f" ({WEBHOOK_URL})" if WEBHOOK_ENABLED and WEBHOOK_URL else "")))
+        summary_rows.append((f"* Web Dashboard templates:\t\t{templates_display}", False, True))
+
+    summary_rows.append((f"* Webhook notifications:\t\t{WEBHOOK_ENABLED}" + (f" ({str(WEBHOOK_URL)[:50]}...)" if WEBHOOK_ENABLED and WEBHOOK_URL and len(str(WEBHOOK_URL)) > 50 else (f" ({WEBHOOK_URL})" if WEBHOOK_ENABLED and WEBHOOK_URL else "")), False, True))
     if WEBHOOK_ENABLED:
-        print(f"*   Webhook on status/profile changes:\t{WEBHOOK_STATUS_NOTIFICATION}")
-        print(f"*   Webhook on follow changes:\t\t{WEBHOOK_FOLLOWERS_NOTIFICATION}")
-        print(f"*   Webhook on errors:\t\t\t{WEBHOOK_ERROR_NOTIFICATION}")
-    print(f"* Verbose mode:\t\t\t\t{VERBOSE_MODE}")
-    print(f"* Debug mode:\t\t\t\t{DEBUG_MODE}")
-    print(f"* Local timezone:\t\t\t{LOCAL_TIMEZONE}")
-    print(f"* 12h time format:\t\t\t{TIME_FORMAT_12H}")
+        summary_rows.append((f"*   Webhook provider:\t\t\t{normalized_webhook_provider() or 'Invalid'}", False, True))
+        summary_rows.append((f"*   Webhook on status/profile changes:\t{WEBHOOK_STATUS_NOTIFICATION}", False, True))
+        summary_rows.append((f"*   Webhook on follow changes:\t\t{WEBHOOK_FOLLOWERS_NOTIFICATION}", False, True))
+        summary_rows.append((f"*   Webhook on errors:\t\t\t{WEBHOOK_ERROR_NOTIFICATION}", False, True))
+
+    summary_rows.append((f"* Verbose mode:\t\t\t\t{VERBOSE_MODE}", bool(VERBOSE_MODE), True))
+    summary_rows.append((f"* Debug mode:\t\t\t\t{DEBUG_MODE}", bool(DEBUG_MODE), True))
+    summary_rows.append((f"* Local timezone:\t\t\t{LOCAL_TIMEZONE}", False, True))
+    summary_rows.append((f"* 12h time format:\t\t\t{TIME_FORMAT_12H}", False, True))
+
+    # Concise-only hint pointing at the full settings dump
+    summary_rows.append(("* (run with --verbose to see all settings)", True, False))
+
+    # Emit the summary: full rows always go to the log; the terminal shows the full set under --verbose/--debug, otherwise the concise set (suppressed entirely while the terminal dashboard owns the screen)
+    show_full_on_terminal = bool(VERBOSE_MODE or DEBUG_MODE)
+    terminal_suppressed = bool(DASHBOARD_ENABLED and RICH_AVAILABLE)
+    summary_out = sys.stdout
+    for row_text, in_concise, in_full in summary_rows:
+        row_line = row_text + "\n"
+        to_terminal = (in_full if show_full_on_terminal else in_concise) and not terminal_suppressed
+        if in_full and hasattr(summary_out, "log_only"):
+            summary_out.log_only(row_line)
+        if to_terminal:
+            if hasattr(summary_out, "terminal_only"):
+                summary_out.terminal_only(row_line)
+            else:
+                print(row_text)
 
     # More visible warnings if requested features are missing (still only printed to terminal when dashboard is not active)
     if not (DASHBOARD_ENABLED and RICH_AVAILABLE):
@@ -11628,7 +13704,7 @@ def run_main():
         print("     INSTAGRAM MONITOR - WEB DASHBOARD MODE")
         print("═" * 80)
         print(f"\n* Status: Waiting for targets...")
-        print(f"* Web UI: http://{WEB_DASHBOARD_HOST}:{WEB_DASHBOARD_PORT}/")
+        print(f"* Web UI: {_web_dashboard_browser_url()}")
         print("\n* Info: No initial targets specified on command line.")
         print("  Please open the Web UI above to manually add Instagram users for monitoring.")
         print("  You can also configure sessions and settings directly from the dashboard.")
