@@ -13497,7 +13497,7 @@ def run_main():
 
     summary_rows.append((f"* HTTP jitter/back-off:\t\t\t{ENABLE_JITTER}", bool(ENABLE_JITTER), True))
 
-    summary_rows.append(f"* Hide 403 Errors:\t\t\t" + ("Enabled" if HIDE_403_ERRORS else "Disabled"), bool(PROXY_ENABLED), True))
+    summary_rows.append((f"* Hide 403 Errors:\t\t\t" + ("Enabled" if HIDE_403_ERRORS else "Disabled"), bool(PROXY_ENABLED), True))
     summary_rows.append((f"* Proxies:\t\t\t\t" + ("Enabled" if PROXY_ENABLED else "Disabled"), bool(PROXY_ENABLED), True))
     if PROXY_ENABLED:
         ipaddr = get_ip_address()
