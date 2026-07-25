@@ -327,8 +327,9 @@ CHECK_INTERNET_URL = 'https://www.instagram.com/'
 # Timeout used when checking initial internet connectivity; in seconds
 CHECK_INTERNET_TIMEOUT = 5
 
-# URL used to determine IP address
-IP_ADDRESS_URLS = [
+# URL or list of URLs used to determine IP address
+# If first URL doesn't provide a valiud response, retries will iterate through the list
+IP_ADDRESS_URL = [
     "https://checkip.amazonaws.com",
     "https://api.ipify.org?format=json",
     "https://api.my-ip.io/ip.json",
@@ -764,7 +765,7 @@ ADVANCED_FOLLOWEE_FETCH = False
 LIVENESS_CHECK_INTERVAL = 0
 CHECK_INTERNET_URL = ""
 CHECK_INTERNET_TIMEOUT = 0
-IP_ADDRESS_URLS = [
+IP_ADDRESS_URL = [
     "https://checkip.amazonaws.com",
     "https://api.ipify.org?format=json",
     "https://api.my-ip.io/ip.json",
@@ -4196,15 +4197,19 @@ def interruptible_sleep(seconds, stop_event=None):
     return stop_event.wait(seconds)
 
 
-# Fetches the current outbound IP via IP_ADDRESS_URLS, tolerating JSON and plain-text responses.
-def get_ip_address(max_retries=5, timeout=10, retry_delay=5, long_retry=120, long_retry_attempts=3, stop_event=None):
+# Fetches the current outbound IP via IP_ADDRESS_URL, tolerating JSON and plain-text responses.
+def get_ip_address(max_retries=3, timeout=10, retry_delay=5, long_retry=120, long_retry_attempts=3, stop_event=None):
+    urls = IP_ADDRESS_URL if isinstance(IP_ADDRESS_URL, list) else [IP_ADDRESS_URL]
+    if isinstance(urls, list) and len(urls) > long_retry_attempts:
+        long_retry_attemps = len(urls)
+
     last_err = None
     site_index = 0
     for long_attempt in range(1, long_retry_attempts + 1):
         for attempt in range(1, max_retries + 1):
             if stop_event is not None and stop_event.is_set():
                 return f"(unavailable: {format_error_message(last_err) if last_err else 'stopped'})"
-            url = IP_ADDRESS_URLS[site_index % len(IP_ADDRESS_URLS)]
+            url = urls[site_index % len(urls)]
             try:
                 ip_response = req.get(url, timeout=timeout, verify=get_proxies_ssl(), proxies=get_proxies())
                 ip_response.raise_for_status()
