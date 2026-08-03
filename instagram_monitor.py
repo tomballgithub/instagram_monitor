@@ -967,6 +967,7 @@ HIDE_403_ERRORS = False
 USE_NIQUESTS = False
 MAX_PBAR_WIDTH = 0  # disabled
 MIN_PBAR_WIDTH = 75 # if below this size, reduce the PBAR description to fit
+FORCE_INDIVIDUAL_LOG_DIRS = False
 
 exec(CONFIG_BLOCK, globals())
 
@@ -4375,6 +4376,7 @@ def show_follow_info(followers_reported: int, followers_actual: int, followings_
 
 # Compares follower or following lists, logs changes and returns formatted notification fragments
 def compare_and_log_follower_changes(user, change_type, old_list, new_list, csv_file_name):
+    debug_print(f"entering compare_and_log_follower_changes: {csv_file_name}")
     old_set, new_set = set(old_list), set(new_list)
     removed_seen = set()
     added_seen = set()
@@ -4495,6 +4497,8 @@ def format_payload(template, payload):
     elif isinstance(template, str):
         if template == "{fields}":
             return payload.get("fields", [])
+        if template == "{fields_str}":
+            return payload.get("fields_str", []) if payload.get("fields_str", []) else payload.get("title", [])
         if template == "{color}":
             return payload.get("color", 0x7289DA)
         try:
@@ -8501,6 +8505,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     _thread_local.in_partial_line = False  # Track partial line prints
     update_ui_data(targets={user: {'status': 'Starting'}})
 
+    debug_print(f"csv_file_name: {csv_file_name}")
+
     # When True, bypass CHECK_POSTS_IN_HOURS_RANGE for exactly one cycle (Web Dashboard recheck override)
     manual_recheck_active = bool(manual_recheck)
     manual_override_active = bool(manual_recheck)
@@ -8528,6 +8534,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     elif OUTPUT_DIR:
         user_root_dir = os.path.join(OUTPUT_DIR, user)
         json_dir = os.path.join(user_root_dir, "json")
+        debug_print(f"user_root_dir: {user_root_dir}")
+        debug_print(f"json_dir: {json_dir}")
         images_dir = os.path.join(user_root_dir, "images")
         videos_dir = os.path.join(user_root_dir, "videos")
 
@@ -11133,7 +11141,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 def get_target_paths(user):
     # Use DASHBOARD_DATA to check if we are in single-target mode
     targets_list = DASHBOARD_DATA.get('targets_list', [])
-    is_multi = len(targets_list) > 1
+    is_multi = len(targets_list) > 1 or FORCE_INDIVIDUAL_LOG_DIRS
 
     target_csv = ""
     if CSV_FILE:
@@ -11150,7 +11158,8 @@ def get_target_paths(user):
         elif OUTPUT_DIR:
             if is_multi:
                 # Multi target with OUTPUT_DIR: OUTPUT_DIR/<user>/csvs/
-                target_csv = os.path.join(OUTPUT_DIR, user, "csvs", os.path.basename(CSV_FILE))
+                #jmk target_csv = os.path.join(OUTPUT_DIR, user, "csvs", os.path.basename(CSV_FILE))
+                target_csv = os.path.join(OUTPUT_DIR, user, "csvs", os.path.basename(CSV_FILE+f"_{user}{base_suffix}"))
             else:
                 # Single target with OUTPUT_DIR: OUTPUT_DIR/csvs/
                 target_csv = os.path.join(OUTPUT_DIR, "csvs", os.path.basename(CSV_FILE))
@@ -11166,7 +11175,8 @@ def get_target_paths(user):
         if OUTPUT_DIR:
             if is_multi:
                 # Multi target: OUTPUT_DIR/<user>/logs/monitor.log
-                target_log = os.path.join(OUTPUT_DIR, user, "logs", f"{Path(INSTA_LOGFILE).stem}.log")
+                #jmk target_log = os.path.join(OUTPUT_DIR, user, "logs", f"{Path(INSTA_LOGFILE).stem}.log")
+                target_log = os.path.join(OUTPUT_DIR, user, "logs", f"{Path(INSTA_LOGFILE).stem}_{user}{Path(INSTA_LOGFILE).suffix or '.log'}")
             else:
                 # Single target: OUTPUT_DIR/logs/monitor.log
                 target_log = os.path.join(OUTPUT_DIR, "logs", f"{Path(INSTA_LOGFILE).stem}.log")
@@ -13416,7 +13426,7 @@ def run_main():
 
     # For display in summary screen
     if not DISABLE_LOGGING:
-        if len(targets) == 1:
+        if len(targets) == 1 and not FORCE_INDIVIDUAL_LOG_DIRS:
             _, final_log = get_target_paths(targets[0])
             FINAL_LOG_PATH = final_log
         else:
@@ -13539,7 +13549,7 @@ def run_main():
             web_dashboard_reason = " (missing Flask)"
     summary_rows.append((f"* Web Dashboard:\t\t\t{web_dashboard_status}{web_dashboard_reason}", bool(WEB_DASHBOARD_ENABLED), True))
 
-    if len(targets) == 1:
+    if len(targets) == 1 and not FORCE_INDIVIDUAL_LOG_DIRS:
         summary_rows.append((f"* CSV logging enabled:\t\t\t{bool(CSV_FILE)}" + (f" ({CSV_FILE})" if CSV_FILE else ""), bool(CSV_FILE), True))
     else:
         if CSV_FILE:
@@ -13550,7 +13560,7 @@ def run_main():
     summary_rows.append((f"* Output logging enabled:\t\t{not DISABLE_LOGGING}" + (f" ({FINAL_LOG_PATH})" if not DISABLE_LOGGING else ""), bool(DISABLE_LOGGING), True))
 
     if OUTPUT_DIR:
-        output_dir_desc = "(root for user data & logs)" if len(targets) == 1 else "(container for per-user subdirectories & logs)"
+        output_dir_desc = "(root for user data & logs)" if (len(targets) == 1 and not FORCE_INDIVIDUAL_LOG_DIRS) else "(container for per-user subdirectories & logs)"
         summary_rows.append((f"* Output directory:\t\t\t{OUTPUT_DIR} {output_dir_desc}", True, True))
     else:
         summary_rows.append((f"* Output directory:\t\t\t{os.getcwd()} (current working directory)", True, True))
@@ -13731,7 +13741,8 @@ def run_main():
                 WEB_DASHBOARD_MONITOR_THREADS[user] = threading.current_thread()
 
         try:
-            instagram_monitor_user(user, csv_files_by_user.get(user, CSV_FILE), SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, user_root_path=OUTPUT_DIR, stop_event=stop_event, skip_follow_changes=SKIP_FOLLOW_CHANGES)
+            #jmk (user_root_path) instagram_monitor_user(user, csv_files_by_user.get(user, CSV_FILE), SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, user_root_path=OUTPUT_DIR, stop_event=stop_event, skip_follow_changes=SKIP_FOLLOW_CHANGES)
+            instagram_monitor_user(user, csv_files_by_user.get(user, CSV_FILE), SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, user_root_path=None, stop_event=stop_event, skip_follow_changes=SKIP_FOLLOW_CHANGES)
         finally:
             if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
                 with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
@@ -13832,7 +13843,7 @@ def run_main():
 
                 user_root = None
                 if OUTPUT_DIR:
-                    if len(targets) == 1:
+                    if len(targets) == 1 and not FORCE_INDIVIDUAL_LOG_DIRS:
                         user_root = OUTPUT_DIR
                     else:
                         user_root = os.path.join(OUTPUT_DIR, u)
