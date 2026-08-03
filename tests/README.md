@@ -1,8 +1,12 @@
-# Offline test suite
+# Test suite
 
 These tests cover logic in `instagram_monitor.py` that can run without network access.
 Functions that normally contact Instagram are replaced with test doubles. See
 `test_session_flags.py` for an example.
+
+The default suite also builds and installs the project wheel to test the shipped
+console command. An optional browser test uses local loopback traffic only and
+never contacts Instagram.
 
 ## Running
 
@@ -22,6 +26,7 @@ installed copy of the package.
 | File | Area under test |
 | --- | --- |
 | `test_config_generation.py` | Config inline-comment splitting, value formatting, `generate_config_with_current_values` round-trip |
+| `test_proxy_ip.py` | Proxy IP endpoint validation, IPv4/IPv6 parsing, ordered failover and retry timing |
 | `test_time_and_dates.py` | `display_time`, `calculate_timespan`, hour formatting, timezone conversions |
 | `test_privacy.py` | `apply_privacy_substitutions` (string/dict/list recursion, invalid entries) |
 | `test_notifications.py` | Webhook URL validation, Discord markdown escaping, credential masking, payload templating |
@@ -36,6 +41,9 @@ installed copy of the package.
 | `test_parsing_and_useragents.py` | JSON username extraction, follow-string formatting, desktop/mobile user-agent shape |
 | `test_csv_and_files.py` | CSV init/append and byte-wise image comparison |
 | `test_followers.py` | Follower/following diffing, webhook escaping, CSV side effects |
+| `test_documentation.py` | Semantic documentation contracts for commands, concepts and platform variants |
+| `test_packaging.py` | Wheel contents, installed console help/version and config generation |
+| `test_browser_e2e.py` | Real Chromium rendering, navigation and target creation against the local dashboard |
 
 ## Conventions
 
@@ -48,3 +56,21 @@ installed copy of the package.
 
 Online tests that log in to Instagram are excluded because automated test logins
 could trigger security checks or account suspension.
+
+## Browser E2E
+
+Install the optional browser dependencies and Chromium:
+
+```bash
+pip install -e '.[test,e2e]'
+python -m playwright install chromium
+```
+
+Run the browser test:
+
+```bash
+python -m pytest tests/test_browser_e2e.py
+```
+
+Without the `e2e` extra the browser module is skipped. CI installs Chromium and
+runs it in a dedicated browser job.

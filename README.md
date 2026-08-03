@@ -22,6 +22,8 @@ Powerful, real-time OSINT suite for tracking every activity on Instagram - from 
 
 #### Python from PyPI
 
+New to Python or unsure what is installed? Follow the [Python install walkthrough](https://misiektoja.github.io/instagram_monitor/installation/#new-to-python-install-everything) first.
+
 ```sh
 pip install instagram_monitor
 ```
@@ -142,17 +144,18 @@ Use [Quick Install & Run](#-quick-install-run) above for first-time setup. The t
 | I want to... | Run this |
 | --- | --- |
 | Try public monitoring without a login | `instagram_monitor <target_insta_user>` |
-| Start targets saved in `TARGET_USERNAMES` | `instagram_monitor --config-file instagram_monitor.conf` |
+| Monitor a target with a logged in session (see stories, reels and follower details) | Import a [browser session](https://misiektoja.github.io/instagram_monitor/configuration/#option-3-session-login-using-browser-cookies-recommended) then run `instagram_monitor -u <your_insta_user> <target_insta_user>` |
+| Monitor targets saved in `TARGET_USERNAMES` | `instagram_monitor --config-file instagram_monitor.conf` |
 | Start a browser control panel without targets | `instagram_monitor --web-dashboard` |
-| Monitor several accounts | `instagram_monitor target_1 target_2` or `instagram_monitor --targets target_1,target_2` |
+| Monitor several accounts without login | `instagram_monitor target_1 target_2` or `instagram_monitor --targets target_1,target_2` |
 | Check the selected login, connectivity and targets | `instagram_monitor --doctor` |
-| See stories, reels and follower details | Import a [browser session](https://misiektoja.github.io/instagram_monitor/configuration/#option-3-session-login-using-browser-cookies-recommended) then run `instagram_monitor -u <your_insta_user> <target_insta_user>` |
+
 
 Running the tool with no arguments offers the wizard if you have not saved any targets or enabled the Web Dashboard. If targets are already saved, it starts monitoring them.
 
 For browser choices, saved targets, configuration backups and setup recovery, see the [full Setup & First Run guide](https://misiektoja.github.io/instagram_monitor/setup-and-first-run/).
 
-For container operation, browser profiles, email alerts, Discord, ntfy and advanced settings, see [Configuration](https://misiektoja.github.io/instagram_monitor/configuration/) and [Usage](https://misiektoja.github.io/instagram_monitor/usage/). Keep private webhook URLs in `.env` or enter them through the setup wizard. See [Webhook Notifications](https://misiektoja.github.io/instagram_monitor/usage/#webhook-notifications) for complete setup and testing instructions.
+For container operation, browser profiles, email alerts, Discord, ntfy and advanced settings, see [Configuration](https://misiektoja.github.io/instagram_monitor/configuration/) and [Usage](https://misiektoja.github.io/instagram_monitor/usage/). Keep private webhook URLs in `.env` by using `instagram_monitor --set-webhook-url` or enter them through the setup wizard. See [Webhook Notifications](https://misiektoja.github.io/instagram_monitor/usage/#webhook-notifications) for complete setup and testing instructions.
 
 <a id="documentation"></a>
 ## Documentation

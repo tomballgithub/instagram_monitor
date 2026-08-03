@@ -1,6 +1,10 @@
 # Installation
 
-Choose one installation method. You do not need both Python and Docker. PyPI is usually the easiest local option. The direct Docker image is the fastest container option. Docker Compose takes one extra download but gives you shorter commands for later runs.
+Choose one installation method. You do not need both Python and Docker.
+
+PyPI is usually the easiest local option. If you are new to Python or unsure whether Python is ready, follow [New to Python: check and install](#new-to-python-install-everything).
+
+The direct Docker image is the fastest container option. Docker Compose takes one extra download but gives you shorter commands for later runs.
 
 <a id="requirements"></a>
 ## Requirements
@@ -35,12 +39,132 @@ Tested on:
 
 It should work on other versions of macOS, Linux, Unix and Windows as well.
 
+<a id="new-to-python-install-everything"></a>
+## New to Python: check and install
+
+Use this section if you are new to Python or do not know what is already installed. The platform sections only prepare Python and `pip`. Everyone then uses the same Instagram Monitor installation and setup commands. Instagram Monitor requires Python 3.9 or newer and is currently tested through Python 3.14.
+
+### Check whether Instagram Monitor is already installed
+
+Open Windows PowerShell on Windows or Terminal on macOS and Linux then run:
+
+    instagram_monitor --version
+
+If this prints an Instagram Monitor version, skip to [Run the setup wizard](#run-the-setup-wizard). If the command is not recognized or not found, continue with the section for your operating system.
+
+### Windows 10 or 11
+
+Open Windows PowerShell. Select **Start**, type `PowerShell` then open **Windows PowerShell**.
+
+Check Python and `pip`:
+
+    python --version
+    pip --version
+
+If both commands work and Python reports version 3.9 or newer, skip to [Install Instagram Monitor](#install-instagram-monitor-after-python-check).
+
+If either command fails:
+
+1. Open the official [Python Install Manager in Microsoft Store](https://apps.microsoft.com/detail/9NQ7512CXL7T), select **View in Store** then select **Install**. If Microsoft Store is unavailable, download the manager from [python.org](https://www.python.org/downloads/).
+
+2. Close PowerShell then open it again.
+
+3. Run `python --version`. Python Install Manager downloads the current Python release if no runtime is installed.
+
+4. Check both commands again:
+
+        python --version
+        pip --version
+
+If `pip` is still not recognized, run `py install --refresh`, close PowerShell then open it again. `py install` belongs to Python Install Manager and is used only to repair its Python commands.
+
+See the official [Python Install Manager troubleshooting table](https://docs.python.org/3/using/windows.html#troubleshooting) if either check is still unavailable.
+
+### macOS
+
+Open Terminal. Press **Command+Space**, type `Terminal` then press **Return**.
+
+Check Python and `pip`:
+
+    python3 --version
+    pip --version
+
+If both commands work and Python reports version 3.9 or newer, skip to [Install Instagram Monitor](#install-instagram-monitor-after-python-check).
+
+If either command fails:
+
+1. Open the official [Python downloads for macOS](https://www.python.org/downloads/macos/). Select the latest stable Python 3.14 release then download its **macOS 64-bit universal2 installer**. This single installer supports Apple Silicon and Intel Macs.
+
+2. Open the downloaded `.pkg` file. Keep the standard options, select **Continue** through the installer then enter your macOS password when requested.
+
+3. Open the new **Python 3.14** folder in Applications then double-click **Install Certificates.command**. Wait until its Terminal window reports `update complete` then close that window.
+
+4. Close Terminal then open it again.
+
+5. Check both commands again:
+
+        python3 --version
+        pip --version
+
+The official [Using Python on macOS](https://docs.python.org/3/using/mac.html) guide shows every installer screen and explains the installed applications.
+
+### Ubuntu, Debian, Raspberry Pi OS or Kali
+
+Open Terminal then check Python and `pip`:
+
+    python3 --version
+    pip --version
+
+If both commands work and Python reports version 3.9 or newer, skip to [Install Instagram Monitor](#install-instagram-monitor-after-python-check).
+
+If either command fails, install the missing packages:
+
+    sudo apt update
+    sudo apt install python3 python3-pip
+
+The package manager keeps an existing current package instead of reinstalling it. Terminal may ask for your password. Type the password you use to sign in then press **Enter**. Terminal does not show password characters while you type.
+
+Check both commands again:
+
+    python3 --version
+    pip --version
+
+If Python reports a version older than 3.9, follow your distribution's instructions to install a supported Python version before continuing. For another Linux distribution, install Python 3.9 or newer plus `pip` through its package manager.
+
+<a id="install-instagram-monitor-after-python-check"></a>
+### Install Instagram Monitor
+
+Every operating system uses the same command:
+
+    pip install instagram_monitor
+
+Verify the installation:
+
+    instagram_monitor --version
+
+On Linux, `pip` may report that the system Python is externally managed. If that happens, install Instagram Monitor with the isolated `pipx` tool instead:
+
+    sudo apt install pipx
+    pipx ensurepath
+    pipx install instagram_monitor
+
+Close Terminal, open it again then run `instagram_monitor --version`.
+
+<a id="run-the-setup-wizard"></a>
+### Run the setup wizard
+
+Every operating system uses the same command:
+
+    instagram_monitor --setup
+
+The setup wizard can import a signed-in Firefox session, save the accounts to monitor and configure the interface and alerts. Continue to [Setup & First Run](setup-and-first-run.md) for a walkthrough of its questions.
+
 <a id="installation"></a>
 ## Choose an Installation Method
 
 | Method | Best for | Command used in later examples |
 | --- | --- | --- |
-| PyPI | Most local users | `instagram_monitor [OPTIONS] [TARGET ...]` |
+| PyPI | Local users who already have Python or followed the beginner steps above | `instagram_monitor [OPTIONS] [TARGET ...]` |
 | Manual script | Users who want to download and run one Python file | `python3 instagram_monitor.py [OPTIONS] [TARGET ...]` on macOS/Linux or `python instagram_monitor.py [OPTIONS] [TARGET ...]` on Windows |
 | Docker Hub image | Users who want the fastest container setup | `docker run ... misiektoja/instagram-monitor:latest [OPTIONS] [TARGET ...]` |
 | Docker Compose | Users who prefer shorter recurring commands after setup | `docker compose run --rm instagram_monitor [OPTIONS] [TARGET ...]` |
@@ -55,13 +179,15 @@ pip install instagram_monitor
 instagram_monitor --version
 ```
 
-Firefox session import needs no extra dependency. To import sessions from Chrome, Brave or Chromium on macOS or Linux, install the browser extra:
+Each command below that uses square brackets installs the base `instagram_monitor` package plus the named optional dependency. Run only the command that matches your needs. You do not need to run the plain install command first.
+
+Firefox session import needs no extra dependency. To import sessions from Chrome, Brave or Chromium on macOS or Linux install the browser extra:
 
 ```sh
 pip install "instagram_monitor[browser]"
 ```
 
-The second command installs the base package too. You do not need to run both install commands.
+This installs Instagram Monitor and the optional `pycookiecheat` dependency.
 
 <a id="manual-python-based-installation"></a>
 ### Install the Manual Script
@@ -231,12 +357,12 @@ docker pull misiektoja/instagram-monitor:latest
 docker run --rm misiektoja/instagram-monitor:latest --version
 ```
 
-Start the tool again with the same `/data` mount, `instagram_monitor_session` volume and options you used before. If your command uses a version such as `3.7.1` instead of `latest`, replace that version yourself when you want to upgrade. Each release publishes `latest` plus tags in `vX.Y.Z` and `X.Y.Z` forms.
+Start the tool again with the same `/data` mount, `instagram_monitor_session` volume and options you used before. If your command uses a version such as `3.8` instead of `latest`, replace that version yourself when you want to upgrade. Each release publishes `latest` plus tags in `vX.Y.Z` and `X.Y.Z` forms.
 
-For example, to pin version 3.7.1:
+For example, to pin version 3.8:
 
 ```sh
-docker pull misiektoja/instagram-monitor:3.7.1
+docker pull misiektoja/instagram-monitor:3.8
 ```
 
 ### Upgrade a Locally Built Docker Image
