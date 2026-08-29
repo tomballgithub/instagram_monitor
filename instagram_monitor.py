@@ -769,6 +769,8 @@ def _format_config_value(value, prefer_double_quotes: bool) -> str:
 
 # Advanced settings documented for config files but deliberately kept out of the generated template
 EXTRA_CONFIG_KEYS = frozenset(("FLAGGED_PROBE_USERNAME", "FLAGGED_PROBE_TTL"))
+EXTRA_CONFIG_KEYS |= {"FORCE_INDIVIDUAL_LOG_DIRS", "SESSION_USERNAME1", "SESSION_USERNAME2", "FOLLOWERS_PER_BATCH1", "FOLLOWEES_PER_BATCH1", "FOLLOWER_LIMIT_TO_FETCH1", "FOLLOWEE_LIMIT_TO_FETCH1", "FOLLOWER_DELAY_PER_BATCH1", "FOLLOWEE_DELAY_PER_BATCH1", "FOLLOWERS_CHURN_DETECTION1", "FOLLOWER_MAX_PER_PERIOD", "FOLLOWEE_MAX_PER_PERIOD", "FOLLOWER_MAX_PER_PERIOD1", "FOLLOWEE_MAX_PER_PERIOD1", "FOLLOWERS_PER_BATCH2", "FOLLOWEES_PER_BATCH2", "FOLLOWER_LIMIT_TO_FETCH2", "FOLLOWEE_LIMIT_TO_FETCH2", "FOLLOWER_DELAY_PER_BATCH2", "FOLLOWEE_DELAY_PER_BATCH2", "FOLLOWERS_CHURN_DETECTION2", "FOLLOWER_MAX_PER_PERIOD2", "FOLLOWEE_MAX_PER_PERIOD2", "FOLLOWER_FORCE_FETCH_TIME", "FOLLOWEE_FORCE_FETCH_TIME", "FOLLOWER_FORCE_FETCH_TIME1", "FOLLOWEE_FORCE_FETCH_TIME1", "FOLLOWER_FORCE_FETCH_TIME2", "FOLLOWEE_FORCE_FETCH_TIME2", "HIDE_403_ERRORS", "USE_NIQUESTS", "DASHBOARD_MODE", "FOLLOWER_FETCH_PERIOD", "FOLLOWEE_FETCH_PERIOD", "FOLLOWER_FETCH_PERIOD1", "FOLLOWEE_FETCH_PERIOD1", "FOLLOWER_FETCH_PERIOD2", "FOLLOWEE_FETCH_PERIOD2", "FOLLOWER_FORCE_FETCH_TIME2", "FOLLOWEE_FORCE_FETCH_TIME2"}
+
 
 # Settings that an earlier version wrote into generated configuration files and that a later release
 # removed. Ignoring them with a note keeps an untouched older configuration working on upgrade, while
@@ -810,7 +812,11 @@ def parse_config_content(content: str, filename: str = "<config>", retired_out=N
         if name not in allowed_names:
             raise ValueError(f"line {statement.lineno}: '{name}' is not a recognized setting")
         try:
-            parsed_values[name] = ast.literal_eval(statement.value)
+            if isinstance(statement.value, ast.Name):
+                # it's a bare reference to another variable (allow assigning a name to another in .conf file #jmk)
+                parsed_values[name] = parsed_values.get(statement.value.id, statement.value.id)
+            else:
+                parsed_values[name] = ast.literal_eval(statement.value)
         except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
             raise ValueError(f"line {statement.lineno}: '{name}' must be a plain value such as text, a number, True, False, a list or a dictionary") from exc
     return parsed_values
