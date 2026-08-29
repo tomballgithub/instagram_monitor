@@ -7,6 +7,7 @@
 archive/
 _config_and_logs/
 new.py
+test.bat
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
