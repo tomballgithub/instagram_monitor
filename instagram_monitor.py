@@ -4950,50 +4950,33 @@ def display_time(seconds, granularity=2):
 
 
 # Calculates time span between two timestamps, accepts timestamp integers, floats and datetime objects
-def calculate_timespan(timestamp1, timestamp2, show_weeks=True, show_hours=True, show_minutes=True, show_seconds=False, granularity=3):
+def calculate_timespan(timestamp1, timestamp2, show_weeks=True, show_hours=True, show_minutes=True, show_seconds=True, granularity=3, short=False):
     result = []
     intervals = ['years', 'months', 'weeks', 'days', 'hours', 'minutes', 'seconds']
+    intervals_short = ['yrs', 'mths', 'wks', 'days', 'hrs', 'mins', 'secs']
     ts1 = timestamp1
     ts2 = timestamp2
 
-    if isinstance(timestamp1, str):
-        try:
-            timestamp1 = isoparse(timestamp1)
-        except Exception:
-            return ""
-
-    if isinstance(timestamp1, int):
-        dt1 = datetime.fromtimestamp(int(ts1), tz=timezone.utc)
-    elif isinstance(timestamp1, float):
+    if short:
+        intervals = intervals_short
+    if type(timestamp1) is int:
+        dt1 = datetime.fromtimestamp(int(ts1))
+    elif type(timestamp1) is float:
         ts1 = int(round(ts1))
-        dt1 = datetime.fromtimestamp(ts1, tz=timezone.utc)
-    elif isinstance(timestamp1, datetime):
+        dt1 = datetime.fromtimestamp(ts1)
+    elif type(timestamp1) is datetime:
         dt1 = timestamp1
-        if dt1.tzinfo is None:
-            dt1 = pytz.utc.localize(dt1)
-        else:
-            dt1 = dt1.astimezone(pytz.utc)
         ts1 = int(round(dt1.timestamp()))
     else:
         return ""
 
-    if isinstance(timestamp2, str):
-        try:
-            timestamp2 = isoparse(timestamp2)
-        except Exception:
-            return ""
-
-    if isinstance(timestamp2, int):
-        dt2 = datetime.fromtimestamp(int(ts2), tz=timezone.utc)
-    elif isinstance(timestamp2, float):
+    if type(timestamp2) is int:
+        dt2 = datetime.fromtimestamp(int(ts2))
+    elif type(timestamp2) is float:
         ts2 = int(round(ts2))
-        dt2 = datetime.fromtimestamp(ts2, tz=timezone.utc)
-    elif isinstance(timestamp2, datetime):
+        dt2 = datetime.fromtimestamp(ts2)
+    elif type(timestamp2) is datetime:
         dt2 = timestamp2
-        if dt2.tzinfo is None:
-            dt2 = pytz.utc.localize(dt2)
-        else:
-            dt2 = dt2.astimezone(pytz.utc)
         ts2 = int(round(dt2.timestamp()))
     else:
         return ""
@@ -5008,19 +4991,21 @@ def calculate_timespan(timestamp1, timestamp2, show_weeks=True, show_hours=True,
         date_diff = relativedelta.relativedelta(dt1, dt2)
         years = date_diff.years
         months = date_diff.months
-        days_total = date_diff.days
-
-        if show_weeks:
-            weeks = days_total // 7
-            days = days_total % 7
-        else:
+        weeks = date_diff.weeks
+        if not show_weeks:
             weeks = 0
-            days = days_total
-
-        hours = date_diff.hours if show_hours or ts_diff <= 86400 else 0
-        minutes = date_diff.minutes if show_minutes or ts_diff <= 3600 else 0
-        seconds = date_diff.seconds if show_seconds or ts_diff <= 60 else 0
-
+        days = date_diff.days
+        if weeks > 0:
+            days = days - (weeks * 7)
+        hours = date_diff.hours
+        if (not show_hours and ts_diff > 86400):
+            hours = 0
+        minutes = date_diff.minutes
+        if (not show_minutes and ts_diff > 3600):
+            minutes = 0
+        seconds = date_diff.seconds
+        if (not show_seconds and ts_diff > 60):
+            seconds = 0
         date_list = [years, months, weeks, days, hours, minutes, seconds]
 
         for index, interval in enumerate(date_list):
@@ -5029,7 +5014,6 @@ def calculate_timespan(timestamp1, timestamp2, show_weeks=True, show_hours=True,
                 if interval == 1:
                     name = name.rstrip('s')
                 result.append(f"{interval} {name}")
-
         return ', '.join(result[:granularity])
     else:
         return '0 seconds'
@@ -9756,7 +9740,7 @@ def simulate_human_actions(bot: instaloader.Instaloader, sleep_seconds: int) -> 
 
 
 # Formats an advanced follower/followee fetch config as a human-readable description
-def build_follow_string(enabled, limit, batch, delay, alt_format=False):
+def build_follow_string(enabled, limit, batch, delay, alt_format=False, window_limit=0, window_time=0):
     if enabled:
         if limit and not batch and not delay:
             follow_str = (f"Maximum of " if not alt_format else "") + (f"{limit} accounts")
@@ -9764,6 +9748,9 @@ def build_follow_string(enabled, limit, batch, delay, alt_format=False):
             follow_str = (f"Maximum of " if not alt_format else "") + (f"{limit} accounts in batches of {batch} accounts with a {delay} second delay")
         else:
             follow_str = (f"Batches " if not alt_format else "batches ") + (f"of {batch} accounts with a {delay} second delay")
+        if window_limit and window_time:
+            timestr = calculate_timespan(window_time, 0, show_weeks=True, show_hours=True, show_minutes=True, show_seconds=True, granularity=3, short=True)
+            follow_str = follow_str + (f", with total max of " if not alt_format else "") + (f"{window_limit} accounts in {timestr}")
     else:
         follow_str = "False"
     return follow_str
@@ -15385,8 +15372,8 @@ def run_main():
         summary_rows.append((f"*   Proxy Certificate:\t\t\t{PROXY_CERT_PATH or '-'}", True, True))
         summary_rows.append((f"*   Proxy for Webhooks:\t\t\t" + ("Enabled" if PROXY_WEBHOOKS else "Disabled"), True, True))
 
-    follower_str = build_follow_string(ADVANCED_FOLLOWER_FETCH, FOLLOWER_LIMIT_TO_FETCH, FOLLOWERS_PER_BATCH, FOLLOWER_DELAY_PER_BATCH)
-    followee_str = build_follow_string(ADVANCED_FOLLOWEE_FETCH, FOLLOWEE_LIMIT_TO_FETCH, FOLLOWEES_PER_BATCH, FOLLOWEE_DELAY_PER_BATCH)
+    follower_str = build_follow_string(ADVANCED_FOLLOWER_FETCH, FOLLOWER_LIMIT_TO_FETCH, FOLLOWERS_PER_BATCH, FOLLOWER_DELAY_PER_BATCH, window_limit=FOLLOWER_MAX_PER_PERIOD, window_time=FOLLOWER_FETCH_PERIOD)
+    followee_str = build_follow_string(ADVANCED_FOLLOWEE_FETCH, FOLLOWEE_LIMIT_TO_FETCH, FOLLOWEES_PER_BATCH, FOLLOWEE_DELAY_PER_BATCH, window_limit=FOLLOWEE_MAX_PER_PERIOD, window_time=FOLLOWEE_FETCH_PERIOD)
     summary_rows.append((f"* Advanced Follower Fetching:\t\t{follower_str}", bool(ADVANCED_FOLLOWER_FETCH), True))
     summary_rows.append((f"* Advanced Followee Fetching:\t\t{followee_str}", bool(ADVANCED_FOLLOWEE_FETCH), True))
     summary_rows.append((f"* Liveness check:\t\t\t{bool(LIVENESS_CHECK_INTERVAL)}" + (f" ({display_time(LIVENESS_CHECK_INTERVAL)})" if LIVENESS_CHECK_INTERVAL else ""), not LIVENESS_CHECK_INTERVAL, True))
