@@ -9,6 +9,7 @@ import tempfile
 import venv
 import zipfile
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,74 @@ def test_installed_console_generates_valid_config(package_test_directory: Path, 
     compile(generated, str(destination), "exec")
     assert "TARGET_USERNAMES" in generated
     assert "INSTA_CHECK_INTERVAL" in generated
+
+
+class TestWorkflowSupplyChain:
+    # The runtime image drops its unused installer and build packages after application dependencies are installed
+    def test_runtime_image_removes_install_time_packages(self):
+        dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        assert "pip uninstall --yes msgpack setuptools pip" in dockerfile
+
+    # Every third-party action is pinned to a commit, so a moved tag cannot change what runs with our secrets
+    def test_actions_are_pinned_to_commit_shas(self):
+        unpinned = []
+        for workflow in sorted((PROJECT_ROOT / ".github" / "workflows").glob("*.yml")):
+            for match in re.finditer(r"uses:\s*(\S+)", workflow.read_text(encoding="utf-8")):
+                reference = match.group(1)
+                if reference.startswith("./"):
+                    continue
+                action, _, ref = reference.partition("@")
+                if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                    unpinned.append(f"{workflow.name}: {reference}")
+        assert unpinned == []
+
+    # Each pin records the human-readable version so updates stay reviewable
+    def test_pinned_actions_carry_a_version_comment(self):
+        missing = []
+        for workflow in sorted((PROJECT_ROOT / ".github" / "workflows").glob("*.yml")):
+            for line in workflow.read_text(encoding="utf-8").splitlines():
+                if "uses:" in line and "@" in line and "./" not in line and not re.search(r"#\s*v?\d", line):
+                    missing.append(f"{workflow.name}: {line.strip()}")
+        assert missing == []
+
+    # Event and input values never reach a shell directly, which would allow script injection
+    def test_run_steps_do_not_interpolate_event_values(self):
+        offenders = []
+        for workflow in sorted((PROJECT_ROOT / ".github" / "workflows").glob("*.yml")):
+            for block in re.findall(r"run: \|(.*?)(?=\n      [-a-zA-Z]|\Z)", workflow.read_text(encoding="utf-8"), re.S):
+                for line in block.splitlines():
+                    if "${{" in line:
+                        offenders.append(f"{workflow.name}: {line.strip()}")
+        assert offenders == []
+
+
+class TestVersionConsistency:
+    # The module, its docstring and the package metadata must agree, since only one of them reaches a user
+    def test_declared_versions_match(self, im_module):
+        pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        packaged = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+        docstring = re.search(r"^v(\d+\.\d+(?:\.\d+)?)\s*$", im_module.__doc__ or "", re.M)
+
+        assert packaged is not None and docstring is not None
+        assert im_module.VERSION == packaged.group(1) == docstring.group(1)
+
+    # The citation must name a version somebody can actually cite, so it tracks the newest dated release
+    # notes section rather than the version under development
+    def test_citation_tracks_the_newest_released_version(self):
+        notes = (PROJECT_ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+        citation = (PROJECT_ROOT / "CITATION.cff").read_text(encoding="utf-8")
+        released = re.search(r"^# Changes in ([\d.]+) \((\d{1,2} \w{3} \d{4})\)", notes, re.M)
+        cited_version = re.search(r'^version: "([^"]+)"', citation, re.M)
+        cited_date = re.search(r"^date-released: (\d{4}-\d{2}-\d{2})", citation, re.M)
+
+        assert released is not None and cited_version is not None and cited_date is not None
+        assert cited_version.group(1) == released.group(1)
+        assert cited_date.group(1) == datetime.strptime(released.group(2), "%d %b %Y").strftime("%Y-%m-%d")
+
+    # Release notes must describe the version the code actually declares, or the notes ship ahead of the code
+    def test_release_notes_lead_with_the_declared_version(self, im_module):
+        notes = (PROJECT_ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+        newest = re.search(r"^# Changes in ([\d.]+)", notes, re.M)
+
+        assert newest is not None
+        assert newest.group(1) == im_module.VERSION

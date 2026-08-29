@@ -1,15 +1,14 @@
 # instagram_monitor
 
-<p align="left">
-  <img src="https://img.shields.io/github/v/release/misiektoja/instagram_monitor?style=flat-square&color=blue" alt="GitHub Release" />
-  <img src="https://img.shields.io/pypi/v/instagram_monitor?style=flat-square&color=teal" alt="PyPI Version" />
-  <img src="https://img.shields.io/github/stars/misiektoja/instagram_monitor?style=flat-square&color=magenta" alt="GitHub Stars" />
-  <img src="https://img.shields.io/badge/python-3.9+-blueviolet?style=flat-square" alt="Python Versions" />
-  <img src="https://img.shields.io/docker/pulls/misiektoja/instagram-monitor?style=flat-square&logo=docker" alt="Docker Pulls" />
-  <img src="https://img.shields.io/github/license/misiektoja/instagram_monitor?style=flat-square&color=blue" alt="License" />
-  <img src="https://img.shields.io/github/last-commit/misiektoja/instagram_monitor?style=flat-square&color=green" alt="Last Commit" />
-  <img src="https://img.shields.io/badge/maintenance-active-brightgreen?style=flat-square" alt="Maintenance" />
-</p>
+[![GitHub Release](https://img.shields.io/github/v/release/misiektoja/instagram_monitor?style=flat-square&color=blue)](https://github.com/misiektoja/instagram_monitor/releases)
+[![PyPI Version](https://img.shields.io/pypi/v/instagram_monitor?style=flat-square&color=teal)](https://pypi.org/project/instagram-monitor/)
+[![GitHub Stars](https://img.shields.io/github/stars/misiektoja/instagram_monitor?style=flat-square&color=magenta)](https://github.com/misiektoja/instagram_monitor)
+[![Python Versions](https://img.shields.io/badge/python-3.9+-blueviolet?style=flat-square)](https://pypi.org/project/instagram-monitor/)
+[![Docker Pulls](https://img.shields.io/docker/pulls/misiektoja/instagram-monitor?style=flat-square&logo=docker)](https://hub.docker.com/r/misiektoja/instagram-monitor)
+[![License](https://img.shields.io/github/license/misiektoja/instagram_monitor?style=flat-square&color=blue)](https://github.com/misiektoja/instagram_monitor/blob/main/LICENSE)
+[![OpenSSF Scorecard](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.scorecard.dev%2Fprojects%2Fgithub.com%2Fmisiektoja%2Finstagram_monitor&query=%24.score&label=openssf%20scorecard&style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/misiektoja/instagram_monitor)
+[![Last Commit](https://img.shields.io/github/last-commit/misiektoja/instagram_monitor?style=flat-square&color=green)](https://github.com/misiektoja/instagram_monitor/commits/main)
+[![Maintenance](https://img.shields.io/badge/maintenance-active-brightgreen?style=flat-square)](https://github.com/misiektoja/instagram_monitor)
 
 Powerful, real-time OSINT suite for tracking every activity on Instagram - from story updates and bio changes to follower shifts, providing stunning dashboards and instant alerts to keep you in the loop.
 
@@ -124,6 +123,7 @@ For the manual single-file method, optional browser support and upgrade commands
 - **CSV Logging**: Log all activities and profile changes with timestamps.
 - **Flexible Config**: Support for files, dotenv and environment variables.
 - **Follower Churn**: Detailed tracking of exactly who followed or unfollowed.
+- **Follow Analysis**: Inspect mutual, not-following-back and fan relationships offline from saved lists with `--analyze-follows` or the Web Dashboard.
 - **Batched Fetching**: Throttle follower/following downloads into delayed batches.
 - **Remote Control**: Manage tracking features via signals or the web UI.
 - **Docker Ready**: Run via Docker Hub, Docker Compose or local image build with persisted config, dotenv and sessions.
@@ -175,6 +175,16 @@ Full documentation is available at **[misiektoja.github.io/instagram_monitor](ht
 
 See [RELEASE_NOTES.md](https://github.com/misiektoja/instagram_monitor/blob/main/RELEASE_NOTES.md) for details.
 
+<a id="contributing"></a>
+## Contributing
+
+Bug reports, documentation fixes and code contributions are welcome. See [CONTRIBUTING.md](https://github.com/misiektoja/instagram_monitor/blob/main/CONTRIBUTING.md) for the development setup, the checks CI enforces and what a change needs before it is merged. Participation is covered by the [Code of Conduct](https://github.com/misiektoja/instagram_monitor/blob/main/CODE_OF_CONDUCT.md).
+
+<a id="security"></a>
+## Security
+
+Report a suspected vulnerability privately through [GitHub security advisories](https://github.com/misiektoja/instagram_monitor/security/advisories/new), never as a public issue. [SECURITY.md](https://github.com/misiektoja/instagram_monitor/blob/main/SECURITY.md) covers the reporting process, the supported versions and the security posture of the Web Dashboard, stored secrets and monitored account data.
+
 <a id="maintainers"></a>
 ## Maintainers
 
@@ -184,4 +194,9 @@ See [RELEASE_NOTES.md](https://github.com/misiektoja/instagram_monitor/blob/main
 <a id="license"></a>
 ## License
 
-Licensed under GPLv3. See [LICENSE](https://github.com/misiektoja/instagram_monitor/blob/main/LICENSE).
+Licensed under GPLv3. See [LICENSE](https://github.com/misiektoja/instagram_monitor/blob/main/LICENSE). Dependency licenses are listed in [THIRD_PARTY_NOTICES.md](https://github.com/misiektoja/instagram_monitor/blob/main/THIRD_PARTY_NOTICES.md).
+
+<a id="support"></a>
+## Support
+
+If the project is useful to you, you can support its development through [GitHub Sponsors](https://github.com/sponsors/misiektoja) or [Buy Me a Coffee](https://buymeacoffee.com/misiektoja).

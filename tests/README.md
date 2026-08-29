@@ -31,17 +31,20 @@ installed copy of the package.
 | `test_privacy.py` | `apply_privacy_substitutions` (string/dict/list recursion, invalid entries) |
 | `test_notifications.py` | Webhook URL validation, Discord markdown escaping, credential masking, payload templating |
 | `test_webhook_delivery.py` | `send_webhook` payload formatting, gates and retry behavior with fake HTTP |
-| `test_paginated_fetching.py` | `fetch_usernames_paginated` batching, limits and stop-event behavior |
-| `test_dashboard_endpoints.py` | Web Dashboard status, settings, config, session and test-notification endpoints |
-| `test_detection_workflows.py` | Posts/reels count change notifications and leaked-collab notification workflows |
+| `test_paginated_fetching.py` | `fetch_usernames_paginated` batching, limits, completion state and stop-event behavior |
+| `test_dashboard_endpoints.py` | Web Dashboard status, strict atomic settings, private values, media access and isolation, target validation, monitor ownership, session signaling and test-notification endpoints |
+| `test_detection_workflows.py` | Posts/reels count change notifications, leaked-collab notification workflows and hostile email content |
 | `test_profile_picture_workflows.py` | Profile picture creation, removal, change notifications, CSV rows and file moves |
-| `test_story_workflows.py` | Startup story item CSV writing and dashboard update metadata with fake Instaloader data |
+| `test_story_workflows.py` | Startup story item CSV and dashboard metadata plus independent email/webhook gates and hostile story content |
+| `test_media_downloads.py` | Atomic media replacement, type validation, truncation, non-200 responses and download limits |
+| `test_request_scoping.py` | Instagram hostname classification, per-session jitter isolation and Instaloader copied sessions |
+| `test_session_import.py` | Firefox cookie-domain filtering and canonical session path discovery |
 | `test_scheduling.py` | `CHECK_POSTS_IN_HOURS_RANGE` window logic, next-check computation, cycle probability, interval randomization |
 | `test_session_flags.py` | Error classification and session/IP flag detection with a stubbed profile resolver |
 | `test_parsing_and_useragents.py` | JSON username extraction, follow-string formatting, desktop/mobile user-agent shape |
 | `test_csv_and_files.py` | CSV init/append and byte-wise image comparison |
 | `test_followers.py` | Follower/following diffing, webhook escaping, CSV side effects |
-| `test_documentation.py` | Semantic documentation contracts for commands, concepts and platform variants |
+| `test_documentation.py` | Semantic documentation contracts for commands, concepts and platform variants plus repository metadata: governance files, citation, funding, line endings, the declared editor style, the pinned linter and release integrity |
 | `test_packaging.py` | Wheel contents, installed console help/version and config generation |
 | `test_browser_e2e.py` | Real Chromium rendering, navigation and target creation against the local dashboard |
 
