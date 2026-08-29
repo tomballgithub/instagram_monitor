@@ -1,3 +1,13 @@
+# Jeoff's Items
+*.bak
+*.csv
+*.log
+*.txt
+*.json
+archive/
+_config_and_logs/
+new.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -216,7 +226,3 @@ tmp/
 *.csv
 *.env
 *Copy*.py
-
-# Jeoff
-new.py
-*.txt
