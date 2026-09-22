@@ -8,6 +8,8 @@ archive/
 _config_and_logs/
 new.py
 test.bat
+*.env
+*Copy*.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -223,7 +225,7 @@ tmp/
 .DS_Store
 *.DS_Store
 
-*.json
-*.csv
-*.env
-*Copy*.py
+# Local identity exposure ledger and circuit breaker state (never leaves the machine)
+instagram_monitor_exposure.json
+instagram_monitor_user_ids.json
+instagram_monitor_exposure.json.lock
