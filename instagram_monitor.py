@@ -14316,8 +14316,8 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
         is_private = profile.is_private
         followed_by_viewer = profile.followed_by_viewer
         can_view = (not is_private) or followed_by_viewer
-        posts_count = profile.mediacount
-        if not skip_session and can_view and FETCH_REELS not skip_getting_posts_details:
+        posts_count = profile.mediacount 
+        if not skip_session and can_view and FETCH_REELS and not skip_getting_posts_details:
             update_ui_data(targets={user: {'status': 'Fetching Reels'}})
             _thread_local.in_partial_line = True
             print("- fetching reels count...", end=" ", flush=True)
