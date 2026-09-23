@@ -1409,7 +1409,12 @@ def parse_config_content(content: str, filename: str = "<config>", retired_out=N
         if name not in allowed_names:
             raise ValueError(f"line {statement.lineno}: '{name}' is not a recognized setting")
         try:
-            parsed_values[name] = _normalized_config_value(name, ast.literal_eval(statement.value), template_defaults)
+            if isinstance(statement.value, ast.Name):
+                # it's a bare reference to another variable (allow assigning a name to another in .conf file #jmk)
+                raw_value = parsed_values.get(statement.value.id, statement.value.id)
+            else:
+                raw_value = ast.literal_eval(statement.value)
+            parsed_values[name] = _normalized_config_value(name, raw_value, template_defaults)
         except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
             raise ValueError(f"line {statement.lineno}: '{name}' must be a plain value such as text, a number, True, False, a list or a dictionary") from exc
     return parsed_values
