@@ -20967,7 +20967,6 @@ def run_main():
     else:
         summary_rows.append(StartupSummaryRow("HTTP backend", "Niquests" if USE_NIQUESTS else "Requests", concise=True))
 
-    summary_rows.append(StartupSummaryRow("HTTP backend", f"curl_cffi (impersonate: {_curl_cffi_impersonate_display()})" if _curl_cffi_backend_active() else "requests", concise=True))
     summary_rows.append(StartupSummaryRow("HTTP jitter/back-off", str(ENABLE_JITTER), concise=bool(ENABLE_JITTER)))
     summary_rows.append(StartupSummaryRow("Browser user agent", USER_AGENT))
     summary_rows.append(StartupSummaryRow("Mobile user agent", USER_AGENT_MOBILE))
