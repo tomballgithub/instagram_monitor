@@ -2,7 +2,7 @@
 *.bak
 *.csv
 *.log
-*.txt
+out.txt
 *.json
 archive/
 _config_and_logs/
