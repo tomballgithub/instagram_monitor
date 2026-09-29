@@ -43,7 +43,7 @@
 #!/usr/bin/env python3
 """
 Author: Michal Szymanski <misiektoja-github@rm-rf.ninja>
-v4.0.2
+v4.0.3
 
 OSINT tool implementing real-time tracking of Instagram users activities and profile changes:
 https://github.com/misiektoja/instagram_monitor/
@@ -67,7 +67,7 @@ rich (optional - for terminal dashboard)
 # keeps the supported Python floor enforceable regardless of where an import sits in the file
 from __future__ import annotations
 
-VERSION = "4.0.2"
+VERSION = "4.0.3"
 
 # ---------------------------
 # CONFIGURATION SECTION START
@@ -2344,6 +2344,7 @@ from requests.adapters import HTTPAdapter as _HTTPAdapter
 from requests.cookies import extract_cookies_to_jar as _extract_cookies_to_jar
 from requests.structures import CaseInsensitiveDict as _CaseInsensitiveDict
 from requests.utils import get_encoding_from_headers as _get_encoding_from_headers
+from urllib.parse import parse_qs as _parse_qs, urlsplit as _urlsplit
 
 try:
     from curl_cffi import requests as _curl_requests
@@ -2424,6 +2425,70 @@ def http_backend_display() -> str:
     return "requests (curl_cffi is not installed)" if str(HTTP_BACKEND).strip().lower() == "curl_cffi" else "requests"
 
 
+# Hosts serving Instagram's web app. curl_cffi's default headers describe a page typed into the address bar, so
+# requests to these hosts are given the headers the impersonated browser sends for the app's own requests
+INSTAGRAM_WEB_HOSTS = frozenset({"www.instagram.com", "instagram.com"})
+
+# Path prefixes of the endpoints the web app calls from an open page rather than loads as a page
+INSTAGRAM_WEB_API_PREFIXES = ("/api/", "/graphql", "/web/", "/ajax/")
+
+# Headers Instaloader adds that no browser sends or that contradict the impersonated one. The first two are HTTP/2
+# pseudo-headers copied as ordinary headers, and the other two would replace the browser's own values
+INSTALOADER_NON_BROWSER_HEADERS = frozenset({"authority", "scheme", "accept-encoding", "accept-language"})
+
+# First Chrome target curl_cffi sends a priority header for. Older targets send none, so none is set for them
+CHROME_PRIORITY_HEADER_MIN_VERSION = 124
+
+
+# Returns whether a request to Instagram's web app is a call the open page makes rather than a page load
+def is_instagram_web_api_request(path: str, query: str) -> bool:
+    return path.startswith(INSTAGRAM_WEB_API_PREFIXES) or "/ajax/" in path or _parse_qs(query).get("__a") == ["1"]
+
+
+# Returns whether a curl_cffi impersonation target sends Chrome's priority header
+def impersonates_chrome_priority(target: str) -> bool:
+    found = re.fullmatch(r"chrome(\d*)[a-z_]*", str(target or "").strip().lower())
+    if found is None:
+        return False
+    # The unversioned aliases follow the newest Chrome curl_cffi ships
+    return not found.group(1) or int(found.group(1)) >= CHROME_PRIORITY_HEADER_MIN_VERSION
+
+
+# Sets one header whatever the case of an existing entry, where None removes curl_cffi's default of that name
+def _replace_header(headers: Dict[str, Optional[str]], name: str, value: Optional[str]) -> None:
+    for key in [k for k in headers if k.lower() == name.lower()]:
+        del headers[key]
+    headers[name] = value
+
+
+# Returns the headers to hand curl_cffi for one request, matching what the impersonated browser sends Instagram's web app
+def curl_cffi_request_headers(method: str, url: str, headers: Any, has_body: bool, target: str) -> Dict[str, Optional[str]]:
+    result: Dict[str, Optional[str]] = dict(headers)
+    parts = _urlsplit(url)
+    if (parts.hostname or "").lower() not in INSTAGRAM_WEB_HOSTS:
+        return result
+
+    for key in [k for k in result if k.lower() in INSTALOADER_NON_BROWSER_HEADERS]:
+        del result[key]
+    if (method or "GET").upper() in ("GET", "HEAD") and not has_body:
+        # A browser sends no length on a read without a body, and no Origin on a same-origin read
+        for key in [k for k in result if k.lower() in ("content-length", "origin")]:
+            del result[key]
+    elif not any(k.lower() == "origin" for k in result):
+        result["Origin"] = f"{parts.scheme}://{parts.hostname}"
+
+    if is_instagram_web_api_request(parts.path, parts.query):
+        # The app's own requests, as fetch() sends them from an open instagram.com page
+        _replace_header(result, "Sec-Fetch-Site", "same-origin")
+        _replace_header(result, "Sec-Fetch-Mode", "cors")
+        _replace_header(result, "Sec-Fetch-Dest", "empty")
+        _replace_header(result, "Sec-Fetch-User", None)
+        _replace_header(result, "Upgrade-Insecure-Requests", None)
+        if impersonates_chrome_priority(target):
+            _replace_header(result, "priority", "u=1, i")
+    return result
+
+
 # Minimal urllib3-style raw wrapper exposing the read/stream surface requests and instaloader downloads rely on
 class _CurlCffiRaw:
     def __init__(self, body: bytes, header_pairs, status: int, reason: str):
@@ -2457,20 +2522,67 @@ class _CurlCffiRaw:
         return self._buffer.closed
 
 
+# One curl_cffi session kept for an Instagram session and the copies Instaloader makes of it, so its requests reuse
+# a connection as a browser's do rather than each opening a new TLS connection
+class _CurlCffiConnection:
+    # Starts without a curl_cffi session, which is opened by the first request
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._session: Any = None
+
+    # Sends one request over the kept session. Requests are serialized because a curl handle serves one thread at a time
+    def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        with self._lock:
+            if self._session is None:
+                self._session = _curl_requests.Session()  # type: ignore[union-attr]
+            return self._session.request(method, url, **kwargs)
+
+    # Closes the kept session and its connections, leaving the next request to open a new one
+    def close(self) -> None:
+        with self._lock:
+            session, self._session = self._session, None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
 # requests transport adapter that sends through curl_cffi browser impersonation when the backend is active
 class _CurlCffiHTTPAdapter(_HTTPAdapter):
+    # Starts with a connection of its own, or with the one of the session it was copied from
+    def __init__(self, connection: Optional[_CurlCffiConnection] = None) -> None:
+        super().__init__()
+        self._owns_connection = connection is None
+        self._connection = connection if connection is not None else _CurlCffiConnection()
+
+    # Returns an adapter for a copied session that shares this adapter's connection
+    def shared(self) -> "_CurlCffiHTTPAdapter":
+        return _CurlCffiHTTPAdapter(self._connection)
+
+    # Closes the adapter, keeping a shared connection open for the session that owns it
+    def close(self) -> None:
+        super().close()
+        # Instaloader closes each copy once one request is done, while the session it came from keeps working
+        if self._owns_connection:
+            self._connection.close()
+
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         if not _curl_cffi_backend_active():
             return super().send(request, stream=stream, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
         curl_proxies = proxies if proxies else None
-        headers = dict(request.headers)
+        target = _curl_cffi_impersonate_target()
+        url = request.url or ""
+        headers = curl_cffi_request_headers(request.method or "GET", url, request.headers, bool(request.body), target)
         # Never let the stock python-requests default UA ride on top of a browser TLS fingerprint
         # (an obvious mismatch); drop it so curl_cffi supplies its coherent impersonation UA instead
         for ua_key in [k for k in headers if k.lower() == "user-agent"]:
             if str(headers[ua_key]).lower().startswith("python-requests"):
                 del headers[ua_key]
         try:
-            curl_resp = _curl_requests.request(request.method or "GET", request.url, headers=headers, data=request.body, impersonate=_curl_cffi_impersonate_target(), proxies=curl_proxies, verify=verify, timeout=timeout, allow_redirects=False, stream=False)  # type: ignore
+            # Cookies come from the requests jar in the Cookie header. The kept curl_cffi session must not store its
+            # own, or it would send them beside that header and carry one session's cookies into the next
+            curl_resp = self._connection.request(request.method or "GET", url, headers=headers, data=request.body, impersonate=target, proxies=curl_proxies, verify=verify, timeout=timeout, allow_redirects=False, stream=False, discard_cookies=True)
         except _curl_exceptions.RequestException as err:  # type: ignore
             raise req.exceptions.ConnectionError(str(err), request=request) from err
         return self._build_response(request, curl_resp)
@@ -2547,6 +2659,10 @@ def _install_copy_session_proxy_patch() -> None:
             new.verify = getattr(session, "verify", True)
         except Exception:
             pass
+        # A copy made for one request keeps the connection of the session it came from, as a browser tab would
+        for prefix, adapter in list((getattr(session, "adapters", None) or {}).items()):
+            if isinstance(adapter, _CurlCffiHTTPAdapter):
+                new.mount(prefix, adapter.shared())
         wrapper = globals().get('ensure_instagram_session_wrapped')
         if callable(wrapper):
             wrapper(new)
