@@ -2926,55 +2926,19 @@ def _update_pbar_ncols(new_width):
         debug_print(f"* Error: Did not set active_pbar.ncols due to missing active_pbar")
 
 
-# -- Windows: event-driven resize via ReadConsoleInputW -----------------------
+# -- Windows: resize detection by polling (never touches the console input queue) --
 if sys.platform == 'win32':
-    import ctypes as _ctypes
-    import ctypes.wintypes as _wt
-
-    _kernel32 = _ctypes.windll.kernel32
-
-    _ENABLE_WINDOW_INPUT      = 0x0008
-    _WINDOW_BUFFER_SIZE_EVENT = 0x0004
-    _KEY_EVENT                = 0x0001
-
-    class _COORD(_ctypes.Structure):
-        _fields_ = [("X", _ctypes.c_short), ("Y", _ctypes.c_short)]
-
-    class _WINDOW_BUFFER_SIZE_RECORD(_ctypes.Structure):
-        _fields_ = [("dwSize", _COORD)]
-
-    class _EVENT_UNION(_ctypes.Union):
-        _fields_ = [
-            ("WindowBufferSizeEvent", _WINDOW_BUFFER_SIZE_RECORD),
-            ("_pad", _ctypes.c_byte * 18),
-        ]
-
-    class _INPUT_RECORD(_ctypes.Structure):
-        _fields_ = [
-            ("EventType", _wt.WORD),
-            ("Event",     _EVENT_UNION),
-        ]
-
     _resize_stop_event = threading.Event()
 
     def _win_resize_watcher():
-        handle = _kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
-        mode = _wt.DWORD()
-        _kernel32.GetConsoleMode(handle, _ctypes.byref(mode))
-        _kernel32.SetConsoleMode(handle, mode.value | _ENABLE_WINDOW_INPUT)
-        record   = _INPUT_RECORD()
-        num_read = _wt.DWORD(0)
-        while not _resize_stop_event.is_set():
-            ok = _kernel32.ReadConsoleInputW(
-                handle,
-                _ctypes.byref(record),
-                1,
-                _ctypes.byref(num_read),
-            )
-            if not ok or not num_read.value:
-                continue
-            if record.EventType == _WINDOW_BUFFER_SIZE_EVENT:
+        last_width = _get_actual_console_width()
+        while not _resize_stop_event.wait(0.25):
+            try:
                 new_width = _get_actual_console_width()
+            except Exception:
+                continue
+            if new_width != last_width:
+                last_width = new_width
                 debug_print(f"Terminal screen width change detected to {new_width} columns")
                 _update_pbar_ncols(new_width)
 
@@ -2984,7 +2948,6 @@ if sys.platform == 'win32':
         daemon=True,
     )
     _resize_thread.start()
-
 
 # ===========================
 # Web Dashboard Flask Server
