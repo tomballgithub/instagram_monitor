@@ -43,7 +43,7 @@
 #!/usr/bin/env python3
 """
 Author: Michal Szymanski <misiektoja-github@rm-rf.ninja>
-v4.0.3
+v4.1
 
 OSINT tool implementing real-time tracking of Instagram users activities and profile changes:
 https://github.com/misiektoja/instagram_monitor/
@@ -63,11 +63,11 @@ rich (optional - for terminal dashboard)
 """
 
 # This module imports typing and other names well below the first annotated definition, which on Python
-# 3.9 through 3.13 would evaluate those annotations before the names exist. Deferring annotation evaluation
+# 3.10 through 3.13 would evaluate those annotations before the names exist. Deferring annotation evaluation
 # keeps the supported Python floor enforceable regardless of where an import sits in the file
 from __future__ import annotations
 
-VERSION = "4.0.3"
+VERSION = "4.1"
 
 # ---------------------------
 # CONFIGURATION SECTION START
@@ -273,7 +273,8 @@ DOWNLOAD_THUMBNAILS = True
 PROFILE_PIC_FILE_EMPTY = "instagram_profile_pic_empty.jpg"
 
 # If you have 'imgcat' installed, you can set its path below to display profile pictures directly in your terminal
-# If you specify only the binary name, it will be auto-searched in your PATH
+# If you specify only the binary name, it will be auto-searched in your PATH (never in the current directory)
+# A config file found in the current directory may only name the command. A path set there is ignored
 # Leave empty to disable this feature
 IMGCAT_PATH = "imgcat"
 
@@ -1059,6 +1060,9 @@ CLI_CONFIG_PATH = None
 
 # Set when --config-file none switches discovery off, so no later lookup can find a file the run rejected
 CONFIG_DISCOVERY_DISABLED = False
+# True when the loaded config was picked up from the current directory rather than named with --config-file or kept
+# in the home or package directory. Anyone who can write that directory could have planted such a file
+CONFIG_DISCOVERED_IN_CWD = False
 
 # The settings a configuration file actually assigned, so a built-in default is never mistaken for a choice
 CONFIGURED_SETTING_NAMES = set()
@@ -1087,6 +1091,7 @@ DOCTOR_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#doctor-preflight"
 ACTION_BLOCK_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#instagram-says-try-again-later"
 ANONYMOUS_RATE_LIMIT_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#anonymous-runs-are-rate-limited"
 RETIRED_ENDPOINT_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#profile-lookups-report-a-retired-endpoint"
+ANONYMOUS_PROFILE_FALLBACK_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#anonymous-profile-http-400"
 SECRETS_GUIDE_URL = DOCS_BASE_URL + "/configuration/#storing-secrets"
 DIAGNOSTICS_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#choosing-the-right-logging-level"
 MONITORING_GUIDE_URL = DOCS_BASE_URL + "/usage/#monitoring-mode"
@@ -1217,7 +1222,7 @@ def read_secret_privately(hidden_prompt, prompt_text):
 signal.signal(signal.SIGINT, _startup_sigint_handler)
 
 # Oldest interpreter this tool supports, shared by the startup gate and the Doctor environment check
-MINIMUM_PYTHON_VERSION = (3, 9)
+MINIMUM_PYTHON_VERSION = (3, 10)
 MINIMUM_PYTHON_VERSION_TEXT = ".".join(str(part) for part in MINIMUM_PYTHON_VERSION)
 
 if sys.version_info[:2] < MINIMUM_PYTHON_VERSION:
@@ -1228,6 +1233,7 @@ if sys.version_info[:2] < MINIMUM_PYTHON_VERSION:
 
 import time
 import json
+import unicodedata
 import base64
 import os
 import tempfile
@@ -2136,13 +2142,15 @@ def _apply_instaloader_graphql_profile_patch() -> None:
         "enable_integrity_filters": True,
     }
 
-    def _patched_doc_id_graphql_query(self, doc_id, variables, referer=None):  # type: ignore[no-untyped-def]
+    # Rewrites the stale profile query and passes every other argument through, such as the web_api flag Instaloader
+    # 4.16 sends with each posts and reels page
+    def _patched_doc_id_graphql_query(self, doc_id, variables, *args, **kwargs):  # type: ignore[no-untyped-def]
         if str(doc_id) == stale_doc_id:
             doc_id = fixed_doc_id
             variables = {**(variables or {}), **extra_vars}
             if DEBUG_MODE:
                 debug_print("instaloader profile metadata doc_id patch fired (stale doc_id rewritten)")
-        return original(self, doc_id, variables, referer)
+        return original(self, doc_id, variables, *args, **kwargs)
 
     InstaloaderContext.doc_id_graphql_query = _patched_doc_id_graphql_query  # type: ignore[method-assign]
     _INSTALOADER_GRAPHQL_PROFILE_PATCH_APPLIED = True
@@ -2607,15 +2615,21 @@ class _CurlCffiHTTPAdapter(_HTTPAdapter):
         return response
 
 
-# Module-like proxy over `requests` that yields curl_cffi-mounted sessions while forwarding everything else
+# Module-like proxy over `requests` that yields curl_cffi-mounted sessions with the run's proxy and TLS settings
+# while forwarding everything else
 class _RequestsBackendShim:
     def __init__(self, real_requests):
         object.__setattr__(self, "_real_requests", real_requests)
 
+    # Returns a session that already carries the current proxy and TLS verification settings
     def Session(self, *args, **kwargs):
         session = self._real_requests.Session(*args, **kwargs)
         session.mount("https://", _CurlCffiHTTPAdapter())
         session.mount("http://", _CurlCffiHTTPAdapter())
+        # Instaloader builds a new session for each login, loaded session file and per-request copy. login() sends its
+        # page request and the password before it installs the session, so applying the settings later is too late
+        session.proxies.update(get_proxies())
+        session.verify = get_proxies_ssl()
         return session
 
     def __getattr__(self, name):
@@ -2672,13 +2686,70 @@ def _install_copy_session_proxy_patch() -> None:
     _ilc.copy_session = _patched_copy_session
 
 
+# Patches InstaloaderContext.get_anonymous_session so every session it builds carries the proxy, TLS-verify setting and request wrapper
+def _install_anonymous_session_proxy_patch() -> None:
+    try:
+        from instaloader.instaloadercontext import InstaloaderContext
+    except Exception:
+        return
+    original = getattr(InstaloaderContext, "get_anonymous_session", None)
+    if original is None or getattr(original, "_proxies_patched", False):
+        return
+
+    # Returns Instaloader's anonymous session with the settings this run applies to every Instagram session
+    def _patched_get_anonymous_session(self):
+        session = original(self)
+        # get_page_data, get_raw and head each build a new session that would otherwise go out without the proxy and
+        # leak the real IP. The settings are read on every call, so a proxy changed at runtime reaches the next session
+        get_proxies_fn = globals().get('get_proxies')
+        get_proxies_ssl_fn = globals().get('get_proxies_ssl')
+        if callable(get_proxies_fn) and callable(get_proxies_ssl_fn):
+            session.proxies.update(get_proxies_fn())
+            session.verify = get_proxies_ssl_fn()
+        wrapper = globals().get('ensure_instagram_session_wrapped')
+        if callable(wrapper):
+            wrapper(session)
+        return session
+
+    _patched_get_anonymous_session._proxies_patched = True  # type: ignore
+    InstaloaderContext.get_anonymous_session = _patched_get_anonymous_session  # type: ignore[method-assign]
+
+
+# Returns the context method extended to pass the session it installs through the request wrapper
+def _wrapping_installed_session(original):
+    # Runs the original method, then wraps the session it left in place. login()'s own requests go out before that,
+    # so login keeps Instaloader's pacing and errors and gets the proxy from the session factory instead
+    def _patched(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        ensure_instagram_session_wrapped(self._session)
+        return result
+
+    _patched._session_wrapper_patched = True  # type: ignore
+    return _patched
+
+
+# Patches the InstaloaderContext methods that replace the signed-in session, so the new session passes the request wrapper
+def _install_signed_in_session_wrapper_patch() -> None:
+    try:
+        from instaloader.instaloadercontext import InstaloaderContext
+    except Exception:
+        return
+    for name in ("load_session", "login", "two_factor_login"):
+        original = getattr(InstaloaderContext, name, None)
+        if original is not None and not getattr(original, "_session_wrapper_patched", False):
+            setattr(InstaloaderContext, name, _wrapping_installed_session(original))
+
+
 _install_http_backend()
 _install_copy_session_proxy_patch()
+_install_anonymous_session_proxy_patch()
+_install_signed_in_session_wrapper_patch()
 
 from instaloader.exceptions import PrivateProfileNotFollowedException
 from html import escape, unescape
+from html.parser import HTMLParser
 from itertools import islice
-from typing import Optional, Sequence, Tuple, Any, Callable, Dict, List, TypeVar, cast
+from typing import Optional, Sequence, Set, Tuple, Any, Callable, Dict, List, TypeVar, cast
 from glob import glob
 import sqlite3
 from sqlite3 import OperationalError, connect
@@ -4083,8 +4154,11 @@ def create_web_dashboard_app():
             # reach an arbitrary file. The --cookie-file flag remains available for deliberate local use
             if browser == 'firefox':
                 cookiefile = resolve_offered_firefox_cookiefile(cookiefile)
-            elif profile:
-                profile = resolve_chromium_profile(browser, profile)
+            else:
+                # A Chromium import reads the enumerated profile's own database and never a submitted path
+                cookiefile = None
+                if profile:
+                    profile = resolve_chromium_profile(browser, profile)
             username = normalize_instagram_username(import_browser_session_dashboard(browser, cookiefile, profile=profile))
         except CookieImportError as e:
             # CookieImportError messages are authored operational guidance for the local dashboard user
@@ -7415,15 +7489,10 @@ TPrivacyContent = TypeVar("TPrivacyContent")
 
 # Apply PRIVACY_SUBSTITUTIONS to any content type
 def apply_privacy_substitutions(content: TPrivacyContent) -> TPrivacyContent:
-    """
-    - Recurses into dict values and list items
-    - For strings, performs search/replace using PRIVACY_SUBSTITUTIONS
-    - Preserves dict keys so JSON and object keys stay stable for API
-      consumers. Callers that display a key (e.g. terminal target tables)
-      must substitute it explicitly at the point of display
-    - Ignores invalid substitution entries to avoid runtime crashes
-    - Non-string primitives are returned unchanged
-    """
+    """Substitute strings in dictionary values and list items.
+
+    Dictionary keys stay unchanged for API consumers. Substitute displayed keys
+    at the display boundary. Invalid substitution entries are ignored."""
     global PRIVACY_SUBSTITUTIONS_INVALID_WARNED
     if not PRIVACY_SUBSTITUTIONS:
         return content
@@ -7467,7 +7536,7 @@ def print_red(text, invert=False):
     SKIP_COLOR = False
     
 
-# Debug print helper - only prints if DEBUG_MODE is enabled
+# Formats an operation and its available diagnostic fields
 def format_diagnostic_line(operation, fields):
     rendered = ", ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
     return f"{operation}: {rendered}" if rendered else str(operation)
@@ -8214,6 +8283,45 @@ def compare_images(file1, file2):
         return False
 
 
+# Returns the (width, height) of a JPEG file from its frame header or None for anything this reader cannot parse
+def jpeg_dimensions(path) -> Optional[Tuple[int, int]]:
+    try:
+        with open(path, 'rb') as handle:
+            data = handle.read(MEDIA_DOWNLOAD_MAX_BYTES)
+    except OSError:
+        return None
+    if data[:2] != b"\xff\xd8":
+        return None
+    index = 2
+    while index + 4 <= len(data):
+        if data[index] != 0xFF:
+            return None
+        marker = data[index + 1]
+        if marker == 0xFF:
+            index += 1
+            continue
+        if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        # Start-of-frame markers carry the size. 0xC4, 0xC8 and 0xCC share the range but are tables
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            if index + 9 > len(data):
+                return None
+            return int.from_bytes(data[index + 7:index + 9], "big"), int.from_bytes(data[index + 5:index + 7], "big")
+        length = int.from_bytes(data[index + 2:index + 4], "big")
+        if length < 2:
+            return None
+        index += 2 + length
+    return None
+
+
+# Reports whether two saved profile pictures differ only in size. A source switch, such as the public embed after a
+# signed-in run, serves the same picture at another size
+def profile_picture_resized(previous_file, current_file) -> bool:
+    previous, current = jpeg_dimensions(previous_file), jpeg_dimensions(current_file)
+    return previous is not None and current is not None and previous != current
+
+
 # Detects changed Instagram profile pictures
 def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, profile_pic_file_tmp, profile_pic_file_old, profile_pic_file_empty, csv_file_name, r_sleep_time, send_email_notification, func_ver):
 
@@ -8283,7 +8391,21 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
                 is_empty_profile_pic = compare_images(profile_pic_file, profile_pic_file_empty)
 
             debug_print("Comparing current profile picture with downloaded temporary one...")
-            if not compare_images(profile_pic_file, profile_pic_file_tmp) and profile_pic_mdate_dt != profile_pic_tmp_mdate_dt:
+            picture_differs = not compare_images(profile_pic_file, profile_pic_file_tmp) and profile_pic_mdate_dt != profile_pic_tmp_mdate_dt
+            # The same picture served at another size after a source switch becomes the new baseline without an alert.
+            # Neither file may be the empty template, so setting or removing a picture is still reported
+            if picture_differs and not is_empty_profile_pic and not (profile_pic_file_empty and compare_images(profile_pic_file_tmp, profile_pic_file_empty)) and profile_picture_resized(profile_pic_file, profile_pic_file_tmp):
+                try:
+                    os.replace(profile_pic_file_tmp, profile_pic_file)
+                    print(f"* Profile picture of user {user} is now served at a different size, saved as the new baseline{new_line}")
+                    log_activity("Profile picture size changed, saved as the new baseline", user=user, level='system')
+                except Exception as e:
+                    print_recovery_error(e, context="file_write", summary=f"Error while replacing/copying files: {e}")
+                if func_ver == 2:
+                    print(f"\nCheck interval:\t\t\t\t{check_window_text()}")
+                    print_cur_ts()
+
+            elif picture_differs:
                 if profile_pic_file_empty and os.path.isfile(profile_pic_file_empty):
                     is_empty_profile_pic_tmp = compare_images(profile_pic_file_tmp, profile_pic_file_empty)
 
@@ -8394,9 +8516,265 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
             print_cur_ts(newline=True)
 
 
-# Builds a Profile object from the mobile web_profile_info response
+# How long one public snapshot serves every lookup in the same check, so profile, latest-post and collab reads share it
+PUBLIC_WEB_SNAPSHOT_SECONDS = 30
+
+# How long the public profile page is skipped after it fails, since a login wall on one address usually stays up
+PUBLIC_PAGE_RETRY_SECONDS = 6 * 3600
+
+# Largest public embed reply accepted, far above a real one, so only a broken or hostile reply is refused
+PUBLIC_EMBED_MAX_BYTES = 4 * 1024 * 1024
+
+
+# Collects inert script text; only JSON values inside it are read, never JavaScript.
+class _PublicEmbedScripts(HTMLParser):
+    # Starts a bounded document's script collection.
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.scripts = []
+        self.parts = None
+
+    # Starts collecting text at a script element.
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self.parts = []
+
+    # Keeps script text without interpreting markup or executable expressions.
+    def handle_data(self, data):
+        if self.parts is not None:
+            self.parts.append(data)
+
+    # Completes one script for subsequent JSON decoding.
+    def handle_endtag(self, tag):
+        if tag == "script" and self.parts is not None:
+            self.scripts.append("".join(self.parts))
+            self.parts = None
+
+
+# Validates one embed profile and returns it in the web_profile_info shape. Collab posts owned by a partner appear on
+# the target's grid too, so they are kept, while at least one public post owned by the target proves the account
+def _public_embed_profile(username: str, value: Dict[str, Any]) -> Dict[str, Any]:
+    identifier = str(value.get("owner_id", ""))
+    count = value.get("posts_count")
+    followers = value.get("followers_count")
+    if not identifier.isdigit() or type(count) is not int or count < 0 or (followers is not None and (type(followers) is not int or followers < 0)):
+        raise ValueError("invalid profile counts or id")
+    nodes = []
+    owns_public_post = False
+    for entry in value["graphql_media"]:
+        node = entry.get("shortcode_media") if isinstance(entry, dict) else None
+        if not isinstance(node, dict):
+            raise ValueError("invalid media node")
+        if (type(node.get("taken_at_timestamp")) is not int or node["taken_at_timestamp"] <= 0
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", str(node.get("shortcode", "")))
+                or not isinstance(node.get("display_url"), str) or not node["display_url"]):
+            raise ValueError("invalid media metadata")
+        owner = node.get("owner")
+        if not isinstance(owner, dict):
+            owner = {}
+        if str(owner.get("id")) == identifier and str(owner.get("username", "")).lower() == username:
+            if owner.get("is_private") is not False:
+                raise ValueError("the account is not public")
+            owns_public_post = True
+        nodes.append({"node": node})
+    # An embed without a public post of the target's own cannot prove the account is public and must not erase a baseline
+    if not owns_public_post:
+        raise ValueError("no public post owned by the account")
+    picture = value.get("profile_pic_url")
+    picture = picture if isinstance(picture, str) and picture else None
+    return {"id": identifier, "pk": identifier, "username": username,
+            "full_name": value.get("full_name") or "", "is_private": False, "followed_by_viewer": False,
+            "profile_pic_url": picture, "profile_pic_url_hd": picture,
+            "edge_followed_by": {"count": followers}, "edge_follow": {"count": None},
+            "biography": None, "_public_web": "embed",
+            "edge_owner_to_timeline_media": {"count": count, "edges": nodes}}
+
+
+# Reads a matching public profile from embedded JSON with bounded input and traversal.
+def _parse_public_embed(username: str, html: str) -> Dict[str, Any]:
+    if len(html) > PUBLIC_EMBED_MAX_BYTES:
+        raise RuntimeError(f"Public embed fallback failed for {username}: the reply is too large")
+    parser = _PublicEmbedScripts()
+    parser.feed(html)
+    decoder = json.JSONDecoder()
+    pending = []
+    try:
+        for script in parser.scripts:
+            try:
+                pending.append(json.loads(script))
+            except ValueError:
+                pass
+            for match in re.finditer(r"\.handle\(\s*", script):
+                try:
+                    value, _ = decoder.raw_decode(script, match.end())
+                    pending.append(value)
+                except ValueError:
+                    continue
+
+        for _ in range(100000):
+            if not pending:
+                break
+            value = pending.pop()
+            if isinstance(value, str) and '"graphql_media"' in value:
+                try:
+                    pending.append(json.loads(value))
+                except ValueError:
+                    pass
+            elif isinstance(value, list):
+                pending.extend(value)
+            elif isinstance(value, dict):
+                if str(value.get("username", "")).lower() == username and isinstance(value.get("graphql_media"), list):
+                    return _public_embed_profile(username, value)
+                pending.extend(value.values())
+    except (ValueError, TypeError, AttributeError, RecursionError) as error:
+        raise RuntimeError(f"Public embed fallback failed for {username}: the embed holds invalid profile data ({error})") from error
+    raise RuntimeError(f"Public embed fallback failed for {username}: the embed holds no public profile data")
+
+
+# Fetches the public embed using the same anonymous session, transport, proxy, TLS and pacing as normal requests.
+def _fetch_public_embed(bot: instaloader.Instaloader, username: str) -> Dict[str, Any]:
+    ctx = bot.context
+    ctx.do_sleep()
+    ctx._rate_controller.wait_before_query("other")
+    session = ctx._session
+    ensure_instagram_session_wrapped(session)
+    response = session.get(f"https://www.instagram.com/{username}/embed/", allow_redirects=False,
+                           timeout=ctx.request_timeout, proxies=get_proxies(), verify=get_proxies_ssl(),
+                           headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+                                    "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1"})
+    try:
+        if response.status_code != 200:
+            raise RuntimeError(f"Public embed fallback failed for {username}: HTTP {response.status_code}")
+        declared = str(response.headers.get("content-length") or "")
+        if declared.isdigit() and int(declared) > PUBLIC_EMBED_MAX_BYTES:
+            raise RuntimeError(f"Public embed fallback failed for {username}: the reply is too large")
+        return _parse_public_embed(username, response.text)
+    finally:
+        response.close()
+
+
+# Reads the following count and biography the embed lacks from the public profile page. Nothing else is taken from
+# the page, since its follower count can be rounded and it carries no post count. Returns None when the page has neither
+def _public_page_details(bot: instaloader.Instaloader, username: str, identifier: str) -> Optional[Dict[str, Any]]:
+    ctx = bot.context
+    if not callable(getattr(ctx, "get_page_data", None)):
+        return None  # Instaloader before 4.15.4 has no page reader
+    user: Dict[str, Any] = {}
+    for query in ctx.get_page_data(f"{username}/") or []:
+        value = query.get("xig_user_by_username") if isinstance(query, dict) else None
+        if isinstance(value, dict):
+            user.update(value)
+    # The page's 'id' is an opaque query id, so the account is matched on 'pk' against the embed's owner id
+    if str(user.get("username", "")).lower() != username or str(user.get("pk", "")) != identifier or user.get("is_private") is not False:
+        return None
+    details: Dict[str, Any] = {}
+    following = user.get("following_count")
+    if type(following) is int and following >= 0:
+        details["following"] = following
+    if isinstance(user.get("biography"), str):
+        details["biography"] = user["biography"]
+    return details or None
+
+
+# Adds the page's following count and biography to an embed snapshot. The page is optional, so a login wall, a limit
+# or any other failure leaves both fields unknown and skips the page for a while instead of failing the check
+def _add_public_page_details(bot: instaloader.Instaloader, username: str, user: Dict[str, Any], target: Dict[str, Any]) -> None:
+    if time.monotonic() < target["page_retry_at"]:
+        return
+    try:
+        details = _public_page_details(bot, username, user["id"])
+    except Exception as error:
+        details = None
+        debug_print("Public profile page", user=username, outcome="failed", error=format_error_message(error))
+    if details is None:
+        target["page_retry_at"] = time.monotonic() + PUBLIC_PAGE_RETRY_SECONDS
+        debug_print("Public profile page", user=username, outcome="skipped", retry_in=display_time(PUBLIC_PAGE_RETRY_SECONDS))
+        return
+    if "following" in details:
+        user["edge_follow"] = {"count": details["following"]}
+    if "biography" in details:
+        user["biography"] = details["biography"]
+
+
+# Returns the per-target fallback state this client keeps, created on first use
+def _public_web_targets(ctx) -> Dict[str, Dict[str, Any]]:
+    targets = getattr(ctx, "_monitor_anonymous_web", None)
+    if not isinstance(targets, dict):
+        targets = {}
+        ctx._monitor_anonymous_web = targets
+    return targets
+
+
+# Tells the operator once per run and target that the profile is read from its public pages and what that costs
+def _announce_public_web_fallback(username: str) -> None:
+    message = f"Profile lookup for {username} answered HTTP 400, reading its public embed and profile page instead (recent posts only, following count and bio only when the page allows)"
+    # The notice can arrive while a progress line is still open, so it starts on a line of its own
+    if getattr(_thread_local, 'in_partial_line', False):
+        print()
+        _thread_local.in_partial_line = False
+    print(f"* {message}")
+    log_activity(message, user=username, level='system')
+
+
+# Reads one fresh snapshot for a target on the fallback: the embed as the base and the page for what the embed lacks
+def _public_web_snapshot(bot: instaloader.Instaloader, username: str, target: Dict[str, Any]) -> Dict[str, Any]:
+    user = _fetch_public_embed(bot, username)
+    _add_public_page_details(bot, username, user, target)
+    data = {"data": {"user": user}}
+    target["data"] = data
+    target["fetched_at"] = time.monotonic()
+    return data
+
+
+# Keeps healthy and signed-in requests unchanged. An anonymous HTTP 400 moves the target onto its public embed and
+# profile page for the rest of the run, even when they fail, so later checks never repeat the refused request.
+# 401, 429 and every other failure propagate without another request
+def _anonymous_profile_info(bot: instaloader.Instaloader, username: str) -> Dict[str, Any]:
+    username = normalize_instagram_username(username)
+    ctx = bot.context
+    path = f"api/v1/users/web_profile_info/?username={username}"
+    if ctx.is_logged_in:
+        return ctx.get_iphone_json(path, {})
+    targets = _public_web_targets(ctx)
+    target = targets.get(username)
+    if target is None:
+        try:
+            return ctx.get_iphone_json(path, {})
+        except instaloader.exceptions.QueryReturnedBadRequestException:
+            target = {"data": None, "fetched_at": 0.0, "page_retry_at": 0.0}
+            targets[username] = target
+        _announce_public_web_fallback(username)
+    elif target["data"] is not None and time.monotonic() - target["fetched_at"] < PUBLIC_WEB_SNAPSHOT_SECONDS:
+        return target["data"]
+    return _public_web_snapshot(bot, username, target)
+
+
+# Prevents missing embed and page attributes from lazily querying the failing API again.
+class _AnonymousWebProfile(instaloader.Profile):
+    # Returns known snapshot metadata or None, without starting another request.
+    def _metadata(self, *keys):
+        value = self._node
+        for key in keys:
+            if not isinstance(value, dict) or key not in value:
+                return None
+            value = value[key]
+        return value
+
+    # Treats the snapshot as complete, so a method that loads metadata directly cannot reach the failing API either.
+    def _obtain_metadata(self):
+        self._has_full_metadata = True
+
+    # Unicode-normalizes a known biography and returns None for an unavailable one, which the base property's type omits.
+    @property
+    def biography(self):  # type: ignore[reportIncompatibleMethodOverride]
+        value = self._node.get("biography")
+        return unicodedata.normalize("NFC", value) if isinstance(value, str) else None
+
+
+# Builds a Profile object from web_profile_info or from the public snapshot that replaces it after an anonymous HTTP 400
 def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) -> Optional[instaloader.Profile]:
-    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={username}", {})
+    data = _anonymous_profile_info(bot, username)
     if not isinstance(data, dict):
         return None
 
@@ -8414,7 +8792,8 @@ def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) 
     if "id" not in normalized and "pk" not in normalized:
         return None
 
-    return instaloader.Profile(bot.context, normalized)
+    profile_class = _AnonymousWebProfile if normalized.get("_public_web") else instaloader.Profile
+    return profile_class(bot.context, normalized)
 
 
 # Numeric user ids already resolved, so a monitored target is looked up once rather than once a cycle. They survive
@@ -8424,6 +8803,9 @@ USER_ID_CACHE_LOCK = threading.Lock()
 USER_ID_CACHE_FILENAME = "instagram_monitor_user_ids.json"
 USER_ID_CACHE_VERSION = 1
 USER_ID_CACHE_LOADED = False
+# Set once the search path answers HTTP 404, which Instagram sent signed-in sessions by late October 2026, so the
+# rest of the run resolves names through profile pages without spending a request on the retired path
+USER_SEARCH_RETIRED = False
 
 
 # Returns the path of the file holding resolved user ids
@@ -8503,9 +8885,25 @@ def forget_user_id(username: str) -> None:
 
 
 # Returns the numeric user id Instagram's search reports for a username, or None when the search does not list that
-# exact account. Search answers with near matches too, so only the name that was asked for is accepted
+# exact account or the path is retired. Search answers with near matches too, so only the name that was asked for is
+# accepted
 def user_id_from_search(ctx, username: str) -> Optional[str]:
-    data = ctx.get_json("web/search/topsearch/", {'context': 'blended', 'query': username, 'include_reel': False})
+    global USER_SEARCH_RETIRED
+    if USER_SEARCH_RETIRED:
+        return None
+    # Asked once, since Instaloader would retry a 404 that answers the same every time. Each client is used by a
+    # single thread, so lowering its limit for this request affects no other request
+    attempts = ctx.max_connection_attempts
+    ctx.max_connection_attempts = 1
+    try:
+        data = ctx.get_json("web/search/topsearch/", {'context': 'blended', 'query': username, 'include_reel': False})
+    except instaloader.exceptions.QueryReturnedNotFoundException:
+        # A 404 means the path is gone rather than the account. Every later name would get the same answer
+        USER_SEARCH_RETIRED = True
+        debug_print("Instagram search answered HTTP 404, resolving user ids from profile pages for the rest of this run")
+        return None
+    finally:
+        ctx.max_connection_attempts = attempts
     wanted = username.strip().lower()
     for entry in (data.get('users') or []) if isinstance(data, dict) else []:
         user = entry.get('user') if isinstance(entry, dict) else None
@@ -8562,8 +8960,9 @@ def _profile_by_user_id(ctx, username: str, user_id: str) -> Optional[instaloade
 
 
 # Resolves a profile by username. Instagram retired web_profile_info for accounts that are signed in, answering
-# feedback_required however healthy the account is, so a signed-in run resolves the id through search and reads the
-# profile with the GraphQL query Instaloader already uses. Anonymous runs keep the mobile endpoint, which still works
+# feedback_required however healthy the account is, so a signed-in run resolves the id through search or the public
+# profile page and reads the profile with the GraphQL query Instaloader already uses. Anonymous runs keep the mobile
+# endpoint and switch a target to its public embed and profile page when that endpoint answers HTTP 400
 def profile_from_username_resilient(bot: instaloader.Instaloader, username: str) -> instaloader.Profile:
     ctx = bot.context
     if not ctx.is_logged_in:
@@ -8572,23 +8971,36 @@ def profile_from_username_resilient(bot: instaloader.Instaloader, username: str)
             return fallback_profile
         return instaloader.Profile.from_username(ctx, username)
 
+    # Ids already read in this lookup that answered to another name, so none is read twice
+    tried: Set[str] = set()
     user_id = resolve_user_id(ctx, username)
     if user_id is not None:
+        tried.add(user_id)
         profile = _profile_by_user_id(ctx, username, user_id)
         if profile is not None:
             return profile
         # The id answers to another name now, so it is dropped and the name looked up again
         forget_user_id(username)
         refreshed = user_id_from_search(ctx, username.strip().lower())
-        if refreshed is not None and refreshed != user_id:
+        if refreshed is not None and refreshed not in tried:
+            tried.add(refreshed)
             remember_user_id(username, refreshed)
             profile = _profile_by_user_id(ctx, username, refreshed)
             if profile is not None:
                 return profile
 
-    # Search does not list every account, so the retired endpoint stays as the last resort. Its refusal is
-    # classified as an endpoint failure, which is why reaching it cannot stop the session account
-    return instaloader.Profile.from_username(ctx, username)
+    # Search is retired or does not list the account, so Instaloader reads the public profile page as a logged-out
+    # visitor through the configured proxy. A missing target raises ProfileNotExistsException there. The page names
+    # the id, which is then read over GraphQL with the session like any other, so session probes through this lookup
+    # still make a signed-in request. The id is kept so later checks skip both lookups
+    page_profile = instaloader.Profile.from_username(ctx, username)
+    page_id = str(page_profile.userid)
+    if page_id not in tried:
+        profile = _profile_by_user_id(ctx, username, page_id)
+        if profile is not None:
+            remember_user_id(username, page_id)
+            return profile
+    return page_profile
 
 
 # Return the most recent post and/or reel for the user (GraphQL helper when logged in)
@@ -8629,7 +9041,7 @@ def latest_post_mobile(user: str, bot: instaloader.Instaloader):
         video_url: Optional[str]
         mediaid: str
 
-    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={user}", {})
+    data = _anonymous_profile_info(bot, user)
 
     if not isinstance(data, dict):
         raise RuntimeError(f"Instagram returned unexpected response type: {type(data).__name__}")
@@ -8713,7 +9125,7 @@ def _extract_collaborators(node: Dict[str, Any], owner_username: str = "") -> Li
 
 # Returns posts leaking from a private account's timeline media via web_profile_info (collab posts shared with public accounts)
 def fetch_leaked_collab_posts(user: str, bot: instaloader.Instaloader) -> List[Dict[str, Any]]:
-    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={user}", {})
+    data = _anonymous_profile_info(bot, user)
     if not isinstance(data, dict):
         return []
     raw = data.get("data")
@@ -9015,9 +9427,7 @@ def get_post_location_mobile(last_post: instaloader.Post, bot: instaloader.Insta
 # Returns the true shortcode for the user's latest Reel via the mobile-web_profile_info endpoint
 def get_real_reel_code(bot: instaloader.Instaloader, username: str) -> Optional[str]:
     try:
-        ctx: Any = bot.context  # type: ignore
-
-        data = ctx.get_iphone_json(f"api/v1/users/web_profile_info/?username={username}", {})
+        data = _anonymous_profile_info(bot, username)
 
         if isinstance(data, dict) and data.get("status") == "fail":
             debug_print("Reel code lookup", user=username, outcome="failed", error=f"Instagram API error: {data.get('message', 'unknown')}")
@@ -9679,13 +10089,7 @@ def argparse_color_kwargs() -> dict[str, Any]:
 
 # Finds an optional config file
 def find_config_file(cli_path=None):
-    """
-    Search for an optional config file in:
-      1) CLI-provided path (must exist if given)
-      2) ./{DEFAULT_CONFIG_FILENAME}
-      3) ~/.{DEFAULT_CONFIG_FILENAME}
-      4) script-directory/{DEFAULT_CONFIG_FILENAME}
-    """
+    """Return the first config file, without fallback for a missing explicit path."""
 
     if cli_path:
         p = Path(os.path.expanduser(cli_path))
@@ -9799,15 +10203,40 @@ def load_config_file(config_path, namespace=None, error_out=None, report_errors=
         return reject(f"* Error loading config file '{config_path}': {exc}", (), "A config file may only assign settings, such as INSTA_CHECK_INTERVAL = 5400. It cannot import modules, call functions or run other code. Regenerate a clean config with 'instagram_monitor --generate-config instagram_monitor.conf' or 'instagram_monitor --setup'")
 
 
-# Resolves an executable path by checking if it's a valid file or searching in $PATH
+# Tells whether a program setting names a file by path rather than a command looked up on PATH
+def names_program_by_path(value) -> bool:
+    text = str(value or "")
+    return text.startswith("~") or os.sep in text or bool(os.altsep and os.altsep in text)
+
+
+# Tells whether a config path is the candidate find_config_file() takes from the current directory
+def config_path_is_in_cwd(config_path) -> bool:
+    try:
+        return Path(config_path).resolve() == (Path.cwd() / DEFAULT_CONFIG_FILENAME).resolve()
+    except OSError:
+        return False
+
+
+# Explains why a program path set by a config found in the current directory is not used
+def imgcat_path_ignored_summary(value, config_path) -> str:
+    return f"IMGCAT_PATH '{value}' is ignored because '{config_path}' was found in the current directory, where it may only name a command on PATH"
+
+
+IMGCAT_PATH_IGNORED_FIX = "Use the command name so it is looked up on PATH, pass the file with --config-file or move it to ~/.instagram_monitor.conf"
+
+
+# Resolves a program setting to an executable. A path must be an executable file. A bare name is looked up on PATH
+# only and never taken from the current directory, which Windows searches by default and which others may write
 def resolve_executable(path):
-    if os.path.isfile(path) and os.access(path, os.X_OK):
-        return path
-
-    found = shutil.which(path)
-    if found:
+    text = str(path)
+    if names_program_by_path(text):
+        candidate = os.path.expanduser(text)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        raise FileNotFoundError(f"Could not find executable '{path}'")
+    found = shutil.which(text)
+    if found and os.path.normcase(os.path.dirname(os.path.abspath(found))) != os.path.normcase(os.getcwd()):
         return found
-
     raise FileNotFoundError(f"Could not find executable '{path}'")
 
 
@@ -11508,6 +11937,7 @@ def session_recovery_browser_hint() -> str:
 # Ordered match terms for every recognized failure, shared by the message and the failure-class lookups so the two cannot drift
 FAILURE_TERMS = {
     'rate_limit': ("429", "too many requests", "wait a few minutes", "rate limit", "please wait"),
+    'public_fallback': ("public embed fallback failed",),
     'endpoint_retired': RETIRED_ENDPOINT_TERMS,
     'action_block': ("feedback_required",),
     'challenge': ("challenge", "checkpoint", "automated", "shadow ban", "shadowban", "missing expected data"),
@@ -11522,7 +11952,7 @@ FAILURE_TERMS = {
 }
 
 # Evaluation order of FAILURE_TERMS, matching the branch order in classify_error_parts
-FAILURE_CLASS_ORDER = ('rate_limit', 'endpoint_retired', 'action_block', 'challenge', 'session_missing', 'auth_expired', 'target_unavailable', 'impersonate_unsupported', 'proxy_unresolved', 'dns_failure', 'network', 'schema_change')
+FAILURE_CLASS_ORDER = ('rate_limit', 'public_fallback', 'endpoint_retired', 'action_block', 'challenge', 'session_missing', 'auth_expired', 'target_unavailable', 'impersonate_unsupported', 'proxy_unresolved', 'dns_failure', 'network', 'schema_change')
 
 # Reliability group each failure class belongs to: A blocks the transport, B breaks on an Instagram API change, C acts against the session account
 FAILURE_CLASS_GROUPS = {
@@ -11586,6 +12016,7 @@ def is_account_level_failure(failure_class: str) -> bool:
 # Every recovery category the tool can report, kept closed so a message is testable, deduplicable and translatable later
 RECOVERY_CODES = frozenset({
     "instagram.rate_limited", "instagram.endpoint_retired", "instagram.action_blocked", "instagram.challenge", "instagram.empty_data", "instagram.browser_dialog",
+    "instagram.public_fallback_failed",
     "session.missing", "session.expired",
     "target.missing", "target.not_found",
     "config.missing", "config.invalid", "config.insecure", "config.impersonate_unsupported",
@@ -11844,6 +12275,11 @@ def classify_error_parts(error_msg: str, is_logged_in: bool = False) -> Tuple[st
         if not is_logged_in:
             return "instagram.rate_limited", "Instagram is rate-limiting anonymous requests from this IP", "Instagram is rate-limiting anonymous requests from this IP address, which counts everything behind it and is often hit on the very first request. Wait for it to pass or use another address. A session login is limited per account instead, so importing one usually works from here", ANONYMOUS_RATE_LIMIT_GUIDE_URL, True
         return "instagram.rate_limited", "Instagram is rate-limiting this account or IP", "Instagram is rate-limiting you. Raise INSTA_CHECK_INTERVAL and set ENABLE_JITTER = True in the configuration file, then restart and monitor fewer users. To use command-line settings instead, include --check-interval SECONDS --enable-jitter on each run", ANTI_DETECTION_INTERVAL_GUIDE_URL, True
+
+    # A target whose anonymous profile lookup Instagram refuses with HTTP 400 is read from its public embed. When that
+    # fails too, the embed's status describes an IP limit or a private account, never the session it does not use
+    if any(t in m for t in FAILURE_TERMS['public_fallback']):
+        return "instagram.public_fallback_failed", "Instagram refuses this profile's lookup and its public embed could not be read", f"Instagram answers HTTP 400 to the anonymous profile lookup for this account, so the tool reads its public embed instead, and that failed too. HTTP 401 or a login redirect on the embed is usually a limit on this IP address that passes with time. A private account has no public embed, so it can only be monitored with a session. Importing one with '{session_recovery_command()}'{session_recovery_browser_hint()} reads profiles another way", ANONYMOUS_PROFILE_FALLBACK_GUIDE_URL, True
 
     # An endpoint Instagram retired answers feedback_required whatever the account is doing, so its reply describes
     # the endpoint. Reading it as an account block would stop a session every other endpoint still answers
@@ -14091,22 +14527,12 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
 
 # Fetches one serialized username scan and marks whether its baseline is complete
 def _fetch_usernames_paginated_locked(bot, get_generator_fn, max_per_batch, total_limit, fetch_delay, advanced_fetch, estimated_limit, user, stop_event=None, identities_counted_at_source=False):
-    """Fetch usernames in batches using a fresh generator per call.
+    """Fetch usernames with a fresh generator and mark complete only on exhaustion.
 
-    Args:
-        get_generator_fn: Callable that returns a new instaloader generator (e.g. lambda: profile.get_followers())
-        max_per_batch:    Max accounts to pull per iteration (FOLLOWERS_PER_BATCH / FOLLOWEES_PER_BATCH). 0 = no limit
-        total_limit:      Stop after this many total accounts (FOLLOWER_LIMIT_TO_FETCH / FOLLOWEE_LIMIT_TO_FETCH). 0 = no limit.
-        fetch_delay:      Seconds to sleep between batches.
-        advanced_fetch:   Indicates if advanced_fetch is enabled (valid configuration of above 3 items)
-        estimated_limit:  Estimated number of items to fetch. Used for messaging.
-        user:             Instagram username, forwarded to log_activity.
-        stop_event:       Optional threading.Event from the caller. If set, the inter-batch wait is
-                          aborted and the function returns whatever has been fetched so far.
-
-    Returns:
-        List-like username result whose complete flag is true only after generator exhaustion.
-    """
+    Zero batch and total limits are unlimited. advanced_fetch enables batching
+    with fetch_delay seconds between batches. estimated_limit sizes progress
+    and budget checks. stop_event interrupts waits and returns an incomplete
+    result containing the names collected so far."""
     results = PaginatedUsernameResult()
     results.complete = False
 
@@ -14701,13 +15127,13 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             print(f"\nFollowers:\t\t\t\t- (to be determined later)")
             print(f"Followings:\t\t\t\t- (to be determined later)")
         else:
-            print(f"\nFollowers:\t\t\t\t{followers_count}")
-            print(f"Followings:\t\t\t\t{followings_count}")
+            print(f"\nFollowers:\t\t\t\t{followers_count if followers_count is not None else 'Unavailable'}")
+            print(f"Followings:\t\t\t\t{followings_count if followings_count is not None else 'Unavailable'}")
 
         if bot.context.is_logged_in:
             print(f"\nStory available:\t\t\t{has_story}")
 
-        print(f"\nBio:\n\n{bio}\n")
+        print(f"\nBio:\n\n{bio if bio is not None else 'Unavailable'}\n")
         print_cur_ts()
 
     # Populate initial Dashboard data immediately after first fetch (regardless of print mode)
@@ -14779,7 +15205,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
 
             followers_followings_fetched = True
 
-    if followers_count != followers_old_count:
+    if followers_count is not None and followers_old_count is not None and followers_count != followers_old_count:
         followers_diff = followers_count - followers_old_count
         followers_diff_str = ""
         if followers_diff > 0:
@@ -14797,7 +15223,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             except Exception as e:
                 print_recovery_error(e, context="file_write", summary=f"Could not write the CSV entry to '{csv_file_name}': {e}")
 
-    if ((followers_count != followers_old_count) or (followers_count > 0 and not followers) or FOLLOWERS_CHURN_DETECTION) and not skip_session and not skip_followers and can_view:
+    if not skip_session and not skip_followers and can_view and followers_count is not None and ((followers_count != followers_old_count) or (followers_count > 0 and not followers) or FOLLOWERS_CHURN_DETECTION):
         # Fetch followers if count changed, list is empty or detailed logging is enabled
         if FOLLOWERS_CHURN_DETECTION and followers_count > 5000:
             warning = f"High follower count ({followers_count})! This may increase rate limit risk with detailed logging."
@@ -14921,7 +15347,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
 
             followers_followings_fetched = True
 
-    if followings_count != followings_old_count:
+    if followings_count is not None and followings_old_count is not None and followings_count != followings_old_count:
         followings_diff = followings_count - followings_old_count
         followings_diff_str = ""
         if followings_diff > 0:
@@ -14938,7 +15364,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             except Exception as e:
                 print_recovery_error(e, context="file_write", summary=f"Could not write the CSV entry to '{csv_file_name}': {e}")
 
-    if ((followings_count != followings_old_count) or (followings_count > 0 and not followings) or FOLLOWERS_CHURN_DETECTION) and not skip_session and not skip_followings and can_view:
+    if not skip_session and not skip_followings and can_view and followings_count is not None and ((followings_count != followings_old_count) or (followings_count > 0 and not followings) or FOLLOWERS_CHURN_DETECTION):
         # Fetch followings if count changed, list is empty or detailed logging is enabled
         if FOLLOWERS_CHURN_DETECTION and followings_count > 5000:
             warning = f"High following count ({followings_count})! This may increase rate limit risk with detailed logging."
@@ -15046,8 +15472,11 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
     else:
         followings = followings_old
 
-    followers_old_count = followers_count
-    followings_old_count = followings_count
+    # An unknown count keeps the one loaded from a saved list, so the first known count is compared with it
+    if followers_count is not None:
+        followers_old_count = followers_count
+    if followings_count is not None:
+        followings_old_count = followings_count
 
     if followers_followings_fetched:
         print_cur_ts(newline=True)
@@ -15057,7 +15486,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
 
     # Profile pic
 
-    if DETECT_CHANGED_PROFILE_PIC:
+    if DETECT_CHANGED_PROFILE_PIC and profile_image_url is not None:
 
         try:
             detect_changed_profile_picture(user, profile_image_url, profile_pic_file, profile_pic_file_tmp, profile_pic_file_old, PROFILE_PIC_FILE_EMPTY, csv_file_name, r_sleep_time, False, 1)
@@ -15630,9 +16059,13 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                     profile = profile_from_username_resilient(bot, user)
                     time.sleep(NEXT_OPERATION_DELAY)
                     new_post = False
-                    followers_count = profile.followers
-                    followings_count = profile.followees
-                    bio = profile.biography
+                    # Keep last known values across missing snapshots; the first known value establishes a baseline.
+                    if followers_old_count is None:
+                        followers_old_count = followers_count
+                    if followings_old_count is None:
+                        followings_old_count = followings_count
+                    if bio_old is None:
+                        bio_old = bio
                     is_private = profile.is_private
                     followed_by_viewer = profile.followed_by_viewer
                     can_view = (not is_private) or followed_by_viewer
@@ -15783,7 +16216,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                     return
                 continue
 
-            if int(followings_count) != int(followings_old_count) or FOLLOWERS_CHURN_DETECTION:
+            if followings_count is not None and followings_old_count is not None and (int(followings_count) != int(followings_old_count) or FOLLOWERS_CHURN_DETECTION):
                 if FOLLOWERS_CHURN_DETECTION and followings_count > 5000:
                     warning = f"High following count ({followings_count})! Detailed logging may increase rate limit risk."
                     log_activity(warning, user=user, level='system')
@@ -15940,7 +16373,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                 print(f"\nCheck interval:\t\t\t\t{check_window_text()}")
                 print_cur_ts()
 
-            if int(followers_count) != int(followers_old_count) or FOLLOWERS_CHURN_DETECTION:
+            if followers_count is not None and followers_old_count is not None and (int(followers_count) != int(followers_old_count) or FOLLOWERS_CHURN_DETECTION):
                 if FOLLOWERS_CHURN_DETECTION and followers_count > 5000:
                     warning = f"High follower count ({followers_count})! Detailed logging may increase rate limit risk."
                     log_activity(warning, user=user, level='system')
@@ -16100,14 +16533,14 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
 
             # Profile pic
 
-            if DETECT_CHANGED_PROFILE_PIC:
+            if DETECT_CHANGED_PROFILE_PIC and profile_image_url is not None:
 
                 try:
                     detect_changed_profile_picture(user, profile_image_url, profile_pic_file, profile_pic_file_tmp, profile_pic_file_old, PROFILE_PIC_FILE_EMPTY, csv_file_name, r_sleep_time, STATUS_NOTIFICATION, 2)
                 except Exception as e:
                     print_recovery_error(e, summary=f"Error while processing changed profile picture: {e}")
 
-            if bio != bio_old:
+            if bio is not None and bio_old is not None and bio != bio_old:
                 print(f"* Bio changed for user {user} !\n")
                 # Truncate bio for activity log
                 bio_old_short = (bio_old[:40] + '...') if len(bio_old) > 40 else bio_old
@@ -19326,6 +19759,9 @@ def doctor_check_configuration(targets, config_errors: Sequence[dict] = (), reti
     if retired_settings:
         advice = make_recovery_advice("config.invalid", "Config file contains removed settings", recovery_fix_with_guide("Delete the reported settings or regenerate the file with --generate-config", CONFIG_GUIDE_URL), False)
         checks.append(make_doctor_check("Configuration", "WARN", advice.summary, describe_retired_settings(retired_settings, cfg), advice))
+    if CONFIG_DISCOVERED_IN_CWD and names_program_by_path(IMGCAT_PATH):
+        advice = make_recovery_advice("config.invalid", "IMGCAT_PATH names a program by path in a config found in the current directory", recovery_fix_with_guide(IMGCAT_PATH_IGNORED_FIX, CONFIG_GUIDE_URL), False)
+        checks.append(make_doctor_check("Configuration", "WARN", advice.summary, imgcat_path_ignored_summary(IMGCAT_PATH, cfg), advice))
 
     if env_path and str(env_path) in DOTENV_STARTUP_ERRORS:
         detail, fix = DOTENV_STARTUP_ERRORS[str(env_path)]
@@ -19779,7 +20215,7 @@ def acquire_dir_lock():
 
 # Parses configuration and command-line options then starts the selected operation
 def run_main():
-    global CLI_CONFIG_PATH, CONFIG_DISCOVERY_DISABLED, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_REMINDER_SECONDS, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS, FETCH_REELS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, FOLLOW_LIST_SOURCE, IDENTITY_BUDGET_PER_DAY, CIRCUIT_BREAKER, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
+    global CLI_CONFIG_PATH, CONFIG_DISCOVERY_DISABLED, CONFIG_DISCOVERED_IN_CWD, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_REMINDER_SECONDS, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS, FETCH_REELS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, FOLLOW_LIST_SOURCE, IDENTITY_BUDGET_PER_DAY, CIRCUIT_BREAKER, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_PROVIDER, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H, TRUNCATE_CHARS
     global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, ADVANCED_FOLLOWER_FETCH, ADVANCED_FOLLOWEE_FETCH
@@ -20462,6 +20898,9 @@ def run_main():
         CLI_CONFIG_PATH = os.path.expanduser(args.config_file)
 
     cfg_path = None if CONFIG_DISCOVERY_DISABLED else find_config_file(CLI_CONFIG_PATH)
+    # A file named with --config-file is the operator's choice. One picked up from the current directory could have
+    # been written by anyone who can write that directory, so the settings that name a program trust it less
+    CONFIG_DISCOVERED_IN_CWD = bool(cfg_path) and not args.config_file and config_path_is_in_cwd(cfg_path)
 
     if cfg_path:
         CLI_CONFIG_PATH = cfg_path  # Update global for dashboard display
@@ -21058,7 +21497,13 @@ def run_main():
         DOWNLOAD_THUMBNAILS = True
         THUMBNAILS_FORCED_BY_WEB = True
 
-    if IMGCAT_PATH:
+    if IMGCAT_PATH and CONFIG_DISCOVERED_IN_CWD and names_program_by_path(IMGCAT_PATH):
+        # The one setting that names a program to run, so a planted config must not be able to choose it
+        print(f"* Warning: {imgcat_path_ignored_summary(IMGCAT_PATH, cfg_path)}")
+        print(CommandOutput(colorize("info", f"To fix: {IMGCAT_PATH_IGNORED_FIX}")))
+        if DASHBOARD_ENABLED and RICH_AVAILABLE:
+            log_activity(f"Configuration note: {imgcat_path_ignored_summary(IMGCAT_PATH, cfg_path)}", level="warning")
+    elif IMGCAT_PATH:
         try:
             imgcat_exe = resolve_executable(IMGCAT_PATH)
         except Exception:

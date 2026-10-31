@@ -2,18 +2,28 @@
 
 This is a high-level summary of the most important changes.
 
-# Changes in 4.0.3 (TBD)
+# Changes in 4.1 (29 Oct 2026)
 
-Version **4.0.3** sends web API requests with the headers a browser uses and reuses each Instagram session's connection. Browser follower lists show progress and honor disabled certificate verification for HTTPS proxies. Recovery guidance distinguishes saved settings from repeated command-line options. Doctor keeps those options and the selected targets in its monitoring command. Generated commands stay usable when their arguments match stored credentials.
+Version **4.1** fixes signed-in monitoring after Instagram retired its search for signed-in sessions and signed-in post checks with Instaloader 4.16. It requires **Python 3.10** and **Instaloader 4.15.4** or later. Logged-in requests now use the configured proxy. Anonymous runs can read professional profiles that Instagram refuses with HTTP 400.
 
 **Features and improvements**:
 
-- **IMPROVE:** **Requests closer to a browser's** - With the default `curl_cffi` backend, calls to Instagram's web API went out with the headers of a page typed into the address bar, plus a few headers no browser sends, and every request opened a new connection. They now carry the **headers the impersonated browser sends for the site's own background requests**, and each Instagram session **keeps one connection open** between requests. The `requests` backend is unchanged
+- **IMPROVE:** **Python 3.10 and Instaloader 4.15.4 required** - Signed-in lookups need the profile page reader added in Instaloader 4.15.4, which dropped Python 3.9. On Python 3.9, pip stays on 4.0.2
+- **IMPROVE:** **Browser-like requests** - With `curl_cffi`, web API calls now send the **headers the impersonated browser sends** and reuse **one connection per session**. The `requests` backend is unchanged
 
 **Bug fixes**:
 
-- **BUGFIX:** **Browser follower lists** - The progress bar advances as names arrive and shows startup, page loading and scroll waits. `VERIFY_SSL = False` also disables certificate checks on HTTPS proxy connections. Verification stays on by default. Certificate failures explain how to trust the proxy CA in the browser, since `PROXY_CERT_PATH` applies only to HTTP clients. See [Browser Proxy Certificates](https://misiektoja.github.io/instagram_monitor/troubleshooting/#browser-proxy-certificates)
-- **BUGFIX:** **Recovery commands and saved settings** - Guidance distinguishes saved settings from command-line options needed on each run. Doctor's monitoring command retains the selected options and shows placeholders for private values. Generated commands keep paths, targets and flags intact when they match stored credentials. Error summaries and technical details still redact credentials. Targets supplied through **`--targets`** also carry into Doctor's monitoring command
+- **BUGFIX:** **Anonymous professional profiles** - When the anonymous lookup answers HTTP 400, the target is read from its **public embed**, with bio and following count from the profile page when available. Only the six newest posts are visible and private accounts cannot be read. See [anonymous profile HTTP 400](https://misiektoja.github.io/instagram_monitor/troubleshooting/#anonymous-profile-http-400) (thanks [@VusalAbdurahmanovX](https://github.com/VusalAbdurahmanovX) for reporting [#150](https://github.com/misiektoja/instagram_monitor/issues/150) and the fix in [#151](https://github.com/misiektoja/instagram_monitor/pull/151))
+- **BUGFIX:** **Signed-in lookups after Instagram retired search** - Search answers HTTP 404 to signed-in sessions, so 4.0 to 4.0.2 failed to load targets without a saved id (`QueryReturnedNotFoundException`). The id now comes from the target's **public profile page** and is saved for later runs. See [Profile Lookups Report a Retired Endpoint](https://misiektoja.github.io/instagram_monitor/troubleshooting/#profile-lookups-report-a-retired-endpoint) (thanks [@SENAJavierZamora](https://github.com/SENAJavierZamora) for reporting [#154](https://github.com/misiektoja/instagram_monitor/issues/154))
+- **BUGFIX:** **Signed-in post checks with Instaloader 4.16** - Every latest post and reel check failed with `Instagram returned empty data for posts/reels` because a tool patch rejected an argument that Instaloader 4.16 added
+- **BUGFIX:** **Browser follower lists** - The progress bar moves as names arrive. `VERIFY_SSL = False` also covers HTTPS proxies. See [Browser Proxy Certificates](https://misiektoja.github.io/instagram_monitor/troubleshooting/#browser-proxy-certificates)
+- **BUGFIX:** **Recovery commands** - Guidance separates saved settings from options needed on each run. Doctor's monitoring command keeps your options and **`--targets`**, with placeholders for private values
+- **BUGFIX:** **Offline test suite** - `python -m pytest` no longer contacts Instagram or PyPI
+
+**Security and privacy**:
+
+- **SECURITY:** **Logged-in requests use the proxy** - Requests sent with the signed-in session, including the password sign-in and profile page reads, bypassed the configured **proxy** and could reveal your IP address. They now use the proxy, `PROXY_CERT_PATH` and `VERIFY_SSL` like every other request
+- **SECURITY:** **`IMGCAT_PATH` in a discovered config** - A config file found in the current directory could make the monitor run any program. Such a file may now only name a command, which is looked up on `PATH`. See [Displaying Images in Your Terminal](https://misiektoja.github.io/instagram_monitor/usage/#displaying-images-in-your-terminal)
 
 # Changes in 4.0.2 (22 Sep 2026)
 
