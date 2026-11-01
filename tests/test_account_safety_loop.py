@@ -141,7 +141,16 @@ class TestATruncatedListDoesNotReplaceASavedBaseline:
         monkeypatch.setattr(im, "SKIP_FOLLOWERS", False, raising=False)
         monkeypatch.setattr(im, "SKIP_FOLLOW_CHANGES", False, raising=False)
         removals = []
-        monkeypatch.setattr(im, "compare_and_log_follower_changes", lambda user, kind, old, new, csv_file: (removals.append((kind, sorted(set(old) - set(new)))), ("", "", "", "", "", "", "", ""))[1], raising=False)
+        additions = []
+
+        # Records what the comparison was asked to report, as removals and as additions
+        def compare(user, kind, old, new, csv_file):
+            removals.append((kind, sorted(set(old) - set(new))))
+            additions.append((kind, sorted(set(new) - set(old))))
+            return ("", "", "", "", "", "", "", "")
+
+        monkeypatch.setattr(im, "compare_and_log_follower_changes", compare, raising=False)
+        monkeypatch.setattr(im, "LAST_COMPARISON_ADDITIONS", additions, raising=False)
 
         def fetch(*args, **kwargs):
             result = im.PaginatedUsernameResult(fetched)
@@ -166,7 +175,41 @@ class TestATruncatedListDoesNotReplaceASavedBaseline:
 
         assert stored == [100, saved]
         assert removals == []
-        assert "came back with 91 of about 101 while 100 were already saved" in capsys.readouterr().out
+        assert "came back with 91 of the 101 Instagram reports, fewer than the 100 in the saved list" in capsys.readouterr().out
+
+    # With FOLLOW_LIST_SHORT_ADDITIONS on, the same short list still reports the accounts it adds, and removes none
+    def test_a_short_list_reports_only_additions_when_asked(self, monitored_account, tmp_path, capsys):
+        monitored_account.setattr(im, "FOLLOW_LIST_SHORT_ADDITIONS", True)
+        saved = [f"user{index}" for index in range(100)]
+        fetched = saved[:91] + ["new_a", "new_b", "new_c"]
+        stored, removals = self._run(monitored_account, tmp_path, saved, fetched, 103)
+
+        assert stored == [103, saved + ["new_a", "new_b", "new_c"]], "the saved names the short list lacked stay in the baseline"
+        assert removals == [("followers", [])]
+        assert im.LAST_COMPARISON_ADDITIONS == [("followers", ["new_a", "new_b", "new_c"])]
+        output = capsys.readouterr().out
+        assert "so the saved list is kept" not in output
+        assert "Using the short followers list only to add names: 3 new, none removed" in output
+
+    # The next short scan finds those names already in the baseline, so nothing is reported twice
+    def test_the_same_additions_are_not_reported_again(self, monitored_account, tmp_path):
+        monitored_account.setattr(im, "FOLLOW_LIST_SHORT_ADDITIONS", True)
+        saved = [f"user{index}" for index in range(100)] + ["new_a"]
+        fetched = saved[:90] + ["new_a"]
+        stored, removals = self._run(monitored_account, tmp_path, saved, fetched, 103)
+
+        assert stored == [103, saved]
+        assert removals == [] or removals == [("followers", [])]
+        assert all(names == [] for _kind, names in im.LAST_COMPARISON_ADDITIONS)
+
+    # A list that agrees with Instagram's count is not short, so it still replaces the saved one and reports removals
+    def test_a_real_unfollow_still_reports_removals_when_asked(self, monitored_account, tmp_path):
+        monitored_account.setattr(im, "FOLLOW_LIST_SHORT_ADDITIONS", True)
+        saved = [f"user{index}" for index in range(100)]
+        stored, removals = self._run(monitored_account, tmp_path, saved, saved[:80], 80)
+
+        assert stored == [80, saved[:80]]
+        assert removals == [("followers", sorted(saved[80:]))]
 
     # Accounts that really unfollowed move the count too, so the smaller list replaces the saved one
     def test_a_real_unfollow_replaces_the_saved_list(self, monitored_account, tmp_path):

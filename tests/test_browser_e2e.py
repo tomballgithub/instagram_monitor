@@ -1,14 +1,18 @@
 """Browser-level dashboard tests using a real headless Chromium instance."""
 
+import http.server
+import json
 import re
 import shutil
 import socketserver
 import ssl
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
-from urllib.parse import urlsplit
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from werkzeug.serving import make_server
@@ -540,3 +544,276 @@ def test_browser_import_marks_signed_in_profiles_in_chromium(dashboard_server, i
 
         assert page_errors == []
         browser.close()
+
+
+# The only session value the fake Instagram below accepts, so a stale cookie can be told from a good one
+FAKE_SESSION = "valid-session"
+
+# The profile page the fake Instagram serves: the follower link opens a dialog for a good session and the login page otherwise
+FAKE_PROFILE_PAGE = """<!doctype html><html><body><h1>target.user</h1>
+<a href="/target.user/followers/" id="followers">3 followers</a>
+<script>
+document.getElementById('followers').addEventListener('click', event => {
+  event.preventDefault();
+  if (!document.cookie.includes('sessionid=%s')) { location.href = '/accounts/login/?next=/target.user/'; return; }
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  const box = document.createElement('div');
+  box.style.cssText = 'height:200px;overflow:auto';
+  for (const name of ['alpha', 'beta', 'gamma']) {
+    const row = document.createElement('div');
+    row.style.height = '30px';
+    row.innerHTML = '<a href="/' + name + '/">' + name + '</a>';
+    box.appendChild(row);
+  }
+  dialog.appendChild(box);
+  document.body.appendChild(dialog);
+});
+</script></body></html>""" % FAKE_SESSION
+
+
+# The follower count and names behind the paged fake list below
+FAKE_LIST_NAMES = [f"name{index:03d}" for index in range(60)]
+
+# A profile whose follower dialog loads its list from the friendships endpoint 12 at a time, the way Instagram's does,
+# and shows each account once however often the endpoint sends it
+FAKE_PAGED_PAGE = """<!doctype html><html><body><h1>paged.user</h1>
+<a href="/paged.user/followers/" id="followers">60 followers</a>
+<script>
+document.getElementById('followers').addEventListener('click', event => {
+  event.preventDefault();
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  const box = document.createElement('div');
+  box.style.cssText = 'height:200px;overflow:auto';
+  dialog.appendChild(box);
+  document.body.appendChild(dialog);
+  const shown = new Set();
+  let next = null, loading = false, done = false;
+  async function load() {
+    if (loading || done) return;
+    loading = true;
+    const response = await fetch('/api/v1/friendships/1/followers/?count=12' + (next ? '&max_id=' + next : ''), {credentials: 'include'});
+    const body = await response.json();
+    loading = false;
+    for (const user of body.users) {
+      if (shown.has(user.username)) continue;
+      shown.add(user.username);
+      const row = document.createElement('div');
+      row.style.height = '30px';
+      row.innerHTML = '<a href="/' + user.username + '/">' + user.username + '</a>';
+      box.appendChild(row);
+    }
+    next = body.next_max_id;
+    if (!next) done = true;
+  }
+  box.addEventListener('scroll', () => { if (box.scrollTop + box.clientHeight >= box.scrollHeight - 40) load(); });
+  load();
+});
+</script></body></html>"""
+
+
+@pytest.fixture
+# Serves a fake Instagram over HTTPS on loopback, recording every request path and whether it carried a session cookie
+def fake_instagram(im_module, monkeypatch, tmp_path):
+    openssl = shutil.which("openssl")
+    if not openssl:
+        pytest.skip("OpenSSL is needed to create the local site certificate")
+    certificate = tmp_path / "site.crt"
+    key = tmp_path / "site.key"
+    subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(certificate), "-days", "1", "-subj", "/CN=www.instagram.com"], check=True, capture_output=True, timeout=60)
+    class Requests(list):
+        # Seconds the site pauses before it first answers the page at a given offset, which a test sets
+        delays = {}
+
+    requests = Requests()
+    served = {}
+
+    class SiteHandler(http.server.BaseHTTPRequestHandler):
+        # Serves the profile pages, the friendships endpoint and a bare login page, and records what the browser asked for
+        def do_GET(self):
+            requests.append((self.path, "sessionid=" in (self.headers.get("Cookie") or "")))
+            if self.path.startswith("/api/v1/friendships/"):
+                self.send_list_page()
+                return
+            body = "<!doctype html><title>Log in</title><p>Log in</p>"
+            if self.path.startswith("/target.user/"):
+                body = FAKE_PROFILE_PAGE
+            elif self.path.startswith("/paged.user/"):
+                body = FAKE_PAGED_PAGE
+            self.send_payload(body.encode(), "text/html; charset=utf-8")
+
+        # Answers one list request, putting accounts from the first page into the last slots of a later page the first
+        # time it is asked for, the way Instagram does. Asking for the same page again returns it complete
+        def send_list_page(self):
+            query = parse_qs(urlsplit(self.path).query)
+            count = int(query.get("count", ["12"])[0])
+            offset = int(query.get("max_id", ["0"])[0])
+            names = FAKE_LIST_NAMES[offset:offset + count]
+            served[(offset, count)] = served.get((offset, count), 0) + 1
+            if served[(offset, count)] == 1:
+                time.sleep(requests.delays.get(offset, 0))
+            if offset and served[(offset, count)] == 1:
+                names = names[:-2] + FAKE_LIST_NAMES[:2]
+            following = offset + count
+            body = {"users": [{"username": name} for name in names], "next_max_id": str(following) if following < len(FAKE_LIST_NAMES) else None, "status": "ok"}
+            self.send_payload(json.dumps(body).encode(), "application/json")
+
+        # Sends one 200 response with the given body
+        def send_payload(self, payload, content_type):
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        # Keeps the test output free of the request log
+        def log_message(self, *args):
+            return
+
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(certificate, key)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SiteHandler)
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    original_options = im_module.browser_launch_options
+
+    # Sends www.instagram.com to the local server and accepts its self-signed certificate
+    def local_options():
+        options = original_options()
+        options["args"] = [*options["args"], f"--host-resolver-rules=MAP www.instagram.com 127.0.0.1:{server.server_port}", "--ignore-certificate-errors"]
+        options["ignore_https_errors"] = True
+        return options
+
+    monkeypatch.setattr(im_module, "browser_launch_options", local_options)
+    monkeypatch.setattr(im_module, "SESSION_USERNAME", "")
+    monkeypatch.setattr(im_module, "SKIP_SESSION", True)
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_HEADLESS", True)
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_SCROLL_DELAY", 0)
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_PROFILE_DIR", str(tmp_path / "profiles"))
+    monkeypatch.setattr(im_module, "browser_follow_list_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+    try:
+        yield requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+# Signs the anonymous browser profile in the way a person would, by leaving a session cookie in it for the next launch
+# Instagram's own session cookie carries an expiry, which is what makes Chromium keep it once the browser closes
+def sign_in_anonymous_profile(im_module, session_value):
+    with playwright_sync.sync_playwright() as driver:
+        try:
+            context = driver.chromium.launch_persistent_context(im_module.browser_profile_dir(), **im_module.browser_launch_options())
+        except playwright_sync.Error as error:
+            if "executable doesn't exist" not in str(error).casefold():
+                raise
+            pytest.skip("Chromium is not installed")
+        try:
+            context.add_cookies([{"name": "sessionid", "value": session_value, "domain": ".instagram.com", "path": "/", "secure": True, "sameSite": "Lax", "expires": time.time() + 86400}])
+        finally:
+            context.close()
+
+
+# Returns the stand-in for an anonymous session, which has a context and no logged-in state
+def anonymous_session_bot():
+    return SimpleNamespace(context=SimpleNamespace(is_logged_in=False, _session=SimpleNamespace()))
+
+
+# Verifies an anonymous run reads a list with the sign-in the browser profile kept from an earlier launch
+@pytest.mark.e2e
+def test_anonymous_browser_scan_reads_a_list_with_its_own_sign_in(im_module, fake_instagram):
+    sign_in_anonymous_profile(im_module, FAKE_SESSION)
+    profile = SimpleNamespace(username="target.user", userid=1, followers=3, followees=0)
+
+    names = [entry.username for entry in im_module.iter_browser_follow_list(anonymous_session_bot(), profile, "followers")]
+
+    assert names == ["alpha", "beta", "gamma"]
+    # The profile page was fetched with the persisted cookie, which nothing in the run handed over
+    assert ("/target.user/", True) in fake_instagram
+
+
+# Verifies a profile with no sign-in stops before the browser opens a single page, instead of browsing anonymously
+@pytest.mark.e2e
+def test_anonymous_browser_scan_without_a_sign_in_never_opens_the_profile(im_module, fake_instagram):
+    profile = SimpleNamespace(username="target.user", userid=1, followers=3, followees=0)
+
+    try:
+        with pytest.raises(im_module.BrowserFollowListError, match="browser is not signed in"):
+            list(im_module.iter_browser_follow_list(anonymous_session_bot(), profile, "followers"))
+    except playwright_sync.Error as error:
+        if "executable doesn't exist" not in str(error).casefold():
+            raise
+        pytest.skip("Chromium is not installed")
+
+    assert fake_instagram == []
+
+
+# Verifies a sign-in the site no longer accepts is reported as expired, since the follower link leads to the login page
+@pytest.mark.e2e
+def test_anonymous_browser_scan_reports_a_sign_in_the_site_rejected(im_module, fake_instagram):
+    sign_in_anonymous_profile(im_module, "stale-session")
+    profile = SimpleNamespace(username="target.user", userid=1, followers=3, followees=0)
+
+    with pytest.raises(im_module.BrowserFollowListError, match="expired or was removed"):
+        list(im_module.iter_browser_follow_list(anonymous_session_bot(), profile, "followers"))
+
+
+# Returns the friendships requests the fake Instagram saw, as the paths the browser asked for
+def list_requests(requests):
+    return [path for path, _cookie in requests if path.startswith("/api/v1/friendships/")]
+
+
+# Verifies the page size is raised and pages that repeated accounts are asked for again, so the whole list arrives
+@pytest.mark.e2e
+def test_anonymous_browser_scan_recovers_accounts_a_page_lost_to_repeats(im_module, fake_instagram, monkeypatch):
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_SCROLL_DELAY", 0.3)
+    monkeypatch.setattr(im_module, "BROWSER_REFETCH_DELAY_MS", 20)
+    sign_in_anonymous_profile(im_module, FAKE_SESSION)
+    profile = SimpleNamespace(username="paged.user", userid=1, followers=60, followees=0)
+
+    names = [entry.username for entry in im_module.iter_browser_follow_list(anonymous_session_bot(), profile, "followers")]
+
+    assert sorted(names) == FAKE_LIST_NAMES
+    asked = list_requests(fake_instagram)
+    # The dialog asks for 12, and every request that reached the site asked for 25
+    assert asked and all("count=25" in path for path in asked)
+    # Pages 2 and 3 repeated accounts the first time, so each was asked for again at the same cursor
+    assert len(asked) > len(set(asked))
+
+
+# Verifies the same list comes back short when both settings are off, which is the problem they exist to solve
+@pytest.mark.e2e
+def test_anonymous_browser_scan_with_both_settings_off_reads_only_the_rows(im_module, fake_instagram, monkeypatch):
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_SCROLL_DELAY", 0.3)
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_PAGE_SIZE", 0)
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_REFETCH_TRIES", 0)
+    sign_in_anonymous_profile(im_module, FAKE_SESSION)
+    profile = SimpleNamespace(username="paged.user", userid=1, followers=60, followees=0)
+
+    names = [entry.username for entry in im_module.iter_browser_follow_list(anonymous_session_bot(), profile, "followers")]
+
+    assert 40 < len(names) < 60
+    asked = list_requests(fake_instagram)
+    assert asked and all("count=12" in path for path in asked)
+    assert len(asked) == len(set(asked))
+
+
+# Verifies a page that arrives long after the scan's few quiet scrolls is still read, instead of ending the list there
+@pytest.mark.e2e
+def test_anonymous_browser_scan_waits_for_a_slow_page(im_module, fake_instagram, monkeypatch):
+    monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_SCROLL_DELAY", 0.3)
+    monkeypatch.setattr(im_module, "BROWSER_REFETCH_DELAY_MS", 20)
+    monkeypatch.setattr(im_module, "BROWSER_NO_END_PATIENCE_SECONDS", 30)
+    # Longer than three quiet scrolls at 0.3 seconds each, which is how long the scan used to wait
+    fake_instagram.delays[25] = 4.0
+    sign_in_anonymous_profile(im_module, FAKE_SESSION)
+    profile = SimpleNamespace(username="paged.user", userid=1, followers=60, followees=0)
+
+    names = [entry.username for entry in im_module.iter_browser_follow_list(anonymous_session_bot(), profile, "followers")]
+
+    assert sorted(names) == FAKE_LIST_NAMES

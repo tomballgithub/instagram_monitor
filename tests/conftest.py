@@ -85,6 +85,7 @@ def deterministic_globals(monkeypatch, tmp_path):
     monkeypatch.setattr(im, "MAX_H1", 0, raising=False)
     monkeypatch.setattr(im, "MIN_H2", 0, raising=False)
     monkeypatch.setattr(im, "MAX_H2", 0, raising=False)
+    monkeypatch.setattr(im, "DAYS_BETWEEN", 0, raising=False)
     monkeypatch.setattr(im, "WEBHOOK_ENABLED", False, raising=False)
     monkeypatch.setattr(im, "WEBHOOK_URL", "", raising=False)
     monkeypatch.setattr(im, "WEBHOOK_PROVIDER", "discord", raising=False)
@@ -105,6 +106,12 @@ def deterministic_globals(monkeypatch, tmp_path):
     # Setup and the dashboard both write these, and the wizard snapshots the module to build its baseline
     monkeypatch.setattr(im, "SKIP_FOLLOWERS", False, raising=False)
     monkeypatch.setattr(im, "SKIP_FOLLOWINGS", False, raising=False)
+    # Startup turns the breaker off for an anonymous browser run, so a test that runs it must not leave that behind
+    monkeypatch.setattr(im, "CIRCUIT_BREAKER", True, raising=False)
+    monkeypatch.setattr(im, "CIRCUIT_BREAKER_AUTODISABLED_REASON", "", raising=False)
+    # Startup also zeroes the budget for that run, so the value a test started with is put back afterwards
+    monkeypatch.setattr(im, "IDENTITY_BUDGET_PER_DAY", im.IDENTITY_BUDGET_PER_DAY, raising=False)
+    monkeypatch.setattr(im, "IDENTITY_BUDGET_AUTODISABLED_REASON", "", raising=False)
     # Setup and the profile pickers enumerate the real browsers of whoever runs the suite, and reading their
     # cookie databases makes a test depend on that machine's browsers and wait on the ones that are running
     monkeypatch.setattr(im, "list_firefox_profiles", lambda: [], raising=False)

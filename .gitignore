@@ -216,3 +216,6 @@ tmp/
 instagram_monitor_exposure.json
 instagram_monitor_user_ids.json
 instagram_monitor_exposure.json.lock
+
+# Browser follow list profile, which holds a live Instagram sign-in
+instagram_monitor_browser_profile/

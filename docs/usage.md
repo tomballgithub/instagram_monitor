@@ -450,7 +450,7 @@ Pin the source for one run without editing the configuration file:
 instagram_monitor <target_insta_user> --follow-list-source graphql
 ```
 
-The startup summary names the source in use. Anonymous mode is unaffected, since neither surface lists followers without a session.
+The startup summary names the source in use. Anonymous mode has no session, so it skips both lists with every source except `browser`, since neither REST nor GraphQL lists followers without one. See [Anonymous Mode With The Browser Source](#anonymous-mode-with-the-browser-source).
 
 ### Browser Source (experimental)
 
@@ -489,6 +489,21 @@ FOLLOW_LIST_BROWSER_SCROLL_DELAY = 1.5
 
 # Seconds to wait for a page or an element
 FOLLOW_LIST_BROWSER_TIMEOUT = 30
+
+# Seconds to wait for you to sign in or to clear a warning page (anonymous runs only)
+FOLLOW_LIST_BROWSER_LOGIN_WAIT = 300
+
+# Leave the window open after a scan that failed, until you close it (debugging)
+FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR = False
+
+# Accounts to ask for in each request (Instagram sends at most 25, the dialog asks for 12, 0 = leave it)
+FOLLOW_LIST_BROWSER_PAGE_SIZE = 25
+
+# Times to ask again for a page that repeated accounts (0 = read only the rendered rows)
+FOLLOW_LIST_BROWSER_REFETCH_TRIES = 3
+
+# Use a list that is short of Instagram's count only to add names (False = discard it)
+FOLLOW_LIST_SHORT_ADDITIONS = False
 ```
 
 Every Playwright channel is a Chromium build, so the browser source only works when the rest of the session presents the same browser. Monitoring refuses to start otherwise and the Web Dashboard refuses a settings change that would create the mismatch, rather than let one Instagram session arrive as two different clients:
@@ -504,14 +519,50 @@ What to expect:
 
 - It is much slower than REST or GraphQL and uses far more CPU and memory. A list of a few thousand names takes minutes, not seconds.
 - Headless still means a real browser, not the stripped-down headless shell. Set `FOLLOW_LIST_BROWSER_HEADLESS = False` to watch it work, which needs a desktop session.
-- The browser reuses one profile per session account, so cookies and browser state stay stable between runs instead of arriving as a brand new machine every time. Each account gets its own directory.
-- The logged-in session cookies are handed to the browser. It never signs in, and it never asks for your password.
-- Your configured proxy is used if you have one. `PROXY_CERT_PATH` applies to HTTP clients. The browser needs the proxy CA in its own trust store. See [Browser Proxy Certificates](troubleshooting.md#browser-proxy-certificates).
+- Instagram fills part of many list pages with accounts it already sent earlier in the same list, in the slots where other accounts belong. The dialog never shows the accounts that were crowded out, so a list read once comes back roughly 10 to 20 percent short. The browser source therefore reads the list responses the dialog receives, and asks again for every page that repeated an account, up to `FOLLOW_LIST_BROWSER_REFETCH_TRIES` times, a couple of seconds apart. The same page asked for again comes back with a different mix, which fills most of the lost slots. The accounts it recovers are added to the rows the dialog rendered. Each repeat is one more request, so a long list costs more requests than before, capped at 400 extra per scan. Set `FOLLOW_LIST_BROWSER_REFETCH_TRIES = 0` to read only the rendered rows, as earlier versions did. If Instagram answers a repeat with anything but a page of accounts, the asking stops for the rest of the scan.
+- Because the source reads the list responses, it knows when Instagram has marked the end of a list. A few quiet scrolls no longer end the scan while it has not: it keeps waiting, nudging the dialog, for up to 90 seconds after the last page arrived. When reading stops without that marker the scan prints `Instagram had not marked the end of the list when reading stopped, so the list may be incomplete`.
+- `FOLLOW_LIST_BROWSER_PAGE_SIZE` raises the number of accounts the dialog's own requests ask for from 12 to 25, which is the most Instagram sends in one response. The same list then needs about half the requests and loses fewer accounts to repeats. The request is otherwise unchanged and is still sent by the page itself. Set it to `0` to leave the dialog's own 12. A value above 25 changes nothing, since Instagram still sends 25.
+- Instagram can leave accounts out of a list it shows to one viewer, so a signed-in browser account may see a steady few percent fewer names than the profile reports, and a different account sees a different set. Such a list is discarded and the saved list is kept, so nothing is reported from it. `FOLLOW_LIST_SHORT_ADDITIONS = True` uses it for additions instead: names the saved list lacks are reported as added and joined to the saved list, and nothing is reported as removed, because a name missing from a short list does not mean anyone unfollowed. Removals are reported when a complete list comes back, against a saved list that still holds the names the short lists lacked. It applies to any follow list source, and the names the scan did read are still written to the `.rejected.json` file for comparison.
+- `FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR = True` leaves the window open after a scan that failed, so the page it stopped on can be inspected. A scan that worked closes the browser and carries on. After a failure the run waits until you close the window and then reports the error, so use it for debugging and not for an unattended run. It has no effect while `FOLLOW_LIST_BROWSER_HEADLESS` is `True`.
+- The browser reuses one profile per session account, so cookies and browser state stay stable between runs instead of arriving as a brand new machine every time. Each account gets its own directory, and an anonymous run has one of its own.
+- A session run hands its logged-in session cookies to the browser. An anonymous run hands it none and relies on the browser's own sign-in, described [below](#anonymous-mode-with-the-browser-source). Either way the tool never signs in for you and never asks for your password.
+- Your configured proxy is used if you have one. `PROXY_CERT_PATH` applies to HTTP clients. The browser needs the proxy CA in its own trust store, and on Windows the run stops if the CA in `PROXY_CERT_PATH` is not in the Windows trust store, because the browser ignores the file. See [Browser Proxy Certificates](troubleshooting.md#browser-proxy-certificates).
 - The terminal progress bar shows browser startup, page loading and scroll waits. Its count advances as new names are read.
-- A challenge, a suspended or disabled account, or a page that is not signed in stops the fetch and is reported. It is not clicked through.
+- A challenge, a suspended or disabled account, or a page that is not signed in stops the fetch and is reported. The tool never clicks through it. An anonymous run with a visible window is the exception to the stopping: it keeps the window open on the page so you can clear it yourself, as described [below](#anonymous-mode-with-the-browser-source).
 - If the dialog stops growing well short of the follower count Instagram reports, the fetch fails rather than saving a short list over a complete baseline. A smaller gap is returned, but it still cannot shrink a saved list that agrees with the reported count.
 
 There is no fallback to or from this source. `browser` reads over the browser or reports the error.
+
+#### Anonymous Mode With The Browser Source
+
+With no session login, no API lists followers or following, so every other source skips both lists. The browser source does not need a session. It needs a browser that is signed in to Instagram, because Instagram shows a follower list only to a signed-in visitor. With `FOLLOW_LIST_SOURCE = "browser"` an anonymous run therefore keeps reading both lists, unless `SKIP_FOLLOWERS` or `SKIP_FOLLOWINGS` turns one off:
+
+```sh
+instagram_monitor <target_insta_user> --follow-list-source browser
+```
+
+An anonymous run has no session cookies to give the browser, so the browser signs in by itself, once, and keeps that sign-in in its profile:
+
+1. Set `FOLLOW_LIST_BROWSER_HEADLESS = False`, since a hidden window cannot be signed in to.
+2. Run the monitor. When the browser is not signed in, its window opens on Instagram's sign-in page and the run waits for you, up to `FOLLOW_LIST_BROWSER_LOGIN_WAIT` seconds (300 by default). It carries on the moment you are signed in.
+3. Later runs reuse the sign-in, hidden or not, so you can set `FOLLOW_LIST_BROWSER_HEADLESS` back to `True`.
+
+The sign-in lives in the browser profile, in an `_anonymous_` directory under `FOLLOW_LIST_BROWSER_PROFILE_DIR`, or next to the output directory when that is empty. It is kept apart from the profile of any session account. Deleting the directory signs the browser out.
+
+What to expect:
+
+- The account you sign in with is the account Instagram sees scrolling the lists, so the risk described [above](#browser-source-experimental) applies to it. Use a separate account.
+- The tool never types your password and never reads the browser's cookies. It only checks that a sign-in exists before it opens the profile.
+- An anonymous run has no session account, but the [account circuit breaker and the daily identity budget](#identity-budget-and-circuit-breaker) are still active by default. A challenge or suspension page the browser meets is then recorded against an anonymous ledger and can stop monitoring, and every name read counts against `IDENTITY_BUDGET_PER_DAY`, so a long list can leave too little budget for the next scan. Set `BROWSER_MODE_CIRCUIT_BREAKER_DISABLE = True` to turn both off for an anonymous run that reads lists with the browser source. Names are still counted and shown. The startup summary then shows `Disabled (BROWSER_MODE_CIRCUIT_BREAKER_DISABLE)` for the breaker and for the budget. It has no effect with a session login or with another source.
+- A private target is attempted too. The profile lookup of an anonymous run cannot tell whether the browser's account follows it, so the lists are not skipped on that basis. If the browser's account does follow the target, they are read as usual. If it does not, Instagram shows no list, so that list is skipped with a note and the run carries on.
+- Follower and following change notifications name the accounts again, because the lists are compared. Follower churn detection stays off without a session, since it re-reads the lists on every check.
+- When Instagram puts a challenge, a "confirm it is you" notice or a suspension page in the way, the window stays open on it for up to `FOLLOW_LIST_BROWSER_LOGIN_WAIT` seconds. Click through it yourself and the run opens the profile again and carries on. It waits once, so a second page of that kind stops the run. The tool never clicks anything for you, and an account Instagram has really suspended or disabled cannot be cleared this way.
+- If the browser is not signed in and cannot be, because `FOLLOW_LIST_BROWSER_HEADLESS` is `True` or `FOLLOW_LIST_BROWSER_LOGIN_WAIT` is `0`, the run stops with `The browser is not signed in to Instagram` and names the fix. The same happens when the sign-in later expires or Instagram removes it. Run once with a visible window and sign in again.
+- A configuration saved by the setup wizard in no-login mode contains `SKIP_FOLLOWERS = True` and `SKIP_FOLLOWINGS = True`. Set both to `False`, or the lists stay skipped.
+- A browser profile can be open in one browser at a time. Close any other browser or monitor that uses the same profile directory first.
+- Only the `browser` source reads lists in anonymous mode. With `auto`, `rest` or `graphql` the lists stay skipped, exactly as before.
+
+`instagram_monitor --doctor` reports whether the browser profile already holds a sign-in. It reads the profile's cookie database without starting a browser, so it can answer only when that database is readable.
 
 Check the setup before a real run:
 
@@ -600,7 +651,7 @@ instagram_monitor <target_insta_user> --enable-proxy --proxy-url "http://user:pa
 
 Additional options:
 
-- `PROXY_CERT_PATH` or `--proxy-cert` selects a local CA certificate for HTTP clients. It applies only while [TLS verification](configuration.md#tls-verification) is on. Browser follower lists use the browser's trust store instead, as described under [Browser Proxy Certificates](troubleshooting.md#browser-proxy-certificates)
+- `PROXY_CERT_PATH` or `--proxy-cert` selects a local CA certificate for HTTP clients. It applies only while [TLS verification](configuration.md#tls-verification) is on. Browser follower lists use the browser's trust store instead, as described under [Browser Proxy Certificates](troubleshooting.md#browser-proxy-certificates). On Windows a run that reads follower lists with the browser through a proxy stops at startup unless the CA in this file is already in the Windows trust store, so import it there and keep this setting for the HTTP clients
 - `PROXY_WEBHOOKS` or `--enable-proxy-webhooks` also sends webhook requests through the proxy. It is off by default because some proxies do not allow these requests
 - `IP_ADDRESS_URL` selects one trusted IP lookup URL or an ordered non-empty list of fallback URLs
 
@@ -894,7 +945,7 @@ So having the check interval set to 1 hour (-c 3600), `RANDOM_SLEEP_DIFF_LOW` se
 
 The console and email notifications show the wait selected for the current cycle.
 
-To restrict checks to selected times of day, set `CHECK_POSTS_IN_HOURS_RANGE = True` and configure `MIN_H1`, `MAX_H1`, `MIN_H2` and `MAX_H2`. See [Use Hour-Range Checking](anti-detection.md#use-hour-range-checking).
+To restrict checks to selected times of day, set `CHECK_POSTS_IN_HOURS_RANGE = True` and configure `MIN_H1`, `MAX_H1`, `MIN_H2` and `MAX_H2`. See [Use Hour-Range Checking](anti-detection.md#use-hour-range-checking). To check every second day or less often, set `DAYS_BETWEEN`, as described under [Space Checks By Days](anti-detection.md#space-checks-by-days).
 
 <a id="liveness-reminder"></a>
 ## Liveness Reminder

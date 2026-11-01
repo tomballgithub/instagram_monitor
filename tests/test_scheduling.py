@@ -85,6 +85,122 @@ class TestComputeNextCheckWithHoursRange:
         assert isinstance(label, str) and "No allowed hours" in label
 
 
+class TestDaysBetween:
+    # A check at 22:30 on Monday 1 January 2024 with a one hour interval, as the base the tests below move from
+    NOW = datetime(2024, 1, 1, 22, 30, 0)
+
+    @pytest.fixture(autouse=True)
+    # Allows every hour, since the setting only works with the hour ranges on, and a test narrows them when it needs to
+    def all_hours(self, im_module, monkeypatch):
+        _enable_hours(monkeypatch, im_module, 0, 23, 0, 0)
+
+    # Verifies the setting ships disabled, so a run that never sets it keeps the interval alone
+    def test_the_template_ships_it_disabled(self, im_module):
+        parsed = im_module.parse_config_content(im_module.CONFIG_BLOCK, "<built-in>")
+
+        assert parsed["DAYS_BETWEEN"] == 0
+
+    # Verifies 0 changes nothing, with or without a completed check
+    @pytest.mark.parametrize("after_check", [False, True])
+    def test_zero_is_disabled(self, im_module, monkeypatch, after_check):
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 0)
+
+        sleep_s, next_dt = im_module.compute_next_check_with_hours_range(self.NOW, 3600, after_check=after_check)
+
+        assert sleep_s == 3600 and next_dt == datetime(2024, 1, 1, 23, 30, 0)
+
+    # Verifies a retry or a skipped cycle keeps the plain interval, since no check ran to start the wait
+    def test_only_a_completed_check_starts_the_wait(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 3)
+
+        sleep_s, next_dt = im_module.compute_next_check_with_hours_range(self.NOW, 3600)
+
+        assert sleep_s == 3600 and next_dt == datetime(2024, 1, 1, 23, 30, 0)
+
+    # Verifies daily means the next day, not one hour later, and never earlier than the interval
+    def test_one_is_daily(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 1)
+
+        sleep_s, next_dt = im_module.compute_next_check_with_hours_range(self.NOW, 3600, after_check=True)
+
+        # Midnight of Tuesday plus the interval's own minutes and seconds, which are none for exactly one hour
+        assert next_dt == datetime(2024, 1, 2, 0, 0, 0)
+        assert sleep_s == int((next_dt - self.NOW).total_seconds())
+
+    # Verifies a longer interval than the gap wins, so the setting only ever delays a check
+    def test_a_longer_interval_wins(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 1)
+
+        _sleep_s, next_dt = im_module.compute_next_check_with_hours_range(self.NOW, 23 * 3600 + 45 * 60, after_check=True)
+
+        assert next_dt == datetime(2024, 1, 2, 22, 15, 0)
+
+    # Verifies every other day and longer gaps land on the right calendar day, wherever in the day the check ran
+    @pytest.mark.parametrize("days, expected_day", [(2, 3), (3, 4), (7, 8)])
+    @pytest.mark.parametrize("hour", [0, 9, 23])
+    def test_the_gap_counts_calendar_days(self, im_module, monkeypatch, days, expected_day, hour):
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", days)
+        now = datetime(2024, 1, 1, hour, 15, 0)
+
+        _sleep_s, next_dt = im_module.compute_next_check_with_hours_range(now, 3600, after_check=True)
+
+        assert (next_dt.year, next_dt.month, next_dt.day) == (2024, 1, expected_day)
+        assert next_dt.hour == 0
+
+    # Verifies the hour ranges still decide the time of day, so the check comes in the first allowed hour of that day
+    def test_the_hour_ranges_choose_the_time_of_day(self, im_module, monkeypatch):
+        _enable_hours(monkeypatch, im_module, 22, 23, 0, 0)
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 2)
+
+        _sleep_s, next_dt = im_module.compute_next_check_with_hours_range(self.NOW, 3600 + 17 * 60 + 5, after_check=True)
+
+        assert next_dt.date() == datetime(2024, 1, 3).date()
+        assert next_dt.hour == 22
+        # The minutes and seconds follow the randomized interval, so checks do not begin on the dot of the hour
+        assert (next_dt.minute, next_dt.second) == (17, 5)
+
+    # Verifies the setting is ignored while the hour ranges are off, since it only works with them
+    def test_it_is_ignored_without_hour_ranges(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "CHECK_POSTS_IN_HOURS_RANGE", False)
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 2)
+
+        sleep_s, next_dt = im_module.compute_next_check_with_hours_range(self.NOW, 3600, after_check=True)
+
+        assert sleep_s == 3600 and next_dt == datetime(2024, 1, 1, 23, 30, 0)
+
+    # Verifies the line printed while waiting names the day once the wait ends on another day
+    def test_the_resume_line_names_the_day(self, im_module, monkeypatch, capsys):
+        monkeypatch.setattr(im_module, "HOURS_VERBOSE", True)
+        monkeypatch.setattr(im_module, "DEBUG_MODE", False)
+        monkeypatch.setattr(im_module, "DASHBOARD_ENABLED", False)
+        monkeypatch.setattr(im_module, "TIME_FORMAT_12H", False)
+        monkeypatch.setattr(im_module, "now_local_naive", lambda: self.NOW)
+
+        im_module.sleep_message(3600, "target")
+        same_day = capsys.readouterr().out
+        im_module.sleep_message(2 * 86400, "target")
+        later_day = capsys.readouterr().out
+
+        assert same_day.splitlines()[0].endswith("resumes at ~23:30:00")
+        assert later_day.splitlines()[0].endswith("resumes at ~22:30:00 on Wed 03 Jan")
+
+    # Verifies a misconfigured hour range still reports its label rather than a date
+    def test_no_allowed_hours_still_reports_the_label(self, im_module, monkeypatch):
+        _enable_hours(monkeypatch, im_module, 0, 0, 0, 0)
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 2)
+
+        sleep_s, label = im_module.compute_next_check_with_hours_range(self.NOW, 3600, after_check=True)
+
+        assert sleep_s == 300 and "No allowed hours" in label
+
+    # Verifies the setting is a whole number of zero or more, reported at startup like the other counts
+    @pytest.mark.parametrize("value, rejected", [(0, False), (1, False), (30, False), (-1, True), (1.5, True), ("2", True), (True, True), (None, True)])
+    def test_a_bad_value_is_rejected(self, im_module, monkeypatch, value, rejected):
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", value)
+
+        assert ("DAYS_BETWEEN" in im_module.runtime_configuration_problems()) is rejected
+
+
 class TestProbabilityForCycle:
     def test_full_day_fraction(self, im_module, monkeypatch):
         monkeypatch.setattr(im_module, "DAILY_HUMAN_HITS", 5)

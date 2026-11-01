@@ -355,7 +355,9 @@ FOLLOWEE_DELAY_PER_BATCH = 0
 #   far more CPU and memory, and is much slower. It is never chosen automatically. See the settings
 #   below and the documentation before turning it on
 #
-# Anonymous mode is unaffected, since no surface lists followers without a session
+# Anonymous mode (no session login) skips both lists, since no API lists them without a session. The
+# "browser" source is the exception: it reads them with the browser's own sign-in instead of a session, so
+# an anonymous run keeps reading them when this is "browser". See FOLLOW_LIST_BROWSER_LOGIN_WAIT below
 # Can also be set using the --follow-list-source flag
 FOLLOW_LIST_SOURCE = "auto"
 
@@ -374,12 +376,14 @@ FOLLOW_LIST_BROWSER_CHANNEL = "chromium"
 
 # Whether the browser runs without a visible window
 # It is a real browser either way, not the stripped-down headless shell. Set this to False when you
-# want to watch what it does, which needs a desktop session
+# want to watch what it does, which needs a desktop session. An anonymous run needs it set to False
+# the first time, to sign in to Instagram in the window
 FOLLOW_LIST_BROWSER_HEADLESS = True
 
 # Where the browser profile is kept between runs, one directory per session account
 # Reusing a profile keeps cookies, local storage and browser state stable instead of arriving as a
-# brand new machine on every check. Leave empty to keep it next to the output directory
+# brand new machine on every check. An anonymous run has no session account, so it keeps its own
+# directory there, which is where its sign-in lives. Leave empty to keep it next to the output directory
 FOLLOW_LIST_BROWSER_PROFILE_DIR = ""
 
 # Seconds to wait after each scroll of the follower list
@@ -387,6 +391,40 @@ FOLLOW_LIST_BROWSER_SCROLL_DELAY = 1.5
 
 # Seconds the browser waits for a page or an element before giving up
 FOLLOW_LIST_BROWSER_TIMEOUT = 30
+
+# Seconds to wait for you in the browser window, to sign in when the browser is not signed in to Instagram
+# or to clear a page Instagram puts in the way, such as a challenge or a suspension notice
+# Only an anonymous run needs this. It has no session to hand the browser, so it relies on the browser's own
+# sign-in, which Instagram requires before it shows any follower list. The window opens on the sign-in page and
+# the run carries on as soon as you are in. The sign-in stays in the browser profile, so this is needed once
+# Requires FOLLOW_LIST_BROWSER_HEADLESS = False, since a hidden window cannot be clicked
+# Set 0 to stop with an error instead of waiting
+FOLLOW_LIST_BROWSER_LOGIN_WAIT = 300
+
+# Leave the browser window open after a scan that failed, for as long as you keep it open
+# A debugging aid: the page the scan stopped on stays on screen to inspect, and the run carries on with the
+# error once you close the window. A scan that worked closes the browser as usual
+# Needs FOLLOW_LIST_BROWSER_HEADLESS = False, since a hidden window has nothing to look at
+FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR = False
+
+# Accounts to ask Instagram for in each request while the follower list is scrolled
+# The dialog asks for 12. Instagram answers with at most 25 whatever is asked, so 25 needs about half the
+# requests for the same list. 0 leaves the dialog's own 12
+FOLLOW_LIST_BROWSER_PAGE_SIZE = 25
+
+# Times to ask again for a page that came back with accounts already seen earlier in the same list
+# Instagram fills part of many pages with accounts it sent before, in the slots where other accounts belong, so
+# a list read once comes back 10 to 20 percent short. Asking for the same page again returns a different mix
+# and fills most of those slots. Every repeat is one more request, a couple of seconds apart
+# 0 reads only the rows the dialog renders, which is how this source worked before
+FOLLOW_LIST_BROWSER_REFETCH_TRIES = 3
+
+# What to do with a follower or following list that comes back short of Instagram's count and smaller than the saved list
+# False = discard it and keep the saved list, so nothing in it is reported
+# True = use it only to add names: the names it holds that the saved list lacks are reported as added and joined to the
+# saved list, and nothing is reported as removed, since Instagram can leave accounts out of a list it shows to one
+# viewer without anyone having unfollowed. Removals are reported when a complete list comes back
+FOLLOW_LIST_SHORT_ADDITIONS = False
 
 # ----------------------------
 # Account Safety
@@ -418,6 +456,14 @@ IDENTITY_BUDGET_PER_DAY = 2000
 # Restarting checks the saved session once before resuming any targets
 CIRCUIT_BREAKER = True
 
+# Turn the circuit breaker and the daily identity budget off for an anonymous run that reads follower lists
+# with the browser source
+# Such a run has no session account for either safety limit to protect. Without this, a challenge or suspension
+# page the browser meets is recorded against an anonymous ledger and can stop monitoring, and every name read
+# counts against IDENTITY_BUDGET_PER_DAY, so set it to True if you want the browser left to do its work. Names
+# are still counted and shown. It has no effect with a session login, where both limits protect the account
+BROWSER_MODE_CIRCUIT_BREAKER_DISABLE = False
+
 # ----------------------------
 # Privacy
 # ----------------------------
@@ -446,6 +492,8 @@ PROXY_ENABLED = False
 PROXY_URL = ""
 
 # Optional proxy CA certificate for HTTP clients, browser traffic uses its own trust store
+# On Windows the browser ignores this file and uses the Windows Trusted Root Certification Authorities store, so a run
+# that reads follow lists with the browser stops until the CA is imported there
 PROXY_CERT_PATH = ""
 
 # Whether to verify TLS certificates on every outbound connection, email delivery included
@@ -533,6 +581,15 @@ MAX_H1 = 4
 # To disable this range, set both MIN and MAX to 0
 MIN_H2 = 11
 MAX_H2 = 23
+
+# Number of calendar days between checks, used only while CHECK_POSTS_IN_HOURS_RANGE is True
+# 0 = disabled, checks follow the check interval and the hour ranges
+# 1 = daily, at most one check per day
+# 2 = every other day, 3 = every third day, and so on
+# It extends the next check time: the next check is the first allowed hour on or after the day that many days after a
+# completed check, and never earlier than the check interval. Restarting the monitor checks right away and starts
+# the count again
+DAYS_BETWEEN = 0
 
 # Delay for fetching other data to avoid captcha checks and detection of automated tools
 NEXT_OPERATION_DELAY = 0.7
@@ -828,6 +885,8 @@ WEBHOOK_TEMPLATE = {}
 WEBHOOK_TRANSFORMS = []
 FOLLOWERS_CHURN_AUTODISABLED = False
 FOLLOWERS_CHURN_AUTODISABLED_REASON = ""
+CIRCUIT_BREAKER_AUTODISABLED_REASON = ""
+IDENTITY_BUDGET_AUTODISABLED_REASON = ""
 INSTA_CHECK_INTERVAL = 0
 RANDOM_SLEEP_DIFF_LOW = 0
 RANDOM_SLEEP_DIFF_HIGH = 0
@@ -868,8 +927,14 @@ FOLLOW_LIST_BROWSER_HEADLESS = True
 FOLLOW_LIST_BROWSER_PROFILE_DIR = ""
 FOLLOW_LIST_BROWSER_SCROLL_DELAY = 1.5
 FOLLOW_LIST_BROWSER_TIMEOUT = 30
+FOLLOW_LIST_BROWSER_LOGIN_WAIT = 300
+FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR = False
+FOLLOW_LIST_BROWSER_PAGE_SIZE = 25
+FOLLOW_LIST_BROWSER_REFETCH_TRIES = 3
+FOLLOW_LIST_SHORT_ADDITIONS = False
 IDENTITY_BUDGET_PER_DAY = 0
 CIRCUIT_BREAKER = True
+BROWSER_MODE_CIRCUIT_BREAKER_DISABLE = False
 PRIVACY_SUBSTITUTIONS = []
 PROXY_ENABLED = False
 PROXY_URL = ""
@@ -908,6 +973,7 @@ MIN_H1 = 0
 MAX_H1 = 0
 MIN_H2 = 0
 MAX_H2 = 0
+DAYS_BETWEEN = 0
 NEXT_OPERATION_DELAY = 0
 TARGET_USERNAMES = []
 MULTI_TARGET_STAGGER = 0
@@ -1031,6 +1097,7 @@ CIRCUIT_BREAKER_GUIDE_URL = DOCS_BASE_URL + "/usage/#identity-budget-and-circuit
 TLS_GUIDE_URL = DOCS_BASE_URL + "/configuration/#tls-verification"
 FOLLOW_LIST_SOURCE_GUIDE_URL = DOCS_BASE_URL + "/usage/#follower-list-source"
 BROWSER_FOLLOW_LIST_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#follower-and-following-lists-stop-working"
+BROWSER_PROXY_CERT_GUIDE_URL = DOCS_BASE_URL + "/troubleshooting/#browser-proxy-certificates"
 HTTP_BACKEND_GUIDE_URL = DOCS_BASE_URL + "/usage/#http-transport-backend"
 ANTI_DETECTION_INTERVAL_GUIDE_URL = DOCS_BASE_URL + "/anti-detection/#keep-the-polling-interval-reasonable"
 ANTI_DETECTION_SESSION_GUIDE_URL = DOCS_BASE_URL + "/anti-detection/#sign-in-using-session-mode-with-browser-cookies"
@@ -2619,7 +2686,7 @@ from glob import glob
 import sqlite3
 from sqlite3 import OperationalError, connect
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from urllib.parse import urlsplit, quote
+from urllib.parse import urlsplit, quote, parse_qsl, urlencode, urlunsplit
 from dataclasses import dataclass, field
 from functools import wraps
 import traceback
@@ -9453,6 +9520,18 @@ def import_browser_session_dashboard(browser, cookiefile=None, profile=None):
     return username
 
 
+# Prints lines inside a border of asterisks, in red when colour output is enabled and supported
+def print_red_box(lines: Sequence[str]) -> None:
+    red = f"\033[{_STYLE_CODES['red']}m" if COLOR_ENABLED else ""
+    reset = ANSI_RESET if COLOR_ENABLED else ""
+    border = "*" * 69
+    print("")
+    print(f"{red}{border}{reset}")
+    for line in lines:
+        print(f"{red}{line.ljust(len(border))}{reset}")
+    print(f"{red}{border}{reset}")
+
+
 # Imports Instagram cookies from the given browser into Instaloader, checks login and saves the session
 def import_session(browser, cookiefile, sessionfile, profile=None):
     label = browser_label(browser)
@@ -9478,22 +9557,11 @@ def import_session(browser, cookiefile, sessionfile, profile=None):
 
     print(f"Imported session cookies for {username}")
 
-    # Emit the warning in red only when colour output is enabled and supported, otherwise plain text
-    RED = f"\033[{_STYLE_CODES['red']}m" if COLOR_ENABLED else ""
-    RESET = ANSI_RESET if COLOR_ENABLED else ""
-
-    border = "*" * 69
-    warning_lines = [
+    print_red_box([
         f" Do not use Instagram in {label} while the script is running.",
         " Simultaneous browser and tool activity can get the account flagged.",
         f" Tip: you might want to clear Instagram cookies in {label} now.",
-    ]
-
-    print("")
-    print(f"{RED}{border}{RESET}")
-    for line in warning_lines:
-        print(f"{RED}{line.ljust(len(border))}{RESET}")
-    print(f"{RED}{border}{RESET}")
+    ])
     return username
 
 
@@ -11280,6 +11348,9 @@ def sleep_message(sleeptime, user=None):
     next_check = now + timedelta(seconds=sleeptime)
     user_suffix = f" for {user}" if user else ""
     msg_time = next_check.strftime('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S')
+    # A wait of DAYS_BETWEEN days ends on another day, which a bare time of day would not say
+    if next_check.date() != now.date():
+        msg_time += f" on {calendar.day_abbr[next_check.weekday()]} {next_check.strftime('%d %b')}"
     message = f"Sleeping {display_time(sleeptime)}{user_suffix}, resumes at ~{msg_time}"
     if DEBUG_MODE:
         debug_print(message)
@@ -11418,7 +11489,7 @@ def is_account_level_failure(failure_class: str) -> bool:
 
 # Every recovery category the tool can report, kept closed so a message is testable, deduplicable and translatable later
 RECOVERY_CODES = frozenset({
-    "instagram.rate_limited", "instagram.endpoint_retired", "instagram.action_blocked", "instagram.challenge", "instagram.empty_data", "instagram.browser_dialog",
+    "instagram.rate_limited", "instagram.endpoint_retired", "instagram.action_blocked", "instagram.challenge", "instagram.empty_data", "instagram.browser_dialog", "instagram.browser_signin",
     "session.missing", "session.expired",
     "target.missing", "target.not_found",
     "config.missing", "config.invalid", "config.insecure", "config.impersonate_unsupported",
@@ -11668,6 +11739,11 @@ def classify_recovery_error(error: Any = None, context: str = "runtime", detail:
 # Maps one error message to the stable code behind its summary, fix and guide, and to whether retrying can clear it
 def classify_error_parts(error_msg: str, is_logged_in: bool = False) -> Tuple[str, str, str, str, bool]:
     m = (error_msg or "").lower()
+
+    # A browser with no sign-in of its own, checked first because the message carries a profile path that could
+    # contain any of the terms below
+    if "browser is not signed in" in m:
+        return "instagram.browser_signin", "The browser is not signed in to Instagram", "Instagram shows follower lists only to a signed-in visitor, and an anonymous run has no session to give the browser, so it uses the browser's own sign-in. Set FOLLOW_LIST_BROWSER_HEADLESS = False, run again and sign in in the window that opens. The sign-in is kept in the browser profile, so later runs reuse it, hidden or not. FOLLOW_LIST_BROWSER_LOGIN_WAIT sets how long the window waits for you", BROWSER_FOLLOW_LIST_GUIDE_URL, False
 
     # Rate limiting or TLS-fingerprint blocks
     if any(t in m for t in FAILURE_TERMS['rate_limit']):
@@ -13019,8 +13095,18 @@ def _next_allowed_datetime_at_or_after(planned_dt: datetime, allowed_hours: List
     return planned_dt
 
 
-# Computes the next sleep duration and next_check value, factoring in CHECK_POSTS_IN_HOURS_RANGE
-def compute_next_check_with_hours_range(now_dt: datetime, base_sleep_seconds: int) -> Tuple[int, Any]:
+# Returns the earliest time the next check may run when DAYS_BETWEEN spaces checks by calendar days
+# It is the start of the day that many days after now_dt, moved by the minutes and seconds of the randomized interval so
+# checks do not begin on the dot of the first allowed hour
+def earliest_check_after_days_between(now_dt: datetime, base_sleep_seconds: int) -> datetime:
+    day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=DAYS_BETWEEN)
+    return day_start + timedelta(seconds=int(base_sleep_seconds) % 3600)
+
+
+# Computes the next sleep duration and next_check value, factoring in CHECK_POSTS_IN_HOURS_RANGE and DAYS_BETWEEN
+# after_check is True when a check just completed, since only a completed check starts the wait of DAYS_BETWEEN days
+# A retry after a failed check or a skipped hour keeps the plain interval, and DAYS_BETWEEN is ignored while the hour ranges are off
+def compute_next_check_with_hours_range(now_dt: datetime, base_sleep_seconds: int, after_check: bool = False) -> Tuple[int, Any]:
     if base_sleep_seconds < 0:
         base_sleep_seconds = 0
 
@@ -13034,6 +13120,8 @@ def compute_next_check_with_hours_range(now_dt: datetime, base_sleep_seconds: in
         return 300, "No allowed hours (hour ranges disabled or misconfigured)"
 
     planned_dt = now_dt + timedelta(seconds=base_sleep_seconds)
+    if after_check and DAYS_BETWEEN > 0:
+        planned_dt = max(planned_dt, earliest_check_after_days_between(now_dt, base_sleep_seconds))
     adjusted = _next_allowed_datetime_at_or_after(planned_dt, allowed)
     if adjusted is None:
         return 300, "No allowed hours (hour ranges disabled or misconfigured)"
@@ -13441,6 +13529,29 @@ BROWSER_PROFILE_DIRNAME = "instagram_monitor_browser_profile"
 # Consecutive scrolls that may add no new name before the list is treated as fully rendered
 BROWSER_STALL_LIMIT = 3
 
+# Milliseconds between checks for a sign-in a person is completing in the browser window, and the pause that
+# lets the redirects and cookie writes finishing it settle before the profile is opened
+BROWSER_SIGN_IN_POLL_MS = 1000
+BROWSER_SIGN_IN_SETTLE_MS = 3000
+
+# Milliseconds between checks for the window a kept-open browser is waiting on a person to close
+BROWSER_KEEP_OPEN_POLL_MS = 1000
+
+# Pause before each request for a page again, plus up to half as much again at random, and the most such requests one scan makes
+BROWSER_REFETCH_DELAY_MS = 1500
+BROWSER_REFETCH_MAX_REQUESTS = 400
+
+# Asks for one list page again from inside the profile page, so the request carries the page's own cookies and headers
+BROWSER_REFETCH_JS = """async ([path, appId, asbdId]) => {
+  const csrf = (document.cookie.match(/(?:^|; )csrftoken=([^;]*)/) || [])[1] || '';
+  const response = await fetch(path, {credentials: 'include', headers: {
+    'X-IG-App-ID': appId, 'X-ASBD-ID': asbdId, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf, 'Accept': '*/*'}});
+  let body = null;
+  try { body = await response.json(); } catch (error) { body = null; }
+  const users = body && Array.isArray(body.users) ? body.users.map(user => user && user.username).filter(Boolean) : null;
+  return {status: response.status, retryAfter: response.headers.get('retry-after'), users: users};
+}"""
+
 # Shortfall against the reported count that is tolerated before a scan is rejected as truncated
 BROWSER_SHORTFALL_TOLERANCE = 10
 
@@ -13484,9 +13595,42 @@ BROWSER_DIALOG_SCROLL_JS = """() => {
 }"""
 
 
+# Scrolls the same box back up a little, which wakes the dialog's own loading when it has stopped asking for the next page
+BROWSER_DIALOG_NUDGE_JS = """() => {
+  const dialog = document.querySelector('div[role="dialog"]');
+  if (!dialog) return false;
+  let target = null, best = 0;
+  for (const element of dialog.querySelectorAll('*')) {
+    const delta = element.scrollHeight - element.clientHeight;
+    if (delta > best && element.clientHeight > 100) { best = delta; target = element; }
+  }
+  if (!target) return false;
+  target.scrollTop = Math.max(0, target.scrollTop - 600);
+  return true;
+}"""
+
+# Seconds a scan keeps waiting for the next page after the last one arrived, while Instagram has not marked the end of
+# the list. A few quiet scrolls are not the end of it: pages can be seconds or minutes apart when Instagram slows down
+BROWSER_NO_END_PATIENCE_SECONDS = 90
+
+
 # Raised when the browser provider cannot run or Instagram interrupted the scan
 class BrowserFollowListError(RuntimeError):
     pass
+
+
+# Raised when the target is private and the browser's own account does not follow it, so its lists are not shown
+class BrowserFollowListPrivateError(BrowserFollowListError):
+    pass
+
+
+# What a profile page says to an account that does not follow a private profile
+BROWSER_PRIVATE_PROFILE_PATTERN = re.compile(r"this (?:account|profile) is private", re.IGNORECASE)
+
+# How many times, and how far apart in milliseconds, the profile page is read for that notice. The page is opened at
+# its first paint, before the profile has rendered, so a single read would see nothing yet
+BROWSER_PRIVATE_CHECK_ATTEMPTS = 6
+BROWSER_PRIVATE_CHECK_INTERVAL_MS = 500
 
 
 # Carries one username harvested from the rendered page, which is all the dialog exposes
@@ -13524,6 +13668,104 @@ def browser_profile_dir() -> str:
 def browser_session_cookies(bot) -> List[Any]:
     jar = req.utils.dict_from_cookiejar(bot.context._session.cookies)
     return [{'name': name, 'value': str(value), 'domain': ".instagram.com", 'path': "/", 'secure': True, 'sameSite': "Lax"} for name, value in jar.items() if name and value]
+
+
+# Shows a message on the terminal above the running progress bar and records it in the log
+# The console logger mutes plain prints for the thread that owns the bar, so the bar writes the screen copy itself
+def print_above_progress(message: str) -> None:
+    thread_pbar = getattr(_thread_local, 'pbar', None)
+    if thread_pbar is not None:
+        thread_pbar.write(message, file=thread_pbar.fp)
+    print(message)
+
+
+# Leaves the visible browser open for inspection until its last window is closed, so a failed scan can be looked at
+# where it stopped. Returns at once on a stop request, and never raises, since it runs while an error is propagating
+def hold_browser_open(browser_context, stop_event=None) -> None:
+    print_above_progress("* The scan failed and FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR is on, so the browser stays open to inspect. Close its window to continue")
+    while stop_event is None or not stop_event.is_set():
+        try:
+            open_pages = [page for page in browser_context.pages if not page.is_closed()]
+            if not open_pages:
+                return
+            open_pages[0].wait_for_timeout(BROWSER_KEEP_OPEN_POLL_MS)
+        except Exception:
+            return
+
+
+# Returns whether the browser already holds a signed-in Instagram session, which the web app marks with a session cookie
+def browser_signed_in(browser_context) -> bool:
+    try:
+        cookies = browser_context.cookies("https://www.instagram.com")
+    except Exception:
+        return False
+    return any(cookie.get('name') == "sessionid" and cookie.get('value') for cookie in cookies)
+
+
+# Returns whether the profile an anonymous run keeps its browser in already holds an Instagram sign-in
+# Returns None when its cookie database cannot be read
+def anonymous_browser_profile_signed_in() -> Optional[bool]:
+    profile_dir = browser_profile_dir()
+    if not os.path.isdir(profile_dir):
+        return False
+    for parts in (("Default", "Network", "Cookies"), ("Default", "Cookies")):
+        cookie_file = os.path.join(profile_dir, *parts)
+        if os.path.isfile(cookie_file):
+            return cookie_file_has_instagram_session(cookie_file)
+    return False
+
+
+# Returns whether this run has no Instagram session, so a browser source has to rely on the browser's own sign-in
+def anonymous_browser_run() -> bool:
+    return active_follow_list_source() == 'browser' and not (bool(SESSION_USERNAME) and not SKIP_SESSION)
+
+
+# Returns the error text for a browser that is not signed in, ending in the step that fixes the case at hand
+# The wording is matched by classify_error_parts, so the opening phrase has to stay as it is
+def browser_signed_out_message(fix: str) -> str:
+    return f"The browser is not signed in to Instagram, and Instagram shows follower lists only to a signed-in visitor. An anonymous run has no session to give the browser, so it uses the browser's own sign-in, which is kept in the profile at {browser_profile_dir()}. {fix}"
+
+
+# Waits for a person to sign in to the visible browser window and returns whether the sign-in appeared in time
+# A stop request or the deadline ends the wait early with False
+def wait_for_browser_sign_in(browser_context, page, wait_seconds: float, stop_event=None) -> bool:
+    page.goto("https://www.instagram.com/accounts/login/", wait_until="domcontentloaded")
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        if browser_signed_in(browser_context):
+            # Signing in ends with redirects and cookie writes, which have to settle before the profile is opened
+            page.wait_for_timeout(BROWSER_SIGN_IN_SETTLE_MS)
+            return True
+        try:
+            page.wait_for_timeout(BROWSER_SIGN_IN_POLL_MS)
+        except Exception as closed:
+            raise BrowserFollowListError(browser_signed_out_message("Its window was closed before the sign-in finished. Run again and keep the window open until you are signed in")) from closed
+    return browser_signed_in(browser_context)
+
+
+# Makes sure the browser of an anonymous run is signed in, which Instagram requires before it shows a follower list
+# A visible window is given the chance to sign in. Returns False when a stop was requested during that wait
+def ensure_browser_signed_in(browser_context, page, profile, stop_event=None) -> bool:
+    if browser_signed_in(browser_context):
+        return True
+
+    wait_seconds = float(FOLLOW_LIST_BROWSER_LOGIN_WAIT)
+    if FOLLOW_LIST_BROWSER_HEADLESS:
+        raise BrowserFollowListError(browser_signed_out_message("A hidden window cannot be signed in to. Set FOLLOW_LIST_BROWSER_HEADLESS = False, run again and sign in in the window that opens"))
+    if wait_seconds <= 0:
+        raise BrowserFollowListError(browser_signed_out_message("Set FOLLOW_LIST_BROWSER_LOGIN_WAIT above 0, run again and sign in in the window that opens"))
+
+    browser_follow_list_progress("Waiting for sign-in")
+    print_above_progress(f"* The browser is not signed in to Instagram. Sign in in the browser window, waiting up to {int(wait_seconds)} seconds. The sign-in is kept for later runs")
+    log_activity(f"Browser not signed in to Instagram, waiting up to {int(wait_seconds)} seconds for a sign-in", user=profile.username, level='system')
+    if wait_for_browser_sign_in(browser_context, page, wait_seconds, stop_event):
+        log_activity("Browser signed in to Instagram", user=profile.username, level='system')
+        return True
+    if stop_event is not None and stop_event.is_set():
+        return False
+    raise BrowserFollowListError(browser_signed_out_message(f"No sign-in was completed within {int(wait_seconds)} seconds. Run again and sign in sooner, or raise FOLLOW_LIST_BROWSER_LOGIN_WAIT"))
 
 
 # Returns the proxy settings for the browser, keeping any credentials out of the server URL
@@ -13564,6 +13806,12 @@ def browser_launch_options() -> Dict[str, Any]:
     return options
 
 
+# The two statuses a scan alternates between on every scroll, kept the same length on purpose
+# The bar fills whatever width its text leaves, so statuses of different lengths would make it grow and shrink each time
+BROWSER_STAGE_READING = "Reading names"
+BROWSER_STAGE_COOLDOWN = "Cooldown wait"
+
+
 # Updates the current thread's browser scan status and count without HTTP response hooks
 def browser_follow_list_progress(stage: str, increment: int = 0) -> None:
     thread_pbar = getattr(_thread_local, 'pbar', None)
@@ -13577,25 +13825,241 @@ def browser_follow_list_progress(stage: str, increment: int = 0) -> None:
     thread_pbar.refresh()
 
 
-# Stops the scan when Instagram answered with a challenge, a login page or an account notice
-def guard_browser_page_state(page) -> None:
-    url = str(getattr(page, 'url', "") or "")
-    lowered = url.lower()
+# Stops the scan when the target is private and the browser's own account does not follow it
+# Instagram shows a private profile's lists only to accounts that follow it, and says so on the profile page
+def guard_private_profile(page, profile, kind: str) -> None:
+    if not getattr(profile, 'is_private', False):
+        return
+    for attempt in range(BROWSER_PRIVATE_CHECK_ATTEMPTS):
+        try:
+            text = str(page.evaluate("() => document.body ? document.body.innerText : ''") or "")
+            if BROWSER_PRIVATE_PROFILE_PATTERN.search(text):
+                raise BrowserFollowListPrivateError(f"{profile.username} is private and the browser's own account does not follow it, so Instagram does not show it the {kind}")
+            if attempt + 1 < BROWSER_PRIVATE_CHECK_ATTEMPTS:
+                page.wait_for_timeout(BROWSER_PRIVATE_CHECK_INTERVAL_MS)
+        except BrowserFollowListPrivateError:
+            raise
+        except Exception:
+            return
+
+
+# Returns the marker and description of the interruption page the browser is on, or None on an ordinary page
+def browser_interruption(page) -> Optional[Tuple[str, str]]:
+    lowered = str(getattr(page, 'url', "") or "").lower()
     for marker, description in BROWSER_INTERRUPTION_PAGES:
         if marker in lowered:
-            raise BrowserFollowListError(f"Instagram answered with {description}. Open Instagram in your own browser, resolve it there, then restart or re-import the session")
+            return marker, description
+    return None
+
+
+# Stops the scan when Instagram answered with a challenge, a login page or an account notice
+# An anonymous run has no session to re-import, so a login page means the browser's own sign-in is gone and any
+# other page is one a person can clear in the browser window
+def guard_browser_page_state(page, anonymous: bool = False) -> None:
+    interruption = browser_interruption(page)
+    if interruption is None:
+        return
+    marker, description = interruption
+    if anonymous and marker == "/accounts/login":
+        raise BrowserFollowListError(browser_signed_out_message("Instagram sent it to the sign-in page, so its sign-in has expired or was removed. Set FOLLOW_LIST_BROWSER_HEADLESS = False, run again and sign in in the window that opens"))
+    if anonymous:
+        raise BrowserFollowListError(f"Instagram answered with {description}. Set FOLLOW_LIST_BROWSER_HEADLESS = False, run again and clear it in the window that opens, which waits up to {int(FOLLOW_LIST_BROWSER_LOGIN_WAIT)} seconds for you. An account Instagram has suspended or disabled cannot be cleared that way")
+    raise BrowserFollowListError(f"Instagram answered with {description}. Open Instagram in your own browser, resolve it there, then restart or re-import the session")
+
+
+# Returns whether an anonymous run may hold the visible window open for a person to clear a page Instagram put in the way
+# A hidden window cannot be clicked, and a session run is not helped by it because its cookies come from the session
+def can_wait_for_person(anonymous: bool) -> bool:
+    return anonymous and not FOLLOW_LIST_BROWSER_HEADLESS and float(FOLLOW_LIST_BROWSER_LOGIN_WAIT) > 0
+
+
+# Keeps the browser window open on a challenge, a notice or the login page so a person can clear it
+# Returns True once the browser has left the interruption page, and False when a stop was requested or time ran out
+def wait_for_interruption_to_clear(page, description: str, profile, wait_seconds: float, stop_event=None) -> bool:
+    browser_follow_list_progress("Waiting for you to clear the page")
+    print_above_progress(f"* Instagram is showing {description}. Clear it in the browser window, waiting up to {int(wait_seconds)} seconds")
+    log_activity(f"Browser is on {description}, waiting up to {int(wait_seconds)} seconds for it to be cleared", user=profile.username, level='system')
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        try:
+            page.wait_for_timeout(BROWSER_SIGN_IN_POLL_MS)
+        except Exception as closed:
+            raise BrowserFollowListError(f"Instagram answered with {description}. The browser window was closed before it was cleared, so run again and keep it open until you are through") from closed
+        if browser_interruption(page) is None:
+            # Clearing a page ends with redirects and cookie writes, which have to settle before the profile is opened again
+            page.wait_for_timeout(BROWSER_SIGN_IN_SETTLE_MS)
+            log_activity("Browser cleared the page Instagram showed", user=profile.username, level='system')
+            return True
+    return False
+
+
+# Sends the dialog's own list requests on with the account count raised, since Instagram sends at most 25 per request
+# and the dialog asks for 12. Everything else, and any request already asking for as many, goes through untouched
+def install_browser_page_size(browser_context, kind: str, page_size: int) -> None:
+    if page_size <= 0:
+        return
+    pattern = re.compile(rf"/api/v1/friendships/\d+/{re.escape(kind)}/")
+
+    # Continues one matching request with its count raised
+    def raise_count(route) -> None:
+        try:
+            request = route.request
+            parts = urlsplit(request.url)
+            query = parse_qsl(parts.query, keep_blank_values=True)
+            counts = [index for index, (key, _value) in enumerate(query) if key == "count"]
+            asked = int(query[counts[0]][1]) if counts else 0
+            if request.method == "GET" and asked < page_size:
+                if counts:
+                    query[counts[0]] = ("count", str(page_size))
+                else:
+                    query.append(("count", str(page_size)))
+                route.continue_(url=urlunsplit(parts._replace(query=urlencode(query))))
+                return
+        except Exception:
+            pass
+        try:
+            route.continue_()
+        except Exception:
+            pass
+
+    browser_context.route(pattern, raise_count)
+
+
+# Reads the follower or following pages Instagram's own dialog requests, and asks again for any page that came back
+# with accounts already seen. Instagram fills part of many pages with accounts it sent earlier, in the slots where
+# other accounts belong, and the same page asked for again comes back with a different mix
+class BrowserFollowListWatcher:
+    # Prepares to watch one kind of list, asking again up to tries times for each page that repeated accounts
+    def __init__(self, kind: str, tries: int):
+        self.pattern = re.compile(rf"/api/v1/friendships/\d+/{re.escape(kind)}/")
+        self.tries = tries
+        self.pending: List[Any] = []
+        self.queue: List[str] = []
+        self.skip: Dict[str, int] = {}
+        self.known: set = set()
+        self.unreported: List[str] = []
+        self.requests = 0
+        self.pages = 0
+        self.recovered = 0
+        self.stopped = ""
+        self.responses = 0
+        self.ended = False
+        self.last_response = time.monotonic()
+
+    # Queues a response to the list for reading, unless it answers one of this watcher's own requests
+    def on_response(self, response) -> None:
+        url = str(response.url)
+        if not self.pattern.search(url):
+            return
+        if self.skip.get(url, 0) > 0:
+            self.skip[url] -= 1
+            return
+        self.pending.append(response)
+        self.responses += 1
+        self.last_response = time.monotonic()
+
+    # Returns whether Instagram has been sending pages and has not yet marked the end of the list, within the patience allowed
+    # Until a page has arrived there is nothing to wait for, and the scan keeps its own quiet-scroll limit
+    def waiting_for_more(self) -> bool:
+        return self.responses > 0 and not self.ended and time.monotonic() - self.last_response < BROWSER_NO_END_PATIENCE_SECONDS
+
+    # Takes in the names of one page and returns how many were already known, which are the slots the page lost
+    def remember(self, names) -> int:
+        repeated = 0
+        for name in names:
+            if name in self.known:
+                repeated += 1
+            else:
+                self.known.add(name)
+                self.unreported.append(name)
+        return repeated
+
+    # Asks for one page again up to the configured number of times, keeping whatever new names come back
+    # Any answer other than a page of accounts stops all asking for the rest of the scan, since more traffic is the
+    # wrong response to Instagram pushing back
+    def refetch(self, page, url: str) -> None:
+        parts = urlsplit(url)
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        self.pages += 1
+        for _attempt in range(self.tries):
+            if self.requests >= BROWSER_REFETCH_MAX_REQUESTS:
+                self.stopped = f"it reached the limit of {BROWSER_REFETCH_MAX_REQUESTS} extra requests"
+                return
+            page.wait_for_timeout(int(BROWSER_REFETCH_DELAY_MS * (1 + random.random() / 2)))
+            self.skip[url] = self.skip.get(url, 0) + 1
+            try:
+                result = page.evaluate(BROWSER_REFETCH_JS, [path, INSTAGRAM_WEB_APP_ID, INSTAGRAM_WEB_ASBD_ID])
+            except Exception as failure:
+                self.skip.pop(url, None)
+                self.stopped = f"a request failed ({format_error_message(failure)})"
+                return
+            self.skip.pop(url, None)
+            self.requests += 1
+            if not isinstance(result, dict) or result.get('status') != 200 or not isinstance(result.get('users'), list):
+                status = result.get('status') if isinstance(result, dict) else None
+                wait = f", asking for a {result['retryAfter']} second wait" if isinstance(result, dict) and result.get('retryAfter') else ""
+                answer = f"HTTP {status}" if isinstance(status, int) and status != 200 else "something other than a page of accounts"
+                self.stopped = f"Instagram answered {answer}{wait}"
+                return
+            before = len(self.known)
+            self.remember(result['users'])
+            self.recovered += len(self.known) - before
+
+    # Reads the queued pages, asks again for those that repeated accounts and returns the names not in seen
+    def collect(self, page, seen: set) -> List[str]:
+        while self.pending:
+            response = self.pending.pop(0)
+            try:
+                body = response.json()
+            except Exception:
+                continue
+            users = body.get('users') if isinstance(body, dict) else None
+            if not isinstance(users, list):
+                continue
+            names = [user.get('username') for user in users if isinstance(user, dict) and user.get('username')]
+            # Instagram ends a list with a page that carries no cursor for a next one
+            if not body.get('next_max_id'):
+                self.ended = True
+            if self.remember(names) and self.tries > 0 and not self.stopped:
+                self.queue.append(str(response.url))
+        while self.queue and not self.stopped:
+            self.refetch(page, self.queue.pop(0))
+        fresh = [name for name in self.unreported if name not in seen]
+        self.unreported = []
+        return fresh
+
+    # Says what asking again did, once the list has been read
+    def report(self, profile) -> None:
+        messages = []
+        if self.pages:
+            message = f"Asked again for {self.pages} page(s) that repeated accounts: {self.requests} request(s), {self.recovered} account(s) recovered"
+            if self.stopped:
+                message += f". It stopped early because {self.stopped}"
+            messages.append(message)
+        if self.responses and not self.ended:
+            messages.append(f"Instagram had not marked the end of the list when reading stopped, so the list may be incomplete. The scan waits up to {BROWSER_NO_END_PATIENCE_SECONDS} seconds for a next page")
+        for message in messages:
+            print_above_progress(f"* {message}")
+            log_activity(message, user=profile.username, level='system')
 
 
 # Yields each new batch of names the open dialog renders, scrolling until it stops growing
-def harvest_follow_list_dialog(page, scroll_delay: float, stall_limit: int = BROWSER_STALL_LIMIT, stop_event=None):
+# A watcher adds the names carried by the list responses, including those recovered by asking again for repeated pages
+def harvest_follow_list_dialog(page, scroll_delay: float, stall_limit: int = BROWSER_STALL_LIMIT, stop_event=None, watcher=None):
     seen: set = set()
     stalls = 0
+
+    # Returns the names that arrived after the last look, so a scan never ends with some still unread
+    def late_names() -> List[str]:
+        return [name for name in watcher.collect(page, seen) if name not in seen] if watcher is not None else []
 
     while True:
         if stop_event is not None and stop_event.is_set():
             return
 
-        browser_follow_list_progress("Reading names")
+        browser_follow_list_progress(BROWSER_STAGE_READING)
         rendered = page.evaluate(BROWSER_DIALOG_NAMES_JS)
         if rendered is None:
             raise BrowserFollowListError("Instagram's follower list dialog closed before the list was read")
@@ -13605,6 +14069,11 @@ def harvest_follow_list_dialog(page, scroll_delay: float, stall_limit: int = BRO
             if isinstance(name, str) and name and name not in seen:
                 seen.add(name)
                 fresh.append(name)
+        if watcher is not None:
+            for name in watcher.collect(page, seen):
+                if name not in seen:
+                    seen.add(name)
+                    fresh.append(name)
 
         if fresh:
             stalls = 0
@@ -13612,12 +14081,21 @@ def harvest_follow_list_dialog(page, scroll_delay: float, stall_limit: int = BRO
         else:
             stalls += 1
             if stalls >= stall_limit:
-                return
+                # Quiet scrolls do not end a list Instagram has not finished sending. Wake the dialog's loading and
+                # keep waiting, up to the patience allowed since the last page arrived
+                if watcher is None or not watcher.waiting_for_more():
+                    break
+                page.evaluate(BROWSER_DIALOG_NUDGE_JS)
 
         if not page.evaluate(BROWSER_DIALOG_SCROLL_JS):
-            return
-        browser_follow_list_progress("Waiting after scroll")
+            break
+        browser_follow_list_progress(BROWSER_STAGE_COOLDOWN)
         page.wait_for_timeout(max(0, int(float(scroll_delay) * 1000)))
+
+    late = late_names()
+    if late:
+        seen.update(late)
+        yield late
 
 
 # The curl_cffi impersonation family each Playwright browser channel presents on the wire
@@ -13689,7 +14167,7 @@ def browser_follow_list_readiness() -> Tuple[bool, str, str]:
 
 
 # Opens the requested follow list and waits for its first rendered profile link
-def open_browser_follow_list_dialog(page, target: str, kind: str) -> None:
+def open_browser_follow_list_dialog(page, target: str, kind: str, anonymous: bool = False) -> None:
     detail = f"the profile's {kind} control could not be clicked"
     try:
         direct_link = page.locator(f'a[href="/{target}/{kind}/"]')
@@ -13700,9 +14178,9 @@ def open_browser_follow_list_dialog(page, target: str, kind: str) -> None:
         page.wait_for_selector('div[role="dialog"] a[href^="/"]')
     except Exception as dialog_error:
         # Account interruptions take priority over a missing control or an unreadable dialog
-        guard_browser_page_state(page)
+        guard_browser_page_state(page, anonymous)
         raise BrowserFollowListError(f"Instagram's follower list dialog could not be read for {target}: {detail}") from dialog_error
-    guard_browser_page_state(page)
+    guard_browser_page_state(page, anonymous)
 
 
 # Drives a real browser through Instagram's web app and yields each new batch of rendered names
@@ -13715,6 +14193,7 @@ def browser_follow_list_batches(bot, profile, kind: str, stop_event=None):
     from playwright.sync_api import sync_playwright
 
     target = profile.username
+    anonymous = not bot.context.is_logged_in
     user_data_dir = browser_profile_dir()
     # The operator selects the base directory and browser_profile_dir rejects traversal components
     # codeql[py/path-injection]
@@ -13727,48 +14206,90 @@ def browser_follow_list_batches(bot, profile, kind: str, stop_event=None):
         except Exception as launch_error:
             raise BrowserFollowListError(f"The browser could not start: {format_error_message(launch_error)}. Run 'playwright install chromium' or set FOLLOW_LIST_BROWSER_CHANNEL to a browser installed here") from launch_error
 
+        failed = False
         try:
             browser_context.set_default_timeout(max(1, int(FOLLOW_LIST_BROWSER_TIMEOUT)) * 1000)
-            browser_context.add_cookies(browser_session_cookies(bot))
+            # A session hands the browser its cookies. An anonymous run has none to hand over, so the browser
+            # has to be signed in by itself, and the profile it keeps between runs holds that sign-in
+            if not anonymous:
+                browser_context.add_cookies(browser_session_cookies(bot))
             page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+            if anonymous and not ensure_browser_signed_in(browser_context, page, profile, stop_event):
+                return
 
-            browser_follow_list_progress("Opening profile")
-            page.goto(f"https://www.instagram.com/{target}/", wait_until="domcontentloaded")
-            guard_browser_page_state(page)
+            # Asked for before the dialog opens, so its first page is counted too
+            install_browser_page_size(browser_context, kind, int(FOLLOW_LIST_BROWSER_PAGE_SIZE))
+            watcher = BrowserFollowListWatcher(kind, int(FOLLOW_LIST_BROWSER_REFETCH_TRIES)) if int(FOLLOW_LIST_BROWSER_REFETCH_TRIES) > 0 else None
+            if watcher is not None:
+                page.on("response", watcher.on_response)
 
-            browser_follow_list_progress("Opening list")
-            open_browser_follow_list_dialog(page, target, kind)
-            yield from harvest_follow_list_dialog(page, FOLLOW_LIST_BROWSER_SCROLL_DELAY, stop_event=stop_event)
+            # A page Instagram puts in the way gets one more try after a person clears it in the visible window.
+            # A second interruption is reported instead of waited on again, so the scan cannot loop on one
+            for attempt in range(2):
+                try:
+                    browser_follow_list_progress("Opening profile")
+                    page.goto(f"https://www.instagram.com/{target}/", wait_until="domcontentloaded")
+                    guard_browser_page_state(page, anonymous)
+                    guard_private_profile(page, profile, kind)
+
+                    browser_follow_list_progress("Opening list")
+                    open_browser_follow_list_dialog(page, target, kind, anonymous)
+                    break
+                except BrowserFollowListError:
+                    interruption = browser_interruption(page)
+                    if attempt or interruption is None or not can_wait_for_person(anonymous):
+                        raise
+                    if not wait_for_interruption_to_clear(page, interruption[1], profile, float(FOLLOW_LIST_BROWSER_LOGIN_WAIT), stop_event):
+                        if stop_event is not None and stop_event.is_set():
+                            return
+                        raise
+            yield from harvest_follow_list_dialog(page, FOLLOW_LIST_BROWSER_SCROLL_DELAY, stop_event=stop_event, watcher=watcher)
+            if watcher is not None:
+                watcher.report(profile)
+        except Exception:
+            failed = True
+            raise
         finally:
             try:
-                browser_context.close()
-            except Exception:
-                pass
+                # Held only after a failure, so whatever the scan stopped on can be inspected. A scan that worked
+                # closes the browser and carries on
+                if failed and FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR and not FOLLOW_LIST_BROWSER_HEADLESS:
+                    hold_browser_open(browser_context, stop_event)
+            finally:
+                try:
+                    browser_context.close()
+                except Exception:
+                    pass
 
 
 # Yields rendered follow list entries, counting each batch against the account before it is handed on
+# The browser carries its own sign-in, so an anonymous run reads lists this way too
 def iter_browser_follow_list(bot, profile, kind: str, record_exposure: bool = False, stop_event=None):
-    if not bot.context.is_logged_in:
-        raise instaloader.exceptions.LoginRequiredException(f"Login required to get a profile's {kind}.")
-
     expected = int(getattr(profile, 'followers' if kind == 'followers' else 'followees', 0) or 0)
     harvested = 0
 
-    for batch in browser_follow_list_batches(bot, profile, kind, stop_event=stop_event):
-        if record_exposure:
-            budget_left = identity_budget_remaining()
-            if budget_left is not None:
-                if budget_left <= 0:
-                    return
-                batch = batch[:budget_left]
-            record_identities_returned(len(batch))
+    try:
+        for batch in browser_follow_list_batches(bot, profile, kind, stop_event=stop_event):
+            if record_exposure:
+                budget_left = identity_budget_remaining()
+                if budget_left is not None:
+                    if budget_left <= 0:
+                        return
+                    batch = batch[:budget_left]
+                record_identities_returned(len(batch))
 
-        harvested += len(batch)
-        browser_follow_list_progress("Reading names", len(batch))
-        debug_print("Instagram browser follow list batch", kind=kind, accounts=len(batch), total=harvested)
+            harvested += len(batch)
+            browser_follow_list_progress(BROWSER_STAGE_READING, len(batch))
+            debug_print("Instagram browser follow list batch", kind=kind, accounts=len(batch), total=harvested)
 
-        for name in batch:
-            yield BrowserFollowListEntry(name)
+            for name in batch:
+                yield BrowserFollowListEntry(name)
+    except BrowserFollowListPrivateError as private:
+        # Not a failure of the run: a private target the browser's account does not follow simply has no list to read
+        # for it, so the list is skipped and the run carries on with everything else
+        print_above_progress(f"* {private}. Its {kind} are skipped")
+        log_activity(f"{private}. Its {kind} are skipped", user=profile.username, level='system')
+        return
 
     # A dialog that stops rendering early looks the same as a finished list, so a large shortfall is
     # reported instead of returned. Saving it would drop the missing accounts from the next comparison
@@ -13828,9 +14349,28 @@ def follow_list_source_display() -> str:
     return "REST" if source == 'rest' else "GraphQL"
 
 
+# Returns whether this run reads follower and following lists, which a session run always does
+# An anonymous run does only through the browser source, because that reads them with the browser's own sign-in
+def follow_lists_available(skip_session: bool) -> bool:
+    return not skip_session or active_follow_list_source() == 'browser'
+
+
+# Returns whether the lists of one target may be read, which for a public target or one the session follows is the
+# profile's own say. An anonymous run cannot tell whether the browser's account follows a private target, so the
+# browser source attempts it and reports a target the browser cannot open
+def follow_lists_viewable(can_view: bool, skip_session: bool) -> bool:
+    return bool(can_view) or (skip_session and active_follow_list_source() == 'browser')
+
+
 # Returns the follower or following iterator selected for one target
 def follow_list_generator(bot, profile, kind: str, record_exposure: bool = False, stop_event=None):
     source = active_follow_list_source()
+
+    # The browser source is never chosen by auto. It is slower, heavier and experimental, so it runs
+    # only when it was asked for by name. It is also the one source that needs no session, since the
+    # browser carries its own sign-in, so it is chosen before the anonymous check below
+    if source == 'browser':
+        return iter_browser_follow_list(bot, profile, kind, record_exposure=record_exposure, stop_event=stop_event)
 
     # The REST endpoints answer only for a logged-in session, and anonymous mode already fails with
     # instaloader's own message, so leave that path exactly as it was
@@ -13839,11 +14379,6 @@ def follow_list_generator(bot, profile, kind: str, record_exposure: bool = False
 
     if source == 'rest':
         return iter_rest_follow_list(bot, profile, kind, record_exposure=record_exposure)
-
-    # The browser source is never chosen by auto. It is slower, heavier and experimental, so it runs
-    # only when it was asked for by name
-    if source == 'browser':
-        return iter_browser_follow_list(bot, profile, kind, record_exposure=record_exposure, stop_event=stop_event)
 
     return iter_auto_follow_list(bot, profile, kind, record_exposure=record_exposure)
 
@@ -13862,13 +14397,57 @@ def is_complete_username_baseline(result, reported_count):
 # also shrink the saved list. A browser dialog that stops rendering looks exactly like a finished one, so the
 # reported count and the saved baseline are the two witnesses that tell a stalled render apart from accounts
 # that really went away. Clearing the complete flag is what already stops a truncated list being saved or compared
-def reject_shrinking_username_baseline(result, reported_count, previous, kind: str, user: str = "") -> None:
+def reject_shrinking_username_baseline(result, reported_count, previous, kind: str, user: str = "", baseline_file: Optional[str] = None) -> None:
     if not getattr(result, 'complete', False) or not previous:
         return
     if int(reported_count or 0) <= len(result) or len(previous) <= len(result):
         return
     result.complete = False
-    msg = f"The {kind} list came back with {len(result)} of about {reported_count} while {len(previous)} were already saved, so the saved list is kept"
+    msg = f"The {kind} list came back with {len(result)} of the {reported_count} Instagram reports, fewer than the {len(previous)} in the saved list"
+    if not FOLLOW_LIST_SHORT_ADDITIONS:
+        msg += ", so the saved list is kept"
+    print(f"* {msg}")
+    log_activity(msg, user=user, level='system')
+    if baseline_file:
+        save_rejected_username_list(baseline_file, reported_count, result, previous, user)
+    if FOLLOW_LIST_SHORT_ADDITIONS:
+        use_short_list_for_additions(result, previous, kind, user)
+
+
+# Turns a short list into the saved list plus the names the saved list lacks, so a change of the list reports additions only
+# The result keeps its type and is marked complete, which lets the usual comparison and save run on it. Names the short
+# list lacks stay in the saved list, because Instagram can omit accounts it still counts. A later complete list reports
+# the removals that really happened
+def use_short_list_for_additions(result, previous, kind: str, user: str = "") -> None:
+    known = set(previous)
+    additions = [name for name in result if name not in known]
+    result[:] = list(previous) + additions
+    result.complete = True
+    msg = f"Using the short {kind} list only to add names: {len(additions)} new, none removed, until a complete list comes back"
+    print(f"* {msg}")
+    log_activity(msg, user=user, level='system')
+
+
+# Returns the side file a rejected list is written to, next to the baseline it was not allowed to replace
+# For instagram_KK_followings.json it is instagram_KK_followings.rejected.json
+def rejected_username_file(baseline_file: str) -> str:
+    stem, extension = os.path.splitext(baseline_file)
+    return f"{stem}.rejected{extension}"
+
+
+# Writes a rejected list to its side file, in the baseline format, so it can be compared with the saved list
+# The next rejected scan replaces it, and the saved baseline is never touched. A failure to write is reported, not raised
+def save_rejected_username_list(baseline_file: str, reported_count, result, previous, user: str = "") -> None:
+    destination = rejected_username_file(baseline_file)
+    try:
+        save_username_baseline(destination, reported_count, result)
+    except OSError as error:
+        msg = f"The rejected list could not be saved to '{destination}': {error}"
+        print(f"* {msg}")
+        log_activity(msg, user=user, level='system')
+        return
+    missing = len(set(previous) - set(result))
+    msg = f"The names it read were saved to '{destination}' to compare with the saved list, which has {missing} names that are not in it"
     print(f"* {msg}")
     log_activity(msg, user=user, level='system')
 
@@ -13919,6 +14498,75 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
         IDENTITY_SCAN_LOCK.release()
 
 
+# Says why one name fetch must not start: the text for the screen, the text for the log, the ledger error behind it if
+# there is one, and whether the screen text goes through CommandOutput like the breaker's always has
+class NameFetchRefusal:
+    __slots__ = ('screen', 'log', 'ledger_error', 'wrapped')
+
+    # Keeps the texts and the ledger error of one refusal
+    def __init__(self, screen: str, log: str, ledger_error: Optional[Exception] = None, wrapped: bool = False):
+        self.screen = screen
+        self.log = log
+        self.ledger_error = ledger_error
+        self.wrapped = wrapped
+
+
+# Returns why a name fetch of estimated_limit names must not start, or None when it may
+# Checked in the order the fetch always did: the breaker, the ledger, a spent budget, then a budget too small for the scan
+# A scan that cannot finish inside the remaining budget would spend it on a list that is then discarded as incomplete,
+# and would repeat that every day without ever saving a baseline, so it is never started
+def name_fetch_refusal(estimated_limit: int) -> Optional[NameFetchRefusal]:
+    breaker = circuit_breaker_state()
+    if breaker:
+        summary = f"Skipping name fetch: circuit breaker tripped for {exposure_account_name()} ({breaker.get('failure_class', 'unknown')})."
+        fix = breaker_recovery_hint(breaker.get('failure_class', ''))
+        return NameFetchRefusal(f"* {sanitize_error_text(summary)} {fix}", f"{summary} {fix}", wrapped=True)
+
+    memory_state = _account_breaker_memory_state()
+    if memory_state and memory_state.get('failure_class') == 'ledger_unavailable':
+        msg = f"Skipping name fetch: account safety ledger is unavailable. {breaker_recovery_hint('ledger_unavailable')}"
+        return NameFetchRefusal(f"* {msg}", msg)
+
+    try:
+        verify_exposure_ledger_writable()
+        budget_spent = identity_budget_exhausted()
+        budget_available = identity_budget_remaining()
+    except ExposureLedgerError as error:
+        msg = "Skipping name fetch: account safety ledger cannot be read and saved, so identity collection is blocked"
+        return NameFetchRefusal(f"* {msg}", msg, ledger_error=error)
+
+    if budget_spent:
+        msg = f"Skipping name fetch: daily identity budget of {IDENTITY_BUDGET_PER_DAY} is spent for {exposure_account_name()}. Counts and posts keep being monitored"
+        return NameFetchRefusal(f"* {msg}", msg)
+
+    if budget_available is not None and estimated_limit and budget_available < estimated_limit:
+        msg = f"Skipping name fetch: {estimated_limit} names are needed but only {budget_available} of the daily identity budget of {IDENTITY_BUDGET_PER_DAY} is left, and a partial list is never saved. Counts and posts keep being monitored"
+        return NameFetchRefusal(f"* {msg}", msg)
+
+    return None
+
+
+# Shows a refusal on the screen, above a progress bar if one is running, and records it in the log
+def report_name_fetch_refusal(refusal: NameFetchRefusal, user: str) -> None:
+    if refusal.ledger_error is not None:
+        _mark_account_safety_unavailable(refusal.ledger_error)
+    if refusal.wrapped:
+        thread_pbar = getattr(_thread_local, 'pbar', None)
+        if thread_pbar is not None:
+            thread_pbar.write(refusal.screen, file=thread_pbar.fp)
+        print(CommandOutput(refusal.screen))
+    else:
+        print_above_progress(refusal.screen)
+    log_activity(refusal.log, user=user, level='system')
+
+
+# Starts the progress bar of a name fetch, unless the fetch is going to refuse to start
+# A bar for a fetch that never runs only hides the reason for the refusal behind "Initializing"
+def setup_name_fetch_pbar(total_expected, title: str) -> None:
+    if name_fetch_refusal(int(total_expected or 0)) is None:
+        setup_pbar(total_expected=total_expected, title=title)
+
+
 # Fetches one serialized username scan and marks whether its baseline is complete
 def _fetch_usernames_paginated_locked(bot, get_generator_fn, max_per_batch, total_limit, fetch_delay, advanced_fetch, estimated_limit, user, stop_event=None, identities_counted_at_source=False):
     """Fetch usernames with a fresh generator and mark complete only on exhaustion.
@@ -13935,46 +14583,9 @@ def _fetch_usernames_paginated_locked(bot, get_generator_fn, max_per_batch, tota
     # Name fetching is the most expensive operation against the account, so it is the one place the
     # breaker and the daily budget are enforced. Both leave the result incomplete on purpose, which
     # stops save_username_baseline from overwriting a good baseline with a truncated one
-    breaker = circuit_breaker_state()
-    if breaker:
-        summary = f"Skipping name fetch: circuit breaker tripped for {exposure_account_name()} ({breaker.get('failure_class', 'unknown')})."
-        fix = breaker_recovery_hint(breaker.get('failure_class', ''))
-        msg = f"{summary} {fix}"
-        print(CommandOutput(f"* {sanitize_error_text(summary)} {fix}"))
-        log_activity(msg, user=user, level='system')
-        return results
-
-    memory_state = _account_breaker_memory_state()
-    if memory_state and memory_state.get('failure_class') == 'ledger_unavailable':
-        msg = f"Skipping name fetch: account safety ledger is unavailable. {breaker_recovery_hint('ledger_unavailable')}"
-        print(f"* {msg}")
-        log_activity(msg, user=user, level='system')
-        return results
-
-    try:
-        verify_exposure_ledger_writable()
-        budget_spent = identity_budget_exhausted()
-        budget_available = identity_budget_remaining()
-    except ExposureLedgerError as error:
-        _mark_account_safety_unavailable(error)
-        msg = "Skipping name fetch: account safety ledger cannot be read and saved, so identity collection is blocked"
-        print(f"* {msg}")
-        log_activity(msg, user=user, level='system')
-        return results
-
-    if budget_spent:
-        msg = f"Skipping name fetch: daily identity budget of {IDENTITY_BUDGET_PER_DAY} is spent for {exposure_account_name()}. Counts and posts keep being monitored"
-        print(f"* {msg}")
-        log_activity(msg, user=user, level='system')
-        return results
-
-    # A scan that cannot finish inside the remaining budget would spend it on a list that is then discarded
-    # as incomplete, and would repeat that every day without ever saving a baseline, so it is never started
-    needed = int(estimated_limit or 0)
-    if budget_available is not None and needed and budget_available < needed:
-        msg = f"Skipping name fetch: {needed} names are needed but only {budget_available} of the daily identity budget of {IDENTITY_BUDGET_PER_DAY} is left, and a partial list is never saved. Counts and posts keep being monitored"
-        print(f"* {msg}")
-        log_activity(msg, user=user, level='system')
+    refusal = name_fetch_refusal(int(estimated_limit or 0))
+    if refusal is not None:
+        report_name_fetch_refusal(refusal, user)
         return results
 
     gen = get_generator_fn()  # single generator — keeps cursor position across batches
@@ -14585,7 +15196,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             except Exception as e:
                 print_recovery_error(e, context="file_write", summary=f"Could not write the CSV entry to '{csv_file_name}': {e}")
 
-    if ((followers_count != followers_old_count) or (followers_count > 0 and not followers) or FOLLOWERS_CHURN_DETECTION) and not skip_session and not skip_followers and can_view:
+    if ((followers_count != followers_old_count) or (followers_count > 0 and not followers) or FOLLOWERS_CHURN_DETECTION) and follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session):
         # Fetch followers if count changed, list is empty or detailed logging is enabled
         if FOLLOWERS_CHURN_DETECTION and followers_count > 5000:
             warning = f"High follower count ({followers_count})! This may increase rate limit risk with detailed logging."
@@ -14597,7 +15208,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             update_ui_data(targets={user: {'status': 'Downloading Followers'}})
             log_activity(f"Started downloading followers", user=user)
             follower_limit = min(FOLLOWER_LIMIT_TO_FETCH, followers_count) if (ADVANCED_FOLLOWER_FETCH and FOLLOWER_LIMIT_TO_FETCH) else followers_count
-            setup_pbar(total_expected=follower_limit, title="* Downloading Followers")
+            setup_name_fetch_pbar(follower_limit, "* Downloading Followers")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'follower'
             followers = fetch_usernames_paginated(
@@ -14619,7 +15230,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             duration_dl = end_time_dl - start_time_dl
             log_activity(f"Finished downloading followers: {len(followers)}, fetched in {display_time(duration_dl)}", user=user)
             followers_count = profile.followers
-            reject_shrinking_username_baseline(followers, followers_count, followers_old, "followers", user)
+            reject_shrinking_username_baseline(followers, followers_count, followers_old, "followers", user, insta_followers_file)
         except Exception as e:
             close_pbar()
             error_msg = format_error_message(e)
@@ -14649,7 +15260,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
 
     # Compare followers: either count changed OR detailed logging detected a difference
     should_compare_followers = is_complete_username_baseline(followers, followers_count) and followers_baseline_available and ((followers_count != followers_old_count) or (FOLLOWERS_CHURN_DETECTION and followers != followers_old))
-    if should_compare_followers and (followers != followers_old) and not skip_session and not skip_followers and can_view and ((followers and followers_count > 0) or (not followers and followers_count == 0)):
+    if should_compare_followers and (followers != followers_old) and follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session) and ((followers and followers_count > 0) or (not followers and followers_count == 0)):
         if not skip_follow_changes:
             added_followers_list, removed_followers_list, added_followers_list_html, removed_followers_list_html, added_followers_list_webhook, removed_followers_list_webhook, added_followers_mbody, removed_followers_mbody = compare_and_log_follower_changes(
                 user, "followers", followers_old, followers, csv_file_name
@@ -14681,7 +15292,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                 send_notification_channels("followers", m_subject, m_body, m_body_html, email_enabled=STATUS_NOTIFICATION and FOLLOWERS_NOTIFICATION, **follower_change_embed(user, "followers", followers_old_count, followers_count, added_followers_list_webhook, removed_followers_list_webhook))
 
     # Establish baseline after first successful fetch if it wasn't available
-    if is_complete_username_baseline(followers, followers_count) and not skip_follow_changes and not followers_baseline_available and not skip_session and not skip_followers and can_view:
+    if is_complete_username_baseline(followers, followers_count) and not skip_follow_changes and not followers_baseline_available and follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session):
         followers_baseline_available = True
 
     if os.path.isfile(insta_followings_file):
@@ -14726,7 +15337,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             except Exception as e:
                 print_recovery_error(e, context="file_write", summary=f"Could not write the CSV entry to '{csv_file_name}': {e}")
 
-    if ((followings_count != followings_old_count) or (followings_count > 0 and not followings) or FOLLOWERS_CHURN_DETECTION) and not skip_session and not skip_followings and can_view:
+    if ((followings_count != followings_old_count) or (followings_count > 0 and not followings) or FOLLOWERS_CHURN_DETECTION) and follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session):
         # Fetch followings if count changed, list is empty or detailed logging is enabled
         if FOLLOWERS_CHURN_DETECTION and followings_count > 5000:
             warning = f"High following count ({followings_count})! This may increase rate limit risk with detailed logging."
@@ -14738,7 +15349,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             update_ui_data(targets={user: {'status': 'Downloading Followings'}})
             log_activity(f"Started downloading followings", user=user)
             followee_limit = min(FOLLOWEE_LIMIT_TO_FETCH, followings_count) if (ADVANCED_FOLLOWEE_FETCH and FOLLOWEE_LIMIT_TO_FETCH) else followings_count
-            setup_pbar(total_expected=followee_limit, title="* Downloading Followings")
+            setup_name_fetch_pbar(followee_limit, "* Downloading Followings")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'followee'
             followings = fetch_usernames_paginated(
@@ -14760,7 +15371,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             duration_dl = end_time_dl - start_time_dl
             log_activity(f"Finished downloading followings: {len(followings)}, fetched in {display_time(duration_dl)}", user=user)
             followings_count = profile.followees
-            reject_shrinking_username_baseline(followings, followings_count, followings_old, "followings", user)
+            reject_shrinking_username_baseline(followings, followings_count, followings_old, "followings", user, insta_followings_file)
         except Exception as e:
             close_pbar()
             error_msg = format_error_message(e)
@@ -14789,7 +15400,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                 print_recovery_error(e, context="file_write", summary=f"Cannot save list of followings to '{insta_followings_file}' file: {e}")
 
     should_compare_followings = is_complete_username_baseline(followings, followings_count) and followings_baseline_available and ((followings_count != followings_old_count) or (FOLLOWERS_CHURN_DETECTION and followings != followings_old))
-    if should_compare_followings and (followings != followings_old) and not skip_session and not skip_followings and can_view and ((followings and followings_count > 0) or (not followings and followings_count == 0)):
+    if should_compare_followings and (followings != followings_old) and follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session) and ((followings and followings_count > 0) or (not followings and followings_count == 0)):
         if not skip_follow_changes:
             added_followings_list, removed_followings_list, added_followings_list_html, removed_followings_list_html, added_followings_list_webhook, removed_followings_list_webhook, added_followings_mbody, removed_followings_mbody = compare_and_log_follower_changes(
                 user, "followings", followings_old, followings, csv_file_name
@@ -14821,15 +15432,15 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                 send_notification_channels("status", m_subject, m_body, m_body_html, email_enabled=STATUS_NOTIFICATION, **follower_change_embed(user, "followings", followings_old_count, followings_count, added_followings_list_webhook, removed_followings_list_webhook))
 
     # Establish baseline after first successful fetch if it wasn't available
-    if is_complete_username_baseline(followings, followings_count) and not skip_follow_changes and not followings_baseline_available and not skip_session and not skip_followings and can_view:
+    if is_complete_username_baseline(followings, followings_count) and not skip_follow_changes and not followings_baseline_available and follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session):
         followings_baseline_available = True
 
-    if is_complete_username_baseline(followers, followers_count) and not skip_follow_changes and not skip_session and not skip_followers and can_view:
+    if is_complete_username_baseline(followers, followers_count) and not skip_follow_changes and follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session):
         followers_old = followers
     else:
         followers = followers_old
 
-    if is_complete_username_baseline(followings, followings_count) and not skip_follow_changes and not skip_session and not skip_followings and can_view:
+    if is_complete_username_baseline(followings, followings_count) and not skip_follow_changes and follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session):
         followings_old = followings
     else:
         followings = followings_old
@@ -15201,7 +15812,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
     # Don't increment CHECK_COUNT here - it will be incremented in the main loop
     now = now_local_naive()
     r_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
-    r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time)
+    r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time, after_check=True)
     update_check_times(
         last_time=now,
         next_time=next_check_val,
@@ -15594,11 +16205,11 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                 removed_followings_mbody = ""
                 followings_list_comparison_complete = False
 
-                if not skip_follow_changes and not skip_session and not skip_followings and can_view:
+                if not skip_follow_changes and follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session):
                     try:
                         log_activity(f"Started downloading followings", user=user)
                         followee_limit = min(FOLLOWEE_LIMIT_TO_FETCH, followings_count) if (ADVANCED_FOLLOWEE_FETCH and FOLLOWEE_LIMIT_TO_FETCH) else followings_count
-                        setup_pbar(total_expected=followee_limit, title="* Downloading Followings")
+                        setup_name_fetch_pbar(followee_limit, "* Downloading Followings")
                         start_time_dl = time.time()
                         followings = []
                         _thread_local.FETCH_TYPE = 'followee'
@@ -15623,7 +16234,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         # Refresh profile to get current reported counts for comparison
                         profile = profile_from_username_resilient(bot, user)
                         followings_count = profile.followees
-                        reject_shrinking_username_baseline(followings, followings_count, followings_old, "followings", user)
+                        reject_shrinking_username_baseline(followings, followings_count, followings_old, "followings", user, insta_followings_file)
                         followers_count_reported = profile.followers
                         if not FOLLOWERS_CHURN_DETECTION:
                             show_follow_info(followers_count_reported, len(followers), followings_count, len(followings))
@@ -15677,7 +16288,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         else:
                             m_subject = f"Instagram user {user} followings list has changed! (count: {followings_count})"
 
-                        if not skip_session and not skip_followings and can_view:
+                        if follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session):
                             if followings_count != followings_old_count:
                                 m_body = f"Followings number changed by user {user} from {followings_old_count} to {followings_count} ({followings_diff_str})\n{removed_followings_mbody}{removed_followings_list}{added_followings_mbody}{added_followings_list}\nCheck interval: {check_window_text()}{get_cur_ts(nl_ch + 'Timestamp: ')}"
                             else:
@@ -15685,7 +16296,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         else:
                             m_body = f"Followings number changed by user {user} from {followings_old_count} to {followings_count} ({followings_diff_str})\n\nCheck interval: {check_window_text()}{get_cur_ts(nl_ch + 'Timestamp: ')}"
 
-                        if not skip_session and not skip_followings and can_view:
+                        if follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session):
                             if followings_count != followings_old_count:
                                 m_body_html_parts = [f"Followings number changed by user <b>{user}</b> from <b>{followings_old_count}</b> to <b>{followings_count}</b> ({followings_diff_str})"]
                             else:
@@ -15741,11 +16352,11 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                 removed_followers_mbody = ""
                 followers_list_comparison_complete = False
 
-                if not skip_follow_changes and not skip_session and not skip_followers and can_view:
+                if not skip_follow_changes and follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session):
                     try:
                         log_activity(f"Started downloading followers", user=user)
                         follower_limit = min(FOLLOWER_LIMIT_TO_FETCH, followers_count) if (ADVANCED_FOLLOWER_FETCH and FOLLOWER_LIMIT_TO_FETCH) else followers_count
-                        setup_pbar(total_expected=follower_limit, title="* Downloading Followers")
+                        setup_name_fetch_pbar(follower_limit, "* Downloading Followers")
                         start_time_dl = time.time()
                         followers = []
                         _thread_local.FETCH_TYPE = 'follower'
@@ -15770,7 +16381,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         # Refresh profile to get current reported counts for comparison
                         profile = profile_from_username_resilient(bot, user)
                         followers_count = profile.followers
-                        reject_shrinking_username_baseline(followers, followers_count, followers_old, "followers", user)
+                        reject_shrinking_username_baseline(followers, followers_count, followers_old, "followers", user, insta_followers_file)
                         followings_count_reported = profile.followees
                         if not FOLLOWERS_CHURN_DETECTION:
                             show_follow_info(followers_count, len(followers), followings_count_reported, len(followings))
@@ -15824,7 +16435,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         else:
                             m_subject = f"Instagram user {user} followers list has changed! (count: {followers_count})"
 
-                        if not skip_session and not skip_followers and can_view:
+                        if follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session):
                             if followers_count != followers_old_count:
                                 m_body = f"Followers number changed for user {user} from {followers_old_count} to {followers_count} ({followers_diff_str})\n{removed_followers_mbody}{removed_followers_list}{added_followers_mbody}{added_followers_list}\nCheck interval: {check_window_text()}{get_cur_ts(nl_ch + 'Timestamp: ')}"
                             else:
@@ -15832,7 +16443,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         else:
                             m_body = f"Followers number changed for user {user} from {followers_old_count} to {followers_count} ({followers_diff_str})\n\nCheck interval: {check_window_text()}{get_cur_ts(nl_ch + 'Timestamp: ')}"
 
-                        if not skip_session and not skip_followers and can_view:
+                        if follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session):
                             if followers_count != followers_old_count:
                                 m_body_html_parts = [f"Followers number changed for user <b>{user}</b> from <b>{followers_old_count}</b> to <b>{followers_count}</b> ({followers_diff_str})"]
                             else:
@@ -16196,7 +16807,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                     # Prepare next check timing (don't increment count, already done at check start)
                     now = now_local_naive()
                     r_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
-                    r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time)
+                    r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time, after_check=True)
                     update_check_times(next_time=next_check_val, user=user, increment_count=False)
 
                 except Exception as e:
@@ -16461,7 +17072,8 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
 
         now = now_local_naive()
         target_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
-        r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, target_sleep_time)
+        # Only a check that ran starts the wait of DAYS_BETWEEN days, a cycle skipped for the hour keeps the plain interval
+        r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, target_sleep_time, after_check=in_allowed_hours)
 
         # Update next check time tracking (don't increment count, already done at check start)
         update_check_times(next_time=next_check_val, user=user, increment_count=False)
@@ -18847,6 +19459,23 @@ def doctor_secret_checks(env_path=None) -> List[DoctorCheck]:
     return checks
 
 
+# Reports whether the browser an anonymous run reads follower lists with is signed in, which Instagram requires
+def doctor_browser_sign_in_check() -> DoctorCheck:
+    signed_in = anonymous_browser_profile_signed_in()
+    detail = f"Profile: {browser_profile_dir()}. An anonymous run has no session to give the browser, so it uses the browser's own sign-in"
+    if signed_in:
+        return make_doctor_check("Configuration", "PASS", "The browser profile holds an Instagram sign-in", detail)
+
+    if FOLLOW_LIST_BROWSER_HEADLESS or float(FOLLOW_LIST_BROWSER_LOGIN_WAIT) <= 0:
+        reason = "a hidden browser cannot be signed in to" if FOLLOW_LIST_BROWSER_HEADLESS else "FOLLOW_LIST_BROWSER_LOGIN_WAIT is 0, so the run does not wait for a sign-in"
+        advice = make_recovery_advice("config.invalid", "The browser has no Instagram sign-in to use", recovery_fix_with_guide("Set FOLLOW_LIST_BROWSER_HEADLESS to False and FOLLOW_LIST_BROWSER_LOGIN_WAIT above 0, then run the monitor once and sign in in the window that opens. Later runs reuse the sign-in, hidden or not", BROWSER_FOLLOW_LIST_GUIDE_URL), False)
+        return make_doctor_check("Configuration", "FAIL", advice.summary, f"{detail}. It is not signed in and {reason}", advice)
+
+    summary = "The browser is not signed in to Instagram yet" if signed_in is False else "The browser profile's sign-in could not be checked"
+    advice = make_recovery_advice("config.invalid", summary, recovery_fix_with_guide(f"Run the monitor and sign in in the window that opens. It waits up to {int(FOLLOW_LIST_BROWSER_LOGIN_WAIT)} seconds. Later runs reuse the sign-in, hidden or not", BROWSER_FOLLOW_LIST_GUIDE_URL), False)
+    return make_doctor_check("Configuration", "WARN", advice.summary, detail, advice)
+
+
 # Turns one startup error line into a doctor label, since the printed "* Error:" prefix is not part of the finding
 def doctor_label_from_error(summary) -> str:
     label = str(summary).lstrip("* ").rstrip(":")
@@ -18857,8 +19486,8 @@ def doctor_label_from_error(summary) -> str:
 def runtime_configuration_problems() -> Dict[str, str]:
     problems: Dict[str, str] = {}
     positive_numbers = (("INSTA_CHECK_INTERVAL", INSTA_CHECK_INTERVAL), ("CHECK_INTERNET_TIMEOUT", CHECK_INTERNET_TIMEOUT), ("FOLLOW_LIST_BROWSER_TIMEOUT", FOLLOW_LIST_BROWSER_TIMEOUT))
-    nonnegative_numbers = (("RANDOM_SLEEP_DIFF_LOW", RANDOM_SLEEP_DIFF_LOW), ("RANDOM_SLEEP_DIFF_HIGH", RANDOM_SLEEP_DIFF_HIGH), ("LIVENESS_CHECK_INTERVAL", LIVENESS_CHECK_INTERVAL), ("NEXT_OPERATION_DELAY", NEXT_OPERATION_DELAY), ("FOLLOWER_DELAY_PER_BATCH", FOLLOWER_DELAY_PER_BATCH), ("FOLLOWEE_DELAY_PER_BATCH", FOLLOWEE_DELAY_PER_BATCH), ("FOLLOW_LIST_BROWSER_SCROLL_DELAY", FOLLOW_LIST_BROWSER_SCROLL_DELAY), ("MULTI_TARGET_STAGGER", MULTI_TARGET_STAGGER), ("MULTI_TARGET_STAGGER_JITTER", MULTI_TARGET_STAGGER_JITTER))
-    nonnegative_integers = (("DAILY_HUMAN_HITS", DAILY_HUMAN_HITS), ("FOLLOWERS_PER_BATCH", FOLLOWERS_PER_BATCH), ("FOLLOWEES_PER_BATCH", FOLLOWEES_PER_BATCH), ("FOLLOWER_LIMIT_TO_FETCH", FOLLOWER_LIMIT_TO_FETCH), ("FOLLOWEE_LIMIT_TO_FETCH", FOLLOWEE_LIMIT_TO_FETCH), ("IDENTITY_BUDGET_PER_DAY", IDENTITY_BUDGET_PER_DAY))
+    nonnegative_numbers = (("RANDOM_SLEEP_DIFF_LOW", RANDOM_SLEEP_DIFF_LOW), ("RANDOM_SLEEP_DIFF_HIGH", RANDOM_SLEEP_DIFF_HIGH), ("LIVENESS_CHECK_INTERVAL", LIVENESS_CHECK_INTERVAL), ("NEXT_OPERATION_DELAY", NEXT_OPERATION_DELAY), ("FOLLOWER_DELAY_PER_BATCH", FOLLOWER_DELAY_PER_BATCH), ("FOLLOWEE_DELAY_PER_BATCH", FOLLOWEE_DELAY_PER_BATCH), ("FOLLOW_LIST_BROWSER_SCROLL_DELAY", FOLLOW_LIST_BROWSER_SCROLL_DELAY), ("FOLLOW_LIST_BROWSER_LOGIN_WAIT", FOLLOW_LIST_BROWSER_LOGIN_WAIT), ("MULTI_TARGET_STAGGER", MULTI_TARGET_STAGGER), ("MULTI_TARGET_STAGGER_JITTER", MULTI_TARGET_STAGGER_JITTER))
+    nonnegative_integers = (("DAILY_HUMAN_HITS", DAILY_HUMAN_HITS), ("FOLLOWERS_PER_BATCH", FOLLOWERS_PER_BATCH), ("FOLLOWEES_PER_BATCH", FOLLOWEES_PER_BATCH), ("FOLLOWER_LIMIT_TO_FETCH", FOLLOWER_LIMIT_TO_FETCH), ("FOLLOWEE_LIMIT_TO_FETCH", FOLLOWEE_LIMIT_TO_FETCH), ("DAYS_BETWEEN", DAYS_BETWEEN), ("IDENTITY_BUDGET_PER_DAY", IDENTITY_BUDGET_PER_DAY), ("FOLLOW_LIST_BROWSER_PAGE_SIZE", FOLLOW_LIST_BROWSER_PAGE_SIZE), ("FOLLOW_LIST_BROWSER_REFETCH_TRIES", FOLLOW_LIST_BROWSER_REFETCH_TRIES))
     hours = (("MIN_H1", MIN_H1), ("MAX_H1", MAX_H1), ("MIN_H2", MIN_H2), ("MAX_H2", MAX_H2))
     ports = (("SMTP_PORT", SMTP_PORT), ("WEB_DASHBOARD_PORT", WEB_DASHBOARD_PORT))
     for name, value in positive_numbers:
@@ -18890,6 +19519,49 @@ def runtime_boolean_errors() -> List[str]:
     return [f"{name} must be True or False, not {globals().get(name)!r}" for name in booleans if not isinstance(globals().get(name), bool)]
 
 
+# The problem reported when the browser would not trust the proxy CA that PROXY_CERT_PATH names
+BROWSER_PROXY_CERT_DETAIL = "The proxy CA in PROXY_CERT_PATH is not in the Windows Trusted Root store the browser reads"
+
+
+# Returns whether the browser goes through a proxy with a CA file on Windows, which is where the file cannot help it
+# Playwright has no CA-file option, so Chromium ignores PROXY_CERT_PATH and trusts the Windows Trusted Root store instead
+def browser_proxy_certificate_applies() -> bool:
+    return bool(PROXY_ENABLED and PROXY_CERT_PATH and system() == 'Windows' and active_follow_list_source() == 'browser')
+
+
+# Returns whether the browser would reject the proxy, because the CA in PROXY_CERT_PATH is not in the Windows Trusted Root store
+# A file or store that cannot be read is not reported here, since the run cannot say the CA is missing
+def browser_proxy_certificate_missing() -> bool:
+    if not browser_proxy_certificate_applies():
+        return False
+    try:
+        return bool(proxy_certificate_trust_state()[1])
+    except (OSError, ValueError, AttributeError, ssl.SSLError):
+        return False
+
+
+# Returns the command that imports the proxy CA into the current user's Windows Trusted Root store
+def browser_proxy_certificate_import_command() -> str:
+    return f'certutil -user -addstore Root "{PROXY_CERT_PATH}"'
+
+
+# Returns the action that clears the browser proxy certificate problem
+def browser_proxy_certificate_fix() -> str:
+    return f"Import the proxy CA into the Windows Trusted Root Certification Authorities store with: {browser_proxy_certificate_import_command()}. Keep PROXY_CERT_PATH set, since the HTTP clients still use it"
+
+
+# Prints the browser proxy certificate problem in red, as the box a run stops on
+def print_browser_proxy_certificate_error() -> None:
+    note_console_output()
+    paragraphs = [
+        "The proxy CA in PROXY_CERT_PATH is not in the Windows Trusted Root Certification Authorities store. The browser that reads the follow lists ignores PROXY_CERT_PATH and trusts only that store, so it would fail with ERR_CERT_AUTHORITY_INVALID.",
+        "To fix: import the CA there with the command below and run again. Keep PROXY_CERT_PATH set, since the HTTP clients still use it.",
+    ]
+    lines = [f" {line}" for paragraph in paragraphs for line in textwrap.wrap(paragraph, width=66, break_long_words=False, break_on_hyphens=False)]
+    lines += [f"   {browser_proxy_certificate_import_command()}", f" Guide: {BROWSER_PROXY_CERT_GUIDE_URL}"]
+    print_red_box(lines)
+
+
 # Names every proxy setting that would stop traffic reaching Instagram, as one detail and action per problem
 def proxy_configuration_problems() -> List[Tuple[str, str]]:
     if not PROXY_ENABLED:
@@ -18904,7 +19576,44 @@ def proxy_configuration_problems() -> List[Tuple[str, str]]:
             resolve_existing_file_path(PROXY_CERT_PATH, "proxy certificate")
         except ValueError:
             problems.append((f"The proxy certificate file '{PROXY_CERT_PATH}' does not exist", "Point PROXY_CERT_PATH at an existing certificate file, or leave it empty"))
+    if browser_proxy_certificate_missing():
+        problems.append((BROWSER_PROXY_CERT_DETAIL, browser_proxy_certificate_fix()))
     return problems
+
+
+# Returns the SHA-1 thumbprints of every certificate in a PEM or DER file
+def certificate_file_thumbprints(path: str) -> List[str]:
+    with open(path, 'rb') as handle:
+        data = handle.read()
+    blocks = re.findall(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", data, re.DOTALL)
+    certificates = [ssl.PEM_cert_to_DER_cert(block.decode('ascii')) for block in blocks] if blocks else [data]
+    return [hashlib.sha1(certificate).hexdigest().upper() for certificate in certificates]
+
+
+# Returns the SHA-1 thumbprints of the certificates Windows trusts as roots for the current user, which is what Chromium reads
+def windows_trusted_root_thumbprints() -> set:
+    return {hashlib.sha1(certificate).hexdigest().upper() for certificate, encoding, _trust in ssl.enum_certificates("ROOT") if encoding == "x509_asn"}
+
+
+# Returns the thumbprints of the certificates in PROXY_CERT_PATH and those among them the Windows Trusted Root store lacks
+def proxy_certificate_trust_state() -> Tuple[List[str], List[str]]:
+    wanted = certificate_file_thumbprints(PROXY_CERT_PATH)
+    trusted = windows_trusted_root_thumbprints()
+    return wanted, [thumbprint for thumbprint in wanted if thumbprint not in trusted]
+
+
+# Reports whether the browser trusts the proxy CA named by PROXY_CERT_PATH, when the browser goes through the proxy on Windows
+# A CA missing from the store is the failure doctor_proxy_checks already reports, so only a trusted CA or an unreadable store is a row here
+def doctor_browser_proxy_certificate_checks() -> List[DoctorCheck]:
+    if not browser_proxy_certificate_applies():
+        return []
+    try:
+        wanted, missing = proxy_certificate_trust_state()
+    except (OSError, ValueError, AttributeError, ssl.SSLError) as error:
+        return [make_doctor_check("Configuration", "SKIP", "Could not check whether the browser trusts the proxy CA", f"{type(error).__name__} while reading '{PROXY_CERT_PATH}' or the Windows Trusted Root store")]
+    if missing:
+        return []
+    return [make_doctor_check("Configuration", "PASS", "The browser trusts the proxy CA", f"The CA in '{PROXY_CERT_PATH}' is in the Windows Trusted Root store ({', '.join(wanted)})")]
 
 
 # The values this file defines for the settings checked below, so a configuration file that makes one
@@ -19008,13 +19717,14 @@ def discard_invalid_shape_settings():
 def doctor_proxy_checks() -> List[DoctorCheck]:
     problems = list(PROXY_STARTUP_ERRORS) or proxy_configuration_problems()
     if problems:
-        return [make_doctor_check("Configuration", "FAIL", detail, "", make_recovery_advice("config.invalid", detail, recovery_fix_with_guide(fix, PROXY_GUIDE_URL), False)) for detail, fix in problems]
+        rows = [make_doctor_check("Configuration", "FAIL", detail, "", make_recovery_advice("config.invalid", detail, recovery_fix_with_guide(fix, BROWSER_PROXY_CERT_GUIDE_URL if detail == BROWSER_PROXY_CERT_DETAIL else PROXY_GUIDE_URL), False)) for detail, fix in problems]
+        return rows
     if not PROXY_ENABLED:
         return [make_doctor_check("Configuration", "PASS", "Proxy is disabled", "Instagram requests leave this machine directly")]
     detail = f"Destination: {proxy_destination_display()}. Webhooks: {'through the proxy' if PROXY_WEBHOOKS else 'sent directly'}"
     if PROXY_CERT_PATH:
         detail += f". Certificate: {PROXY_CERT_PATH}"
-    return [make_doctor_check("Configuration", "PASS", "Instagram requests go through a proxy", detail)]
+    return [make_doctor_check("Configuration", "PASS", "Instagram requests go through a proxy", detail)] + doctor_browser_proxy_certificate_checks()
 
 
 # Reports an interface the configuration switches on that this machine cannot start, since the optional dependency
@@ -19149,6 +19859,9 @@ def doctor_check_configuration(targets, config_errors: Sequence[dict] = (), reti
         else:
             advice = make_recovery_advice("dependency.missing", "The browser follower list source cannot run", recovery_fix_with_guide(browser_fix, FOLLOW_LIST_SOURCE_GUIDE_URL), False)
             checks.append(make_doctor_check("Configuration", "FAIL", advice.summary, browser_detail, advice))
+        # Only a run without a session depends on the browser's own sign-in, and only one that reads names
+        if anonymous_browser_run() and not (SKIP_FOLLOWERS and SKIP_FOLLOWINGS):
+            checks.append(doctor_browser_sign_in_check())
 
     checks.extend(doctor_interface_checks())
 
@@ -19506,7 +20219,7 @@ def apply_session_identity_cli_overrides(args: argparse.Namespace) -> None:
 
 # Parses configuration and command-line options then starts the selected operation
 def run_main():
-    global CLI_CONFIG_PATH, CONFIG_DISCOVERY_DISABLED, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_REMINDER_SECONDS, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS, FETCH_REELS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, FOLLOW_LIST_SOURCE, IDENTITY_BUDGET_PER_DAY, CIRCUIT_BREAKER, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
+    global CLI_CONFIG_PATH, CONFIG_DISCOVERY_DISABLED, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_REMINDER_SECONDS, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS, FETCH_REELS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, FOLLOW_LIST_SOURCE, IDENTITY_BUDGET_PER_DAY, IDENTITY_BUDGET_AUTODISABLED_REASON, CIRCUIT_BREAKER, CIRCUIT_BREAKER_AUTODISABLED_REASON, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_PROVIDER, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H, TRUNCATE_CHARS
     global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, ADVANCED_FOLLOWER_FETCH, ADVANCED_FOLLOWEE_FETCH
@@ -20409,7 +21122,10 @@ def run_main():
         # and carry on with the proxy switched off rather than being stopped by the setting they exist to explain
         if not command_runs_without_proxy(args):
             for detail, fix in PROXY_STARTUP_ERRORS:
-                print_recovery_advice(make_recovery_advice("config.invalid", detail, recovery_fix_with_guide(fix, PROXY_GUIDE_URL), False))
+                if detail == BROWSER_PROXY_CERT_DETAIL:
+                    print_browser_proxy_certificate_error()
+                else:
+                    print_recovery_advice(make_recovery_advice("config.invalid", detail, recovery_fix_with_guide(fix, PROXY_GUIDE_URL), False))
             sys.exit(1)
         PROXY_ENABLED = False
     elif PROXY_ENABLED and PROXY_CERT_PATH:
@@ -20671,12 +21387,26 @@ def run_main():
         recompute_liveness_reminder()
 
     if SKIP_SESSION is True:
-        SKIP_FOLLOWERS = True
-        SKIP_FOLLOWINGS = True
+        # No API lists followers without a session, but the browser source reads them with the browser's own
+        # sign-in, so an anonymous run keeps the lists it was asked for when that source is configured
+        if active_follow_list_source() != 'browser':
+            SKIP_FOLLOWERS = True
+            SKIP_FOLLOWINGS = True
         GET_MORE_POST_DETAILS = False
         SKIP_GETTING_STORY_DETAILS = True
         BE_HUMAN = False
-        mode_of_the_tool = "No login (limited data)"
+        mode_of_the_tool = "No login (limited data)" if SKIP_FOLLOWERS and SKIP_FOLLOWINGS else "No login (follow lists via browser)"
+        # The breaker stops a session account Instagram acts against. An anonymous browser run has no account, and
+        # a challenge or suspension page its browser meets would otherwise be recorded against an anonymous ledger,
+        # so the run can ask for the breaker to be off
+        # The daily identity budget limits the names an account is exposed to, so it goes with the breaker
+        if active_follow_list_source() == 'browser' and BROWSER_MODE_CIRCUIT_BREAKER_DISABLE:
+            if CIRCUIT_BREAKER:
+                CIRCUIT_BREAKER = False
+                CIRCUIT_BREAKER_AUTODISABLED_REASON = "BROWSER_MODE_CIRCUIT_BREAKER_DISABLE"
+            if IDENTITY_BUDGET_PER_DAY:
+                IDENTITY_BUDGET_PER_DAY = 0
+                IDENTITY_BUDGET_AUTODISABLED_REASON = "BROWSER_MODE_CIRCUIT_BREAKER_DISABLE"
     else:
         mode_of_the_tool = "Logged in (full data)"
 
@@ -20881,6 +21611,11 @@ def run_main():
     else:
         hours_ranges_str = format_hour_range(0, 23)
     summary_rows.append(StartupSummaryRow("Hours for fetching updates", hours_ranges_str, concise=bool(CHECK_POSTS_IN_HOURS_RANGE)))
+    if DAYS_BETWEEN > 0:
+        days_between_str = "1 (daily)" if DAYS_BETWEEN == 1 else f"{DAYS_BETWEEN} (every {DAYS_BETWEEN} days)"
+        if not CHECK_POSTS_IN_HOURS_RANGE:
+            days_between_str += ", ignored while CHECK_POSTS_IN_HOURS_RANGE is False"
+        summary_rows.append(StartupSummaryRow("Days between checks", days_between_str, concise=True))
 
     # Reuse the same compact per-channel notification rows in every summary view
     summary_rows.extend(_startup_notification_summary_rows())
@@ -20925,8 +21660,14 @@ def run_main():
     if unrecognised_follow_list_source() is not None:
         follow_source_value += f" (FOLLOW_LIST_SOURCE {unrecognised_follow_list_source()!r} is not a known source)"
     summary_rows.append(StartupSummaryRow("Follow list source", follow_source_value, concise=True))
+    if anonymous_browser_run() and not (SKIP_FOLLOWERS and SKIP_FOLLOWINGS):
+        summary_rows.append(StartupSummaryRow("Browser sign-in", f"The browser's own, kept in {browser_profile_dir()}", concise=True))
+    if active_follow_list_source() == 'browser' and FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR:
+        summary_rows.append(StartupSummaryRow("Browser kept open on error", "Yes, until its window is closed" if not FOLLOW_LIST_BROWSER_HEADLESS else "Ignored, the browser is hidden", concise=True))
 
     identity_budget_str = f"{IDENTITY_BUDGET_PER_DAY} names/day" if IDENTITY_BUDGET_PER_DAY else "Disabled (counted but not capped)"
+    if IDENTITY_BUDGET_AUTODISABLED_REASON and not IDENTITY_BUDGET_PER_DAY:
+        identity_budget_str = f"Disabled ({IDENTITY_BUDGET_AUTODISABLED_REASON}, counted but not capped)"
     summary_rows.append(StartupSummaryRow("Identity budget", identity_budget_str, concise=bool(IDENTITY_BUDGET_PER_DAY)))
 
     breaker_state = circuit_breaker_state()
@@ -20934,6 +21675,8 @@ def run_main():
         breaker_str = f"Paused ({breaker_state.get('failure_class', 'unknown')}) - checking the session before monitoring"
     else:
         breaker_str = "Armed" if CIRCUIT_BREAKER else "Disabled"
+        if CIRCUIT_BREAKER_AUTODISABLED_REASON and not CIRCUIT_BREAKER:
+            breaker_str += f" ({CIRCUIT_BREAKER_AUTODISABLED_REASON})"
     summary_rows.append(StartupSummaryRow("Account circuit breaker", breaker_str, concise=bool(CIRCUIT_BREAKER) and not breaker_state))
 
     summary_rows.append(StartupSummaryRow("Profile picture changes", str(DETECT_CHANGED_PROFILE_PIC), concise=not DETECT_CHANGED_PROFILE_PIC))

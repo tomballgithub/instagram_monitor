@@ -5,7 +5,6 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
-import instaloader
 import pytest
 from tqdm import tqdm
 
@@ -81,9 +80,22 @@ class TestBrowserProgress:
         page = FakePage([["a"]] * 4)
 
         assert list(im_module.harvest_follow_list_dialog(page, 0)) == [["a"]]
-        assert "Waiting after scroll" in output.getvalue()
+        assert "Cooldown wait" in output.getvalue()
         assert "Reading names" in bar.unit
         assert bar.n == 0
+
+    # The two statuses swapped on every scroll are the same length, so the bar does not resize each time
+    def test_the_alternating_statuses_keep_the_bar_width(self, im_module, browser_progress_bar):
+        bar, _ = browser_progress_bar
+        widths = set()
+
+        for stage in (im_module.BROWSER_STAGE_READING, im_module.BROWSER_STAGE_COOLDOWN, im_module.BROWSER_STAGE_READING, im_module.BROWSER_STAGE_COOLDOWN):
+            im_module.browser_follow_list_progress(stage)
+            # The line always fills the bar's width, so what moves is where the bar ends and the counts begin
+            widths.add(bar.format_meter(**bar.format_dict).rfind("| "))
+
+        assert len(im_module.BROWSER_STAGE_READING) == len(im_module.BROWSER_STAGE_COOLDOWN)
+        assert len(widths) == 1
 
     # Names excluded by the daily budget are also excluded from the displayed count
     def test_the_budget_caps_displayed_progress(self, im_module, monkeypatch, browser_progress_bar):
@@ -158,6 +170,7 @@ class TestBrowserLifecycle:
             assert list(im_module.browser_follow_list_batches(fake_bot(), fake_profile(), "followers")) == [["a"]]
 
         options = driver.chromium.launch_persistent_context.call_args.kwargs
+        context.add_cookies.assert_called_once_with([])
         assert options["ignore_https_errors"] is True
         assert "--ignore-certificate-errors" in options["args"]
         expected_stages = ["Starting browser", "Opening profile"] + ([] if navigation_fails else ["Opening list"])
@@ -363,10 +376,14 @@ class TestBrowserProvider:
         assert returned.complete is True
         assert capsys.readouterr().out == ""
 
-    # An anonymous session is reported as a login problem instead of starting a browser
-    def test_an_anonymous_session_is_rejected(self, im_module):
-        with pytest.raises(instaloader.exceptions.LoginRequiredException):
-            list(im_module.iter_browser_follow_list(fake_bot(logged_in=False), fake_profile(), "followers"))
+    # An anonymous session reads lists as well, since the browser carries its own sign-in rather than a session
+    def test_an_anonymous_session_reads_the_list(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "browser_follow_list_batches", lambda *args, **kwargs: iter([["a", "b"]]))
+
+        names = [entry.username for entry in im_module.iter_browser_follow_list(fake_bot(logged_in=False), fake_profile(followers=2), "followers", record_exposure=True)]
+
+        assert names == ["a", "b"]
+        assert im_module.exposure_snapshot()["identities"] == 2
 
     # A missing Playwright package names the two commands that install it
     def test_a_missing_playwright_names_the_install_commands(self, im_module, monkeypatch):
@@ -496,6 +513,7 @@ class TestSourceSelection:
         assert parsed["FOLLOW_LIST_BROWSER_PROFILE_DIR"] == ""
         assert parsed["FOLLOW_LIST_BROWSER_SCROLL_DELAY"] == 1.5
         assert parsed["FOLLOW_LIST_BROWSER_TIMEOUT"] == 30
+        assert parsed["FOLLOW_LIST_BROWSER_LOGIN_WAIT"] == 300
 
 
 class TestDoctorReadiness:
@@ -644,6 +662,8 @@ class TestBrowserIdentityGates:
     # An aligned identity leaves the experimental warning as the only browser row
     def test_doctor_keeps_the_experimental_warning_when_aligned(self, im_module, monkeypatch):
         monkeypatch.setattr(im_module, "FOLLOW_LIST_SOURCE", "browser")
+        monkeypatch.setattr(im_module, "SESSION_USERNAME", "session.user")
+        monkeypatch.setattr(im_module, "SKIP_SESSION", False)
         monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_CHANNEL", "chromium")
         monkeypatch.setattr(im_module, "HTTP_BACKEND", "curl_cffi")
         monkeypatch.setattr(im_module, "_CURL_CFFI_AVAILABLE", True)

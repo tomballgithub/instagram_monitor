@@ -73,7 +73,7 @@ After saving authentication, the wizard checks whether the target is visible.
 
 How much Instagram Monitor can see depends on the target and on the login you give it:
 
-1. A public target can be monitored with no login at all, in [No-Login Mode](configuration.md#no-login-mode-no-session-login). Posts, bio and follower counts are visible, follower and following lists are not.
+1. A public target can be monitored with no login at all, in [No-Login Mode](configuration.md#no-login-mode-no-session-login). Posts, bio and follower counts are visible, follower and following lists are not, unless the [experimental browser source](usage.md#anonymous-mode-with-the-browser-source) reads them with a browser you signed in yourself.
 2. Stories, reels and named follower / following changes need a session account, in [Logged-In Mode](configuration.md#logged-in-mode-with-session-login).
 3. A private target needs a session account that already follows it. Send and get the follow request accepted before the first run.
 

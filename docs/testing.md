@@ -45,6 +45,8 @@ adds a target without starting Instagram monitoring.
 
 HTTPS proxy tests use a local server with an untrusted certificate to check `VERIFY_SSL` in Chromium. They need OpenSSL to generate a temporary certificate and skip when it is unavailable.
 
+The anonymous browser follower list tests run the real browser source against a fake Instagram served over HTTPS on loopback, with `www.instagram.com` mapped to it. They check that a sign-in kept in the browser profile is used without being handed over, that a profile with no sign-in stops before any page is opened and that a sign-in the site rejects is reported as expired. They also need OpenSSL and skip without it. A paged fake list checks that the browser source raises the page size and recovers accounts that a page lost to repeats, and that the same list comes back short with both settings off.
+
 Install the optional browser dependencies:
 
 ```bash

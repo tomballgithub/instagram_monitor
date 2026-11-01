@@ -36,7 +36,7 @@ def _patch_startup_monitor_defaults(im_module, monkeypatch) -> None:
     monkeypatch.setattr(im_module, "update_check_times", lambda *args, **kwargs: None)
     monkeypatch.setattr(im_module, "get_dashboard_config_data", lambda: {})
     monkeypatch.setattr(im_module, "randomize_number", lambda value, low, high: value)
-    monkeypatch.setattr(im_module, "compute_next_check_with_hours_range", lambda now, sleep_time: (sleep_time, now))
+    monkeypatch.setattr(im_module, "compute_next_check_with_hours_range", lambda now, sleep_time, after_check=False: (sleep_time, now))
     monkeypatch.setattr(im_module, "refresh_proxy_if_needed", lambda *args, **kwargs: None)
     monkeypatch.setattr(im_module.time, "sleep", lambda seconds: None)
 

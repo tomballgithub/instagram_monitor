@@ -71,7 +71,7 @@ You can also change most settings and generate a config file through the [Web Da
 <a id="no-login-mode-no-session-login"></a>
 ## No-Login Mode (No Session Login)
 
-This mode does not sign in to Instagram. It can monitor new or deleted regular posts, bio changes and follower or following counts for public accounts. Follower and following notifications report count changes without usernames because complete list comparison is unavailable. It cannot monitor reels or stories. It also cannot tell you which specific accounts followed or unfollowed the target.
+This mode does not sign in to Instagram. It can monitor new or deleted regular posts, bio changes and follower or following counts for public accounts. Follower and following notifications report count changes without usernames because complete list comparison is unavailable, unless the experimental browser source reads the lists with a browser that is signed in on its own. See [Anonymous Mode With The Browser Source](usage.md#anonymous-mode-with-the-browser-source). It cannot monitor reels or stories. It also cannot tell you which specific accounts followed or unfollowed the target.
 
 No-login mode needs no Instagram credentials and makes fewer requests than logged-in mode. Instagram can still limit or block public requests, so this mode does not guarantee uninterrupted access.
 
@@ -476,4 +476,4 @@ Set `VERIFY_SSL` to `False` only on a network that intercepts TLS with its own c
 
 The startup summary shows `TLS verification` and [`--doctor`](troubleshooting.md#doctor-preflight) reports a warning while it is off.
 
-The experimental browser source also follows `VERIFY_SSL`, including the TLS connection to an HTTPS proxy. With verification on, `PROXY_CERT_PATH` applies to HTTP clients only. Chromium needs the proxy CA installed in a trust store it reads. See [Browser Proxy Certificates](troubleshooting.md#browser-proxy-certificates).
+The experimental browser source also follows `VERIFY_SSL`, including the TLS connection to an HTTPS proxy. With verification on, `PROXY_CERT_PATH` applies to HTTP clients only. Chromium needs the proxy CA installed in a trust store it reads. On Windows, a run that reads follower lists with the browser through a proxy stops at startup when the CA in `PROXY_CERT_PATH` is not in the Windows Trusted Root store, and `--doctor` fails the same condition. See [Browser Proxy Certificates](troubleshooting.md#browser-proxy-certificates).

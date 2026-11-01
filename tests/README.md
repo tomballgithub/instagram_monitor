@@ -85,13 +85,16 @@ installed copy of the package.
 | `test_follow_list_source.py` | The follower and following list sources: the web REST endpoints and the GraphQL fallback |
 | `test_request_backoff.py` | The jitter back-off giving up with the real cause, so a rate limit or a challenge is never read as a missing endpoint |
 | `test_follow_list_browser.py` | Browser follower lists, progress updates, TLS launch options and certificate recovery advice, with no browser started |
+| `test_browser_proxy_certificate.py` | The stop on a proxy certificate the browser would ignore on Windows, its red message, and the doctor rows that report it and check the Windows trust store |
+| `test_browser_repeated_pages.py` | Asking again for list pages that repeat accounts, the page size the browser requests, and how both are wired into the browser scan |
+| `test_anonymous_browser_follow_lists.py` | Browser follower lists without a session: source selection, the browser's own sign-in check and wait, an expired sign-in, the doctor row, startup flags and the real monitoring loop |
 | `test_follow_analysis.py` | The offline follow relationship analysis behind `--analyze-follows` |
 | `test_imgcat_display.py` | Terminal image display argument handling |
 | `test_notification_escaping.py` | Source-level sweep proving every value reaching an HTML notification body is escaped |
 | `test_email_html.py` | HTML notification bodies: escaping, the ntfy plain form and the plain-text match |
 | `test_documentation.py` | Semantic documentation contracts for commands, concepts and platform variants plus repository metadata: governance files, citation, funding, line endings, the declared editor style, the pinned linter and release integrity |
 | `test_packaging.py` | Wheel contents, installed console help/version and config generation |
-| `test_browser_e2e.py` | Real Chromium rendering, navigation, target creation and HTTPS proxy certificate checks against local servers |
+| `test_browser_e2e.py` | Real Chromium rendering, navigation, target creation, HTTPS proxy certificate checks and anonymous browser follower lists against local servers |
 | `test_moved_private_settings.py` | Kept credentials across dotenv destination changes and startup error handling |
 
 ## Conventions

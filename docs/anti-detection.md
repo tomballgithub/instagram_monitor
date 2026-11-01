@@ -172,6 +172,18 @@ Set `HOURS_VERBOSE = True` to log when a check is allowed or skipped.
 
 The polling interval still applies inside each allowed window. A scheduled check outside a window waits for a later allowed time.
 
+### Space Checks By Days
+
+The hour ranges apply every day. To check less often than daily, set `DAYS_BETWEEN` to the number of calendar days between checks. It works only while `CHECK_POSTS_IN_HOURS_RANGE` is `True` and is ignored otherwise:
+
+- `0` disables it, and checks follow the check interval and the hour ranges alone. This is the default
+- `1` checks daily, at most once per calendar day, even when the hour ranges allow several checks
+- `2` checks every other day, `3` every third day, and so on
+
+After a completed check, the next one waits for the first allowed time on or after the day that many days later, and never comes earlier than the check interval would allow. The minutes and seconds come from the randomized interval, so checks do not begin on the dot of the hour. For example, `DAYS_BETWEEN = 2` with `MIN_H1 = 22` and `MAX_H1 = 23` checks between 22:00 and 22:59 every other day.
+
+The wait extends the next check time, so the console, the debug output and the Web Dashboard show the later date. The "Sleeping ..., resumes at" line names the day when the check is not today. A retry after a failed check keeps the normal interval, and a manual recheck from the Web Dashboard counts as a check. The count is kept in memory, so restarting the monitor checks right away and starts the count again. The setting is read from the configuration file and is not on the Web Dashboard **Settings** page.
+
 <a id="do-not-monitor-too-many-users"></a>
 ## Do Not Monitor Too Many Users
 
