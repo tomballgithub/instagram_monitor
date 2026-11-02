@@ -80,6 +80,8 @@ No-login mode needs no Instagram credentials and makes fewer requests than logge
 
 This mode signs in with an Instagram account. It can access reels, stories and the usernames added to or removed from follower and following lists. Reels are off by default because the endpoint Instagram used to report them with stopped answering reliably. See [Profile Lookups Report a Retired Endpoint](troubleshooting.md#profile-lookups-report-a-retired-endpoint).
 
+Every signed-in check also asks Instagram whether the target has a story right now, which is one extra request before any story detail is read. `SKIP_GETTING_STORY_DETAILS` does not stop it. Set `CHECK_STORY_AVAILABILITY = False` to skip that request, which treats every target as having no story and so also stops story details and story alerts. Use it if Instagram refuses that request for your session.
+
 Logged-in monitoring can cause Instagram to show a security challenge, limit the session or suspend the account. There is no known request rate that guarantees safety. Use a separate Instagram account if losing access to your main account would be unacceptable, then follow the [risk reduction guide](anti-detection.md).
 
 <a id="option-1-basic-session-login-not-recommended"></a>

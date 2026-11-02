@@ -260,6 +260,12 @@ SKIP_FOLLOWINGS = False
 # Can also be enabled via the -r flag
 SKIP_GETTING_STORY_DETAILS = False
 
+# Whether a signed-in check asks Instagram if the target has a story right now
+# It is one extra request per check, made before any story detail is read, so SKIP_GETTING_STORY_DETAILS does not stop it
+# False skips the request and treats the target as having no story, which also stops story details and story alerts
+# Only relevant if session login is used and SKIP_SESSION is False
+CHECK_STORY_AVAILABILITY = True
+
 # Whether to skip detailed post and reel information such as dates, likes, comments, descriptions, tagged users,
 # locations and media
 # Can also be enabled via the -w flag
@@ -901,6 +907,7 @@ SKIP_SESSION = False
 SKIP_FOLLOWERS = False
 SKIP_FOLLOWINGS = False
 SKIP_GETTING_STORY_DETAILS = False
+CHECK_STORY_AVAILABILITY = True
 SKIP_GETTING_POSTS_DETAILS = False
 GET_MORE_POST_DETAILS = False
 FETCH_REELS = False
@@ -13550,6 +13557,64 @@ def earliest_check_after_days_between(now_dt: datetime, base_sleep_seconds: int)
     return day_start + timedelta(seconds=int(base_sleep_seconds) % 3600)
 
 
+# Days before the first check of this run, where 1 is today and 2 is tomorrow
+# It is asked at startup when DAYS_BETWEEN is above 1, so a restart does not have to check on a day the schedule skips
+FIRST_CHECK_DAYS = 1
+
+# Targets that have not yet had FIRST_CHECK_DAYS applied to their first check, so each is delayed once and a restarted pass is not
+FIRST_CHECK_PENDING: set = set()
+
+
+# Asks how many days to wait before the first check when DAYS_BETWEEN spaces checks by more than a day
+# 1, which is also the answer to a bare Enter, means today. A run with no terminal to ask keeps today
+# The answer is applied later, in the wait before a target's first request, so the rest of the start-up still runs now
+def ask_first_check_days(targets=()) -> int:
+    global FIRST_CHECK_DAYS
+    FIRST_CHECK_DAYS = 1
+    FIRST_CHECK_PENDING.clear()
+    if DAYS_BETWEEN <= 1 or not CHECK_POSTS_IN_HOURS_RANGE or DASHBOARD_ENABLED or not sys.stdin or not sys.stdin.isatty():
+        return FIRST_CHECK_DAYS
+    prompt = colorize("info", f"* DAYS_BETWEEN is {DAYS_BETWEEN}. Days before the first check (1 = today, 2 = tomorrow, ...) [1]: ")
+    while True:
+        try:
+            raw = read_interactively(input, prompt).strip()
+        except EOFError:
+            print("")
+            return FIRST_CHECK_DAYS
+        except KeyboardInterrupt:
+            # Ctrl+C ends the run here the way it does anywhere else
+            signal_handler(signal.SIGINT, None)
+            raise
+        if not raw:
+            return FIRST_CHECK_DAYS
+        if raw.isdigit() and int(raw) >= 1:
+            FIRST_CHECK_DAYS = int(raw)
+            if FIRST_CHECK_DAYS > 1:
+                FIRST_CHECK_PENDING.update(targets)
+            return FIRST_CHECK_DAYS
+        print("  Please enter a whole number of 1 or more.")
+
+
+# Moves a planned first check to the day FIRST_CHECK_DAYS chose, keeping the minutes and seconds of the plan's own delay
+# Returns the planned time unchanged for today, and never earlier than the plan
+def apply_first_check_days(now_dt: datetime, planned_dt: datetime, delay_seconds: int = 0) -> datetime:
+    if FIRST_CHECK_DAYS <= 1:
+        return planned_dt
+    day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=FIRST_CHECK_DAYS - 1)
+    return max(planned_dt, day_start + timedelta(seconds=int(delay_seconds) % 3600))
+
+
+# Returns the time the first check of a target must wait for when FIRST_CHECK_DAYS pushed it past today, or None
+# Taken once per target, at the wait that already precedes its first request. By then the client and the session are set
+# up, so a missing session file or a stopped account is reported tonight and not on the day the check finally runs
+def take_first_check_time(user: str, now_dt: datetime) -> Optional[datetime]:
+    if user not in FIRST_CHECK_PENDING:
+        return None
+    FIRST_CHECK_PENDING.discard(user)
+    planned = apply_first_check_days(now_dt, now_dt)
+    return planned if planned > now_dt else None
+
+
 # Computes the next sleep duration and next_check value, factoring in CHECK_POSTS_IN_HOURS_RANGE and DAYS_BETWEEN
 # after_check is True when a check just completed, since only a completed check starts the wait of DAYS_BETWEEN days
 # A retry after a failed check or a skipped hour keeps the plain interval, and DAYS_BETWEEN is ignored while the hour ranges are off
@@ -15381,13 +15446,19 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                     return
             else:
                 now_hr = now_local_naive()
-                if now_hr.hour not in allowed:
-                    next_allowed = _next_allowed_datetime_at_or_after(now_hr, allowed)
+                # The days chosen at startup for the first check count here, after the client and the session are set up
+                first_check_at = take_first_check_time(user, now_hr)
+                if first_check_at is not None or now_hr.hour not in allowed:
+                    next_allowed = _next_allowed_datetime_at_or_after(first_check_at or now_hr, allowed)
                     if next_allowed:
                         sleep_s = max(1, int((next_allowed - now_hr).total_seconds()))
                         update_check_times(next_time=next_allowed, user=user, increment_count=False)
                         if WEB_DASHBOARD_ENABLED:
                             update_ui_data(targets={user: {'status': 'Waiting (hours range)'}})
+                        if first_check_at is not None:
+                            first_message = f"First check for {user}: {calendar.day_abbr[next_allowed.weekday()]} {next_allowed.strftime('%d %b %Y, ' + ('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S'))} (in {display_time(sleep_s)})"
+                            print(f"* {first_message}")
+                            log_activity(first_message, user=user, level='system')
                         if HOURS_VERBOSE or DEBUG_MODE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE):
                             sleep_message(sleep_s, user)
                         # Interruptible wait (stop/recheck aware) similar to the main sleep loop
@@ -15452,7 +15523,9 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             _thread_local.in_partial_line = False
             log_activity(f"Reels count fetched: {reels_count}", user=user)
 
-        if not is_private:
+        if not CHECK_STORY_AVAILABILITY:
+            has_story = False
+        elif not is_private:
             if bot.context.is_logged_in:
                 has_story = profile.has_public_story
             else:
@@ -16495,7 +16568,9 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                     reels_count = get_total_reels_count(user, bot, skip_session, posts_count)
                     debug_print("Reels count", value=reels_count)
 
-                if not is_private:
+                if not CHECK_STORY_AVAILABILITY:
+                    has_story = False
+                elif not is_private:
                     if bot.context.is_logged_in:
                         has_story = profile.has_public_story
                     else:
@@ -22325,6 +22400,10 @@ def run_main():
         for user in targets:
             update_ui_data(targets={user: {'status': 'Paused: account recovery required'}})
 
+    # With checks spaced by more than a day, ask when the first one is due, since a restart would otherwise check today
+    if targets and recovery_ready:
+        ask_first_check_days(targets)
+
     # Print monitoring message after all setup is complete
     # Note: If Dashboard is enabled, this will be shown in the dashboard instead
     if targets and recovery_ready:
@@ -22406,7 +22485,7 @@ def run_main():
             add_jitter = int(random.uniform(0, jitter)) if jitter else 0
             delay = base_delay + add_jitter
             planned = now + timedelta(seconds=delay)
-            # If hour ranges are enabled, show the real planned time (first allowed time >= planned)
+            # If hour ranges are enabled, show/schedule the real planned time (first allowed time >= planned)
             if CHECK_POSTS_IN_HOURS_RANGE:
                 allowed = hours_to_check()
                 adjusted = _next_allowed_datetime_at_or_after(planned, allowed) if allowed else None
@@ -22414,13 +22493,21 @@ def run_main():
                     planned = adjusted
                     delay = max(0, int((planned - now).total_seconds()))
             planned_actions.append((u, delay, planned))
-            msg_time = planned.strftime('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S')
-            print(f"  - {u} @ ~{msg_time} (in {display_time(delay)})")
+            # FIRST_CHECK_DAYS moves the first request to a later day. The target still starts after its stagger, so its
+            # set-up runs now, and the wait before its first request is what covers the days, so only the shown time moves
+            shown = apply_first_check_days(now, planned, delay)
+            if CHECK_POSTS_IN_HOURS_RANGE and shown != planned:
+                shown_allowed = hours_to_check()
+                shown = (_next_allowed_datetime_at_or_after(shown, shown_allowed) if shown_allowed else None) or shown
+            msg_time = shown.strftime('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S')
+            if shown.date() != now.date():
+                msg_time += f" on {calendar.day_abbr[shown.weekday()]} {shown.strftime('%d %b')}"
+            print(f"  - {u} @ ~{msg_time} (in {display_time(max(0, int((shown - now).total_seconds())))})")
             debug_print("Target scheduled", user=u, delay_s=delay)
 
             # Populate initial dashboard check times
             if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
-                update_check_times(next_time=planned, user=u, increment_count=False)
+                update_check_times(next_time=shown, user=u, increment_count=False)
 
         print_cur_ts(newline=True)
 

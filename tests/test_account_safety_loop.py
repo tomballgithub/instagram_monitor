@@ -6,6 +6,7 @@ fetch. These drive instagram_monitor_user itself and assert on the ledger it lea
 """
 
 import json
+from datetime import datetime
 import threading
 import uuid
 from pathlib import Path
@@ -218,6 +219,106 @@ class TestATruncatedListDoesNotReplaceASavedBaseline:
 
         assert stored == [80, saved[:80]]
         assert removals == [("followers", sorted(saved[80:]))]
+
+
+class TestFirstCheckWait:
+    """The days chosen at startup for the first check are the wait before the first request, after the set-up has run."""
+
+    # Runs the real pass for one target up to its first profile request, returning what happened in order and how long it waited
+    @staticmethod
+    def _run(monkeypatch, tmp_path, start, pending):
+        events = []
+        waited = []
+
+        class FirstRequest(BaseException):
+            pass
+
+        bot = SimpleNamespace(context=SimpleNamespace(_session=SimpleNamespace(), is_logged_in=True, iphone_headers={}), load_session_from_file=lambda *args: events.append("session loaded"))
+        monkeypatch.setattr(im, "instaloader_client", lambda **kwargs: events.append("client created") or bot, raising=False)
+
+        # Stands in for the first request to Instagram, which ends the run once it is reached
+        def first_request(_bot, username):
+            events.append("profile requested")
+            raise FirstRequest()
+
+        monkeypatch.setattr(im, "profile_from_username_resilient", first_request, raising=False)
+        monkeypatch.setattr(im, "now_local_naive", lambda: start)
+        monkeypatch.setattr(im, "CHECK_POSTS_IN_HOURS_RANGE", True)
+        monkeypatch.setattr(im, "MIN_H1", 22)
+        monkeypatch.setattr(im, "MAX_H1", 23)
+        monkeypatch.setattr(im, "DAYS_BETWEEN", 2)
+        monkeypatch.setattr(im, "FIRST_CHECK_DAYS", 2 if pending else 1)
+        monkeypatch.setattr(im, "FIRST_CHECK_PENDING", {"target"} if pending else set())
+        stop_event = SimpleNamespace(is_set=lambda: False, wait=lambda seconds: waited.append(seconds))
+        with pytest.raises(FirstRequest):
+            im.instagram_monitor_user("target", "events.csv", False, True, True, True, True, False, stop_event=stop_event, skip_follow_changes=True)
+        return events, sum(waited)
+
+    # The client and the session are set up first, then the pass waits, and only then asks Instagram anything
+    def test_the_set_up_runs_before_the_wait(self, monitored_account, tmp_path):
+        events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 20, 10, 0), pending=True)
+
+        assert events == ["client created", "session loaded", "profile requested"]
+        # Tomorrow's window opens at 22:00, which is 25 hours 50 minutes after 20:10 today
+        assert waited == 25 * 3600 + 50 * 60
+
+    # Without the days, the same start waits only for tonight's window, so the days are what added the wait
+    def test_today_waits_only_for_tonights_window(self, monitored_account, tmp_path):
+        events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 20, 10, 0), pending=False)
+
+        assert events == ["client created", "session loaded", "profile requested"]
+        # The existing wait keeps the minutes of the start, so 20:10 waits for 22:10
+        assert waited == 2 * 3600
+
+    # Started inside the window with today chosen, the first request is made at once
+    def test_inside_the_window_with_today_does_not_wait(self, monitored_account, tmp_path):
+        _events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 22, 30, 0), pending=False)
+
+        assert waited == 0
+
+    # Started inside the window with tomorrow chosen, it still waits for tomorrow
+    def test_inside_the_window_with_tomorrow_waits_a_day(self, monitored_account, tmp_path):
+        _events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 22, 30, 0), pending=True)
+
+        assert waited == 23 * 3600 + 30 * 60
+
+
+class TestStoryAvailabilityCheck:
+    """The story check is one request before any story detail, so a setting has to be able to switch it off."""
+
+    # Runs the real startup pass for a public target whose story property records that it was read
+    @staticmethod
+    def _run(monkeypatch, tmp_path, check_enabled):
+        reads = []
+
+        class Profile(SimpleNamespace):
+            # Records the read, as the request it stands for would be made here
+            @property
+            def has_public_story(self):
+                reads.append(True)
+                return False
+
+        profile = Profile(username="target", userid=123, followers=0, followees=0, biography="", is_private=False, followed_by_viewer=False, mediacount=0, profile_pic_url_no_iphone="")
+        monkeypatch.setattr(im, "CHECK_STORY_AVAILABILITY", check_enabled)
+        monkeypatch.setattr(im, "SKIP_FOLLOWERS", True, raising=False)
+        bot = SimpleNamespace(context=SimpleNamespace(_session=SimpleNamespace(), is_logged_in=True, iphone_headers={}), load_session_from_file=lambda *args: None)
+        monkeypatch.setattr(im, "instaloader_client", lambda **kwargs: bot, raising=False)
+        monkeypatch.setattr(im, "profile_from_username_resilient", lambda _bot, username: profile, raising=False)
+        monkeypatch.setattr(im, "interruptible_sleep", lambda *args, **kwargs: True, raising=False)
+        im.instagram_monitor_user("target", str(tmp_path / "events.csv"), False, True, True, True, True, False, skip_follow_changes=True)
+        return reads
+
+    # The setting ships on, so a run that never sets it asks as before
+    def test_the_template_ships_it_on(self):
+        assert im.parse_config_content(im.CONFIG_BLOCK, "<built-in>")["CHECK_STORY_AVAILABILITY"] is True
+
+    # With the check on, a signed-in pass asks Instagram about the story
+    def test_a_signed_in_pass_asks_by_default(self, monitored_account, tmp_path):
+        assert self._run(monitored_account, tmp_path, True) != []
+
+    # With it off, no request is made, which is what keeps a refused story query from stopping the account
+    def test_the_setting_skips_the_request(self, monitored_account, tmp_path):
+        assert self._run(monitored_account, tmp_path, False) == []
 
 
 @pytest.mark.parametrize("kind", ["followers", "followings"])

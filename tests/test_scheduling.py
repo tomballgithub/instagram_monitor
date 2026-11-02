@@ -1,6 +1,7 @@
 """Tests for check-interval scheduling and the CHECK_POSTS_IN_HOURS_RANGE window logic."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -199,6 +200,132 @@ class TestDaysBetween:
         monkeypatch.setattr(im_module, "DAYS_BETWEEN", value)
 
         assert ("DAYS_BETWEEN" in im_module.runtime_configuration_problems()) is rejected
+
+
+class TestFirstCheckDays:
+    # Monday 1 January 2024 at 20:10, when the monitor is started
+    START = datetime(2024, 1, 1, 20, 10, 0)
+
+    @pytest.fixture(autouse=True)
+    # Spaces checks by two days inside a 22:00 to 23:59 window, which is the case that asks
+    def two_days(self, im_module, monkeypatch):
+        _enable_hours(monkeypatch, im_module, 22, 23, 0, 0)
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 2)
+        monkeypatch.setattr(im_module, "DASHBOARD_ENABLED", False)
+        monkeypatch.setattr(im_module, "TIME_FORMAT_12H", False)
+        monkeypatch.setattr(im_module, "now_local_naive", lambda: self.START)
+        monkeypatch.setattr(im_module, "update_check_times", lambda *args, **kwargs: None)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+    # Gives the prompt a terminal and the answers a test scripts, and records what was asked
+    @staticmethod
+    def answers(im_module, monkeypatch, *replies):
+        asked = []
+        scripted = iter(replies)
+
+        # Returns the next scripted reply, or raises the one a test scripted to end the input
+        def reader(_input, prompt):
+            asked.append(prompt)
+            reply = next(scripted)
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+
+        monkeypatch.setattr(im_module, "read_interactively", reader)
+        monkeypatch.setattr(im_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+        return asked
+
+    # A bare Enter is today, which is the answer the prompt offers
+    def test_enter_means_today(self, im_module, monkeypatch):
+        asked = self.answers(im_module, monkeypatch, "")
+
+        assert im_module.ask_first_check_days() == 1
+        assert len(asked) == 1 and "1 = today, 2 = tomorrow" in asked[0] and "DAYS_BETWEEN is 2" in asked[0]
+
+    # Two is tomorrow, and the answer is kept for the planning that follows
+    @pytest.mark.parametrize("reply, expected", [("2", 2), (" 3 ", 3), ("1", 1)])
+    def test_the_answer_is_the_number_of_days(self, im_module, monkeypatch, reply, expected):
+        self.answers(im_module, monkeypatch, reply)
+
+        assert im_module.ask_first_check_days() == expected
+        assert im_module.FIRST_CHECK_DAYS == expected
+
+    # Anything that is not a whole number of one or more is asked again
+    def test_a_bad_answer_is_asked_again(self, im_module, monkeypatch, capsys):
+        asked = self.answers(im_module, monkeypatch, "0", "tomorrow", "-1", "1.5", "2")
+
+        assert im_module.ask_first_check_days() == 2
+        assert len(asked) == 5
+        assert capsys.readouterr().out.count("Please enter a whole number of 1 or more.") == 4
+
+    # Input that ends leaves the first check today instead of stopping startup
+    def test_the_end_of_input_means_today(self, im_module, monkeypatch):
+        self.answers(im_module, monkeypatch, EOFError())
+
+        assert im_module.ask_first_check_days() == 1
+
+    # Nothing is asked when the schedule has no skipped day, or no hour ranges to place the check in, or nobody to answer
+    @pytest.mark.parametrize("setting, value", [("DAYS_BETWEEN", 0), ("DAYS_BETWEEN", 1), ("CHECK_POSTS_IN_HOURS_RANGE", False), ("DASHBOARD_ENABLED", True)])
+    def test_nothing_is_asked_without_a_skipped_day(self, im_module, monkeypatch, setting, value):
+        asked = self.answers(im_module, monkeypatch, "3")
+        monkeypatch.setattr(im_module, setting, value)
+
+        assert im_module.ask_first_check_days() == 1
+        assert asked == []
+
+    # A run with no terminal, such as a scheduled task, keeps today
+    def test_no_terminal_means_today(self, im_module, monkeypatch):
+        asked = self.answers(im_module, monkeypatch, "3")
+        monkeypatch.setattr(im_module.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+        assert im_module.ask_first_check_days() == 1
+        assert asked == []
+
+    # Today leaves a plan alone, and a later day moves it to the start of that day, never earlier than the plan
+    def test_the_plan_moves_to_the_chosen_day(self, im_module, monkeypatch):
+        planned = self.START + timedelta(seconds=90)
+        monkeypatch.setattr(im_module, "FIRST_CHECK_DAYS", 1)
+        assert im_module.apply_first_check_days(self.START, planned, 90) == planned
+
+        monkeypatch.setattr(im_module, "FIRST_CHECK_DAYS", 2)
+        assert im_module.apply_first_check_days(self.START, planned, 90) == datetime(2024, 1, 2, 0, 1, 30)
+
+        monkeypatch.setattr(im_module, "FIRST_CHECK_DAYS", 4)
+        assert im_module.apply_first_check_days(self.START, planned, 3600 + 7) == datetime(2024, 1, 4, 0, 0, 7)
+
+    # The answer is remembered for the targets that were started, so each is delayed once
+    def test_the_answer_marks_the_targets_pending(self, im_module, monkeypatch):
+        self.answers(im_module, monkeypatch, "2")
+
+        im_module.ask_first_check_days(["a", "b"])
+
+        assert im_module.FIRST_CHECK_PENDING == {"a", "b"}
+
+    # Today leaves nothing pending, so no target waits
+    def test_today_marks_nothing_pending(self, im_module, monkeypatch):
+        self.answers(im_module, monkeypatch, "1")
+
+        im_module.ask_first_check_days(["a"])
+
+        assert im_module.FIRST_CHECK_PENDING == set()
+
+    # A pending target is given the start of the chosen day, once
+    def test_a_pending_target_is_given_its_time_once(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "FIRST_CHECK_DAYS", 2)
+        monkeypatch.setattr(im_module, "FIRST_CHECK_PENDING", {"target"})
+
+        assert im_module.take_first_check_time("target", self.START) == datetime(2024, 1, 2, 0, 0, 0)
+        assert im_module.take_first_check_time("target", self.START) is None
+
+    # A target that was never pending, or whose answer was today, is left alone
+    def test_other_targets_are_left_alone(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "FIRST_CHECK_DAYS", 2)
+        monkeypatch.setattr(im_module, "FIRST_CHECK_PENDING", {"target"})
+        assert im_module.take_first_check_time("someone.else", self.START) is None
+
+        monkeypatch.setattr(im_module, "FIRST_CHECK_DAYS", 1)
+        monkeypatch.setattr(im_module, "FIRST_CHECK_PENDING", {"target"})
+        assert im_module.take_first_check_time("target", self.START) is None
 
 
 class TestProbabilityForCycle:
