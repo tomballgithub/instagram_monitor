@@ -6156,7 +6156,7 @@ def clear_screen(enabled=True):
 
 
 # Commands that print a one-shot result and exit, so the screen keeps whatever is already on it
-KEEP_HISTORY_FLAGS = (*SECRET_ACTION_FLAGS, "--import-browser-session", "--import-firefox-session", "--analyze-follows", "--doctor", "--send-test-email", "--send-test-webhook", "--help", "-h")
+KEEP_HISTORY_FLAGS = (*SECRET_ACTION_FLAGS, "--import-browser-session", "--import-firefox-session", "--analyze-follows", "--doctor", "--send-test-email", "--send-test-webhook", "--open-browser", "--help", "-h")
 
 
 # Returns True when the running command is a one-shot whose output has to stay scrollable
@@ -14233,6 +14233,11 @@ def print_above_progress(message: str) -> None:
 # where it stopped. Returns at once on a stop request, and never raises, since it runs while an error is propagating
 def hold_browser_open(browser_context, stop_event=None) -> None:
     print_above_progress("* The scan failed and FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR is on, so the browser stays open to inspect. Close its window to continue")
+    wait_for_browser_windows_closed(browser_context, stop_event)
+
+
+# Waits until the last window of a visible browser is closed, a stop is requested or the browser exits, and never raises
+def wait_for_browser_windows_closed(browser_context, stop_event=None) -> None:
     while stop_event is None or not stop_event.is_set():
         try:
             open_pages = [page for page in browser_context.pages if not page.is_closed()]
@@ -14733,6 +14738,210 @@ def open_browser_follow_list_dialog(page, target: str, kind: str, anonymous: boo
     guard_browser_page_state(page, anonymous)
 
 
+# Returns whether a browser already has the profile open, which a second launch cannot share. Chrome keeps its lockfile open
+# for as long as it runs on Windows, and leaves a SingletonLock link naming its process on other systems. Returns False
+# when it cannot tell, so a launch is still attempted and reports its own failure
+def browser_profile_in_use(profile_dir: str) -> bool:
+    if os.name == "nt":
+        lockfile = os.path.join(profile_dir, "lockfile")
+        if not os.path.exists(lockfile):
+            return False
+        try:
+            with open(lockfile, "ab"):
+                return False
+        except OSError:
+            return True
+    try:
+        owner = os.readlink(os.path.join(profile_dir, "SingletonLock"))
+        os.kill(int(owner.rsplit("-", 1)[1]), 0)
+    except PermissionError:
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+    return True
+
+
+# Seconds between telling the person a window on the browser profile will be closed and closing it, which is the time to abort
+BROWSER_PROFILE_CLOSE_DELAY_SECONDS = 15
+
+# Seconds a window that was asked to close is given to let go of the profile before it is closed by force, and the same after the force
+BROWSER_PROFILE_CLOSE_GRACE_SECONDS = 10
+
+# Command line flags only a browser started by automation carries, which tell a browser a run of this tool drives from a window opened by hand
+BROWSER_AUTOMATION_FLAGS = ("--remote-debugging-pipe", "--remote-debugging-port", "--enable-automation")
+
+
+# Returns every running process as {process id: (parent process id, program name, command line)}
+def process_table() -> Dict[int, Tuple[int, str, str]]:
+    table: Dict[int, Tuple[int, str, str]] = {}
+    try:
+        if os.name == "nt":
+            listing = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.Name)`t$($_.CommandLine)\" }"],
+                                     capture_output=True, text=True, errors="replace", timeout=30).stdout
+            rows = [line.split("\t", 3) for line in listing.splitlines()]
+        else:
+            listing = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, text=True, errors="replace", timeout=30).stdout
+            rows = []
+            for line in listing.splitlines():
+                parts = line.strip().split(None, 2)
+                if len(parts) == 3:
+                    rows.append([parts[0], parts[1], os.path.basename(parts[2].split()[0]), parts[2]])
+    except (OSError, subprocess.SubprocessError):
+        return table
+    for row in rows:
+        if len(row) == 4 and row[0].strip().isdigit() and row[1].strip().isdigit():
+            table[int(row[0])] = (int(row[1]), row[2].strip(), row[3])
+    return table
+
+
+# Returns whether a process was started by a run of this tool that is still alive, by looking for a Python process or an
+# instagram_monitor command above it. A browser whose run has died is left without one, since its parents are gone
+def started_by_a_live_run(pid: int, table: Dict[int, Tuple[int, str, str]]) -> bool:
+    seen = set()
+    parent = table.get(pid, (0, "", ""))[0]
+    while parent in table and parent not in seen and len(seen) < 32:
+        seen.add(parent)
+        grandparent, name, command_line = table[parent]
+        if "python" in name.lower() or "instagram_monitor" in command_line.lower():
+            return True
+        parent = grandparent
+    return False
+
+
+# Returns the main browser processes running on a profile folder as (process id, driven by a run that is still alive). The
+# helper processes of a browser carry the folder too and are left out, since closing the main process closes them. A browser
+# an earlier run left behind when it died carries the automation flags but has no live run above it, so it is not driven
+def browser_processes_on_profile(profile_dir: str) -> List[Tuple[int, bool]]:
+    # The folder is followed by a quote, a space or the end, so a profile whose name only begins the same is not matched
+    pattern = re.compile(re.escape(os.path.normcase(profile_dir)) + r'(?=["\s]|$)')
+    table = process_table()
+    found = []
+    for pid, (_parent, _name, command_line) in table.items():
+        text = os.path.normcase(command_line)
+        if "--user-data-dir" not in text or "--type=" in text or not pattern.search(text):
+            continue
+        automated = any(flag in text for flag in BROWSER_AUTOMATION_FLAGS)
+        found.append((pid, automated and started_by_a_live_run(pid, table)))
+    return found
+
+
+# Closes a browser. Without force it asks the way closing its windows by hand does, and with force it ends the browser and
+# the helper processes that belong to it
+def close_browser_process(pid: int, force: bool = False) -> None:
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid)] + (["/F", "/T"] if force else []), capture_output=True, timeout=30)
+        else:
+            os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+# Waits for the profile to be let go of, for at most the given seconds, and returns whether it is free
+# A stop request ends the wait early
+def wait_for_browser_profile_free(profile_dir: str, seconds: float, stop_event=None) -> bool:
+    deadline = time.monotonic() + seconds
+    while True:
+        if not browser_profile_in_use(profile_dir):
+            return True
+        if time.monotonic() >= deadline or (stop_event is not None and stop_event.is_set()):
+            return False
+        time.sleep(0.5)
+
+
+# Makes the browser profile free for a launch. A window on it that no run is driving, whether it was opened by hand or a
+# run of this tool left it behind when it died, is announced and closed after BROWSER_PROFILE_CLOSE_DELAY_SECONDS unless
+# the person aborts with Ctrl+C. It is asked to close first and ended by force when it does not. A browser a run that is
+# still alive started is never closed, because that would stop its scan. Returns None when the profile is free, or the
+# reason it could not be freed
+def release_browser_profile(profile_dir: str, stop_event=None) -> Optional[str]:
+    if not browser_profile_in_use(profile_dir):
+        return None
+    owners = browser_processes_on_profile(profile_dir)
+    if any(driven for _pid, driven in owners):
+        return "a scan, or another run of this tool, is using it right now"
+    if not owners:
+        return "a browser has it open that could not be found to close"
+    print_above_progress(f"* The browser profile is open in a window that no run is using, and it will be closed in {BROWSER_PROFILE_CLOSE_DELAY_SECONDS} seconds so the browser can start. Press Ctrl+C to abort")
+    if wait_for_browser_profile_free(profile_dir, BROWSER_PROFILE_CLOSE_DELAY_SECONDS, stop_event):
+        return None
+    if stop_event is not None and stop_event.is_set():
+        return "closing the window was aborted"
+    for force in (False, True):
+        for pid, _driven in owners:
+            close_browser_process(pid, force)
+        if wait_for_browser_profile_free(profile_dir, BROWSER_PROFILE_CLOSE_GRACE_SECONDS, stop_event):
+            return None
+    return "its window could not be closed"
+
+
+# What to do when the browser profile is open in a browser that could not be closed for the run
+BROWSER_PROFILE_IN_USE_FIX = "Close that window, or let the other scan finish, then run again. A profile can be open in one browser at a time"
+
+
+# Returns the text that says the profile is open in a browser and could not be freed, ending in what to do about it
+def browser_profile_in_use_message(profile_dir: str, reason: str) -> str:
+    return f"The browser profile at {profile_dir} is open in a browser window and could not be freed ({reason}). {BROWSER_PROFILE_IN_USE_FIX}"
+
+
+# Prints that the profile is open in a browser and could not be freed, with what to do about it
+def print_browser_profile_in_use(profile_dir: str, reason: str) -> None:
+    print(f"* Error: The browser profile at {profile_dir} is open in a browser window and could not be freed ({reason})")
+    print(f"To fix: {BROWSER_PROFILE_IN_USE_FIX}")
+
+
+# Opens the browser window the follower list source uses, with the same profile, channel, proxy and user agent, and
+# returns its exit code once the window is closed. The profile keeps its sign-in between runs, so this is the place to sign in,
+# to clear a warning Instagram shows that browser, or to look at what a scan sees. A target names the profile to open
+def open_browser_window(target: Optional[str] = None, stop_event=None) -> int:
+    if not playwright_available():
+        print("* Error: The browser window needs the optional 'playwright' package")
+        print("To fix: Install it with 'pip install playwright', then run 'playwright install chromium'")
+        return 1
+
+    from playwright.sync_api import sync_playwright
+
+    user_data_dir = browser_profile_dir()
+    # The operator selects the base directory and browser_profile_dir rejects traversal components
+    # codeql[py/path-injection]
+    os.makedirs(user_data_dir, exist_ok=True)
+    blocker = release_browser_profile(user_data_dir, stop_event)
+    if blocker:
+        print_browser_profile_in_use(user_data_dir, blocker)
+        return 1
+    options = browser_launch_options()
+    options['headless'] = False
+    address = f"https://www.instagram.com/{normalize_instagram_username(target)}/" if target else "https://www.instagram.com/"
+
+    print(f"* Opening the {options['channel']} browser with the profile at {user_data_dir}")
+    with sync_playwright() as driver:
+        try:
+            browser_context = driver.chromium.launch_persistent_context(user_data_dir, **options)
+        except Exception as launch_error:
+            # A browser opened between the check above and the launch fails the same way, so it gets the same answer
+            if browser_profile_in_use(user_data_dir):
+                print_browser_profile_in_use(user_data_dir, "it was opened while the browser was starting")
+                return 1
+            print(f"* Error: The browser could not start: {format_error_message(launch_error)}")
+            print("To fix: If the browser is missing, run 'playwright install chromium' or set FOLLOW_LIST_BROWSER_CHANNEL to one installed here. Otherwise close any window already using this profile and run again")
+            return 1
+        try:
+            page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+            try:
+                page.goto(address, wait_until="domcontentloaded")
+            except Exception as load_error:
+                # The window is still useful, for example to fix a proxy or a sign-in, so it stays open
+                print(f"* Warning: {address} did not load: {format_error_message(load_error)}")
+            print("* Close the browser window to finish")
+            wait_for_browser_windows_closed(browser_context, stop_event)
+        finally:
+            try:
+                browser_context.close()
+            except Exception:
+                pass
+    return 0
+
+
 # Drives a real browser through Instagram's web app and yields each new batch of rendered names
 def browser_follow_list_batches(bot, profile, kind: str, stop_event=None):
     if kind not in ('followers', 'following'):
@@ -14748,6 +14957,10 @@ def browser_follow_list_batches(bot, profile, kind: str, stop_event=None):
     # The operator selects the base directory and browser_profile_dir rejects traversal components
     # codeql[py/path-injection]
     os.makedirs(user_data_dir, exist_ok=True)
+    # A window left open on the profile makes the launch fail without a usable reason, so it is announced and closed first
+    blocker = release_browser_profile(user_data_dir, stop_event)
+    if blocker:
+        raise BrowserFollowListError(browser_profile_in_use_message(user_data_dir, blocker))
 
     browser_follow_list_progress("Starting browser")
     with sync_playwright() as driver:
@@ -21244,6 +21457,12 @@ def run_main():
         help="Show a redacted support report with today's identity exposure and failure counts, then exit"
     )
     session_opts.add_argument(
+        "--open-browser",
+        dest="open_browser",
+        action='store_true',
+        help="Open the browser window the browser follower list source uses, with its saved profile and proxy, and exit when it is closed. Add a target name to open its profile"
+    )
+    session_opts.add_argument(
         "--be-human",
         dest="be_human",
         action="store_true",
@@ -21436,7 +21655,7 @@ def run_main():
     apply_diagnostic_cli_overrides(args)
 
     import_requested = bool(args.import_firefox_session or args.import_browser_session)
-    requested_actions = [label for label, enabled in (("--setup", args.setup), ("--set-webhook-url", args.set_webhook_url), ("--set-smtp-password", args.set_smtp_password), ("--doctor", args.doctor), ("--analyze-follows", args.analyze_follows), ("--import-browser-session", import_requested), ("--send-test-email", args.send_test_email), ("--send-test-webhook", args.send_test_webhook), ("--clear-breaker", args.clear_breaker), ("--exposure", args.show_exposure), ("--generate-config", args.generate_config is not None)) if enabled]
+    requested_actions = [label for label, enabled in (("--setup", args.setup), ("--set-webhook-url", args.set_webhook_url), ("--set-smtp-password", args.set_smtp_password), ("--doctor", args.doctor), ("--analyze-follows", args.analyze_follows), ("--import-browser-session", import_requested), ("--send-test-email", args.send_test_email), ("--send-test-webhook", args.send_test_webhook), ("--clear-breaker", args.clear_breaker), ("--exposure", args.show_exposure), ("--open-browser", args.open_browser), ("--generate-config", args.generate_config is not None)) if enabled]
     if len(requested_actions) > 1:
         parser.error("standalone actions cannot be combined: " + ", ".join(requested_actions))
     # --generate-config with a filename exits before argparse runs, so reaching here with --force means it was passed alone
@@ -21750,6 +21969,12 @@ def run_main():
             print("To fix: Restore write access to that path. Save a writable OUTPUT_DIR in the configuration file or include --output-dir PATH on each run")
             sys.exit(1)
         sys.exit(0)
+
+    # Opens the browser the follower list source uses, so it runs with the configured proxy and the profile of the account
+    # the run resolved, and takes the first target named on the command line as the profile to show
+    if args.open_browser:
+        named = [part for part in re.split(r"[,\s]+", (args.targets or "").strip()) if part] + [name for name in (args.usernames or []) if name]
+        sys.exit(open_browser_window(named[0] if named else None))
 
     apply_timing_cli_overrides(args)
 

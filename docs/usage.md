@@ -559,7 +559,7 @@ What to expect:
 - When Instagram puts a challenge, a "confirm it is you" notice or a suspension page in the way, the window stays open on it for up to `FOLLOW_LIST_BROWSER_LOGIN_WAIT` seconds. Click through it yourself and the run opens the profile again and carries on. It waits once, so a second page of that kind stops the run. The tool never clicks anything for you, and an account Instagram has really suspended or disabled cannot be cleared this way.
 - If the browser is not signed in and cannot be, because `FOLLOW_LIST_BROWSER_HEADLESS` is `True` or `FOLLOW_LIST_BROWSER_LOGIN_WAIT` is `0`, the run stops with `The browser is not signed in to Instagram` and names the fix. The same happens when the sign-in later expires or Instagram removes it. Run once with a visible window and sign in again.
 - A configuration saved by the setup wizard in no-login mode contains `SKIP_FOLLOWERS = True` and `SKIP_FOLLOWINGS = True`. Set both to `False`, or the lists stay skipped.
-- A browser profile can be open in one browser at a time. Close any other browser or monitor that uses the same profile directory first.
+- A browser profile can be open in one browser at a time. A window on the profile that no run is using, such as one opened with `--open-browser` or left open by a run that died, is announced and closed 15 seconds before the scan starts, unless you press Ctrl+C. A browser that another run of this tool which is still alive started is never closed, so the scan stops and names it. See [`--open-browser`](#anonymous-mode-with-the-browser-source) below.
 - Only the `browser` source reads lists in anonymous mode. With `auto`, `rest` or `graphql` the lists stay skipped, exactly as before.
 
 `instagram_monitor --doctor` reports whether the browser profile already holds a sign-in. It reads the profile's cookie database without starting a browser, so it can answer only when that database is readable.
@@ -571,6 +571,15 @@ instagram_monitor --doctor
 ```
 
 The Configuration check reports the selected source and, for `browser`, whether Playwright and the browser are actually installed.
+
+To look at the browser yourself, for example to sign in, clear a warning Instagram shows it or see what a scan sees, open its window:
+
+```sh
+instagram_monitor --open-browser
+instagram_monitor <target_insta_user> --open-browser
+```
+
+The window is the browser the scans use: the same profile, channel, proxy and user agent, and always visible whatever `FOLLOW_LIST_BROWSER_HEADLESS` says. It opens Instagram's home page, or the profile of the target you name, and the command ends when you close the window. It acts on the profile of the account the run resolves, which is `_anonymous_` without a session. A profile can be open in one browser at a time. A window on it that no run is using, whether you opened it by hand or an earlier run left it open when it died, is closed for you: the command prints that it will close the window in 15 seconds, and closes it then unless you press Ctrl+C. It asks the window to close first and ends it by force if that does not work. A scan does the same before it starts, so an unattended scan is never stopped by a leftover window. A browser that a run of this tool which is still alive started is never closed, since that would end its scan. In that case, or when a window cannot be closed, the command or scan says why and stops, and the command exits with code 1. The command needs the optional `playwright` package and the proxy settings to work, like a scan.
 
 <a id="advanced-followerfollowing-fetching"></a>
 ## Advanced Follower/Following Fetching

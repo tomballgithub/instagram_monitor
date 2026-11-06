@@ -91,6 +91,7 @@ installed copy of the package.
 | `test_follow_list_browser.py` | Browser follower lists, progress updates, TLS launch options and certificate recovery advice, with no browser started |
 | `test_browser_proxy_certificate.py` | The stop on a proxy certificate the browser would ignore on Windows, its red message, and the doctor rows that report it and check the Windows trust store |
 | `test_browser_repeated_pages.py` | Asking again for list pages that repeat accounts, the page size the browser requests, and how both are wired into the browser scan |
+| `test_open_browser.py` | `--open-browser`: the window opens the scan profile visibly with the scan proxy and user agent, a target opens its profile, a window no run is using, opened by hand or left by a run that died, is announced and closed after 15 seconds unless aborted while a browser a live run drives never is, a profile that cannot be freed or a missing package is reported, and the option is a standalone action |
 | `test_anonymous_browser_follow_lists.py` | Browser follower lists without a session: source selection, the browser's own sign-in check and wait, an expired sign-in, the doctor row, startup flags and the real monitoring loop |
 | `test_follow_analysis.py` | The offline follow relationship analysis behind `--analyze-follows` |
 | `test_imgcat_display.py` | Terminal image display argument handling, viewer resolution from `PATH` only and the program path a config found in the current directory may not set |
