@@ -13439,6 +13439,23 @@ def note_authenticated_failure(error_msg: str, user: str = "", bot=None) -> bool
     return False
 
 
+# Returns the username of the signed-in session and whether Instagram confirmed it, for the "loading own profile" step
+# Instagram sometimes answers that lookup with a generic "something went wrong" reply while the session still works, and the
+# name is only shown and logged, so a reply the failure classes call a plain network error falls back to the name the session
+# was loaded with. A rate limit, a challenge, a flagged session or a logged-out reply is raised so it is handled as before
+def load_session_username(bot) -> Tuple[str, bool]:
+    try:
+        return instaloader.Profile.own_profile(bot.context).username, True
+    except instaloader.exceptions.LoginRequiredException:
+        raise
+    except Exception as error:
+        known_name = getattr(bot.context, "username", None) or SESSION_USERNAME
+        if not known_name or classify_failure_class(format_error_message(error)) != 'network':
+            raise
+        debug_print("Own profile lookup", outcome="failed, using the loaded session name", error=f"{type(error).__name__}: {error}")
+        return known_name, False
+
+
 # Formats one report row so its value starts in the shared column whatever the label length
 def _exposure_row(label: str, value: str, column: int = 40) -> str:
     prefix = f"{label}:"
@@ -15549,11 +15566,14 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             # Always print and log activity; Logger handles terminal suppression
             _thread_local.in_partial_line = True
             print("- loading own profile...", end=" ", flush=True)
-            me = instaloader.Profile.own_profile(bot.context)
-            session_username = me.username
-            print(f"               OK: {session_username}")
+            session_username, session_confirmed = load_session_username(bot)
+            if session_confirmed:
+                print(f"               OK: {session_username}")
+                log_activity(f"Session user loaded: {session_username}")
+            else:
+                print(f"               not confirmed, using {session_username}")
+                log_activity(f"Session user not confirmed by Instagram, using the loaded name: {session_username}")
             _thread_local.in_partial_line = False
-            log_activity(f"Session user loaded: {session_username}")
             update_ui_data(targets={user: {'session': {'username': session_username, 'active': True}}})
 
         print("─" * HORIZONTAL_LINE)

@@ -82,6 +82,8 @@ If that fails too, fix DNS first. When you use a VPN or a proxy, confirm it is r
 
 Other connection errors point elsewhere. `Max retries exceeded` or a timeout usually means the connection dropped or a proxy is unreachable, see [routing traffic through a proxy](usage.md#routing-traffic-through-a-proxy). `429` or `Too Many Requests` means Instagram is rate-limiting you, see [keep the polling interval reasonable](anti-detection.md#keep-the-polling-interval-reasonable). On a run without a session, `Please wait a few minutes before you try again` means the limit is on your IP address, see [anonymous runs are rate limited](#anonymous-runs-are-rate-limited). A `429` on the very first request of a run is usually a blocked TLS fingerprint rather than a rate limit, see [use a browser transport fingerprint](anti-detection.md#use-a-browser-transport-fingerprint). A message about a redirect, a login or wrong credentials means the saved session expired, see [session import](configuration.md).
 
+A signed-in run ends its start-up with `loading own profile`, which only reads the session's username. Instagram sometimes answers that request with `We're sorry, but something went wrong` while the session still works. The run then prints `not confirmed, using <name>` and carries on with the name the session was loaded with. A rate limit, a challenge, a flagged session or a logged-out reply at that step still stops the check, so those messages mean what they say.
+
 For the underlying transport detail behind any of these, add `--debug`. Normal output omits it because it names internal HTTP library errors rather than anything you can act on.
 
 <a id="instagram-says-try-again-later"></a>

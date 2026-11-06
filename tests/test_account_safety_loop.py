@@ -321,6 +321,63 @@ class TestStoryAvailabilityCheck:
         assert self._run(monitored_account, tmp_path, False) == []
 
 
+class TestSessionUsernameLookup:
+    """The own profile lookup only names the session, so a generic refusal of it must not end a check."""
+
+    GENERIC_REFUSAL = "JSON Query to api/v1/accounts/current_user/: 200 OK - \"fail\" status, message \"We're sorry, but something went wrong. Please try again.\" when accessing https://i.instagram.com/api/v1/accounts/current_user/"
+
+    # Replaces the lookup with one that raises the given error, and returns a client that was loaded for a named session
+    @staticmethod
+    def _bot(monkeypatch, error, loaded_name="loaded.account"):
+        def own_profile(ctx):
+            raise error
+
+        monkeypatch.setattr(im.instaloader.Profile, "own_profile", own_profile)
+        return SimpleNamespace(context=SimpleNamespace(username=loaded_name, is_logged_in=True))
+
+    # A lookup Instagram answers returns the name it gives and says it was confirmed
+    def test_a_confirmed_name_is_returned_as_confirmed(self, monitored_account):
+        bot = SimpleNamespace(context=SimpleNamespace(username="loaded.account", is_logged_in=True))
+        assert im.load_session_username(bot) == ("loop.account", True)
+
+    # The generic refusal from the report falls back to the name the session was loaded with
+    def test_the_generic_refusal_uses_the_loaded_name(self, monitored_account):
+        bot = self._bot(monitored_account, im.instaloader.exceptions.ConnectionException(self.GENERIC_REFUSAL))
+        assert im.load_session_username(bot) == ("loaded.account", False)
+
+    # A client with no loaded name falls back to the configured session name
+    def test_the_configured_name_is_the_second_choice(self, monitored_account):
+        bot = self._bot(monitored_account, im.instaloader.exceptions.ConnectionException(self.GENERIC_REFUSAL), loaded_name="")
+        assert im.load_session_username(bot) == ("loop.account", False)
+
+    # With no name to fall back to, the refusal is raised rather than invented
+    def test_no_name_raises_the_refusal(self, monitored_account):
+        bot = self._bot(monitored_account, im.instaloader.exceptions.ConnectionException(self.GENERIC_REFUSAL), loaded_name="")
+        monitored_account.setattr(im, "SESSION_USERNAME", "")
+        with pytest.raises(im.instaloader.exceptions.ConnectionException):
+            im.load_session_username(bot)
+
+    # Rate limits, challenges, flagged sessions and logged-out replies are not hidden, since they decide what the run does next
+    @pytest.mark.parametrize("error", [
+        im.instaloader.exceptions.ConnectionException("429 Too Many Requests"),
+        im.instaloader.exceptions.ConnectionException("checkpoint_required"),
+        im.instaloader.exceptions.ConnectionException("400 Bad Request - feedback_required"),
+        im.instaloader.exceptions.LoginRequiredException("Login required"),
+    ])
+    def test_account_level_replies_still_stop_the_check(self, monitored_account, error):
+        bot = self._bot(monitored_account, error)
+        with pytest.raises(type(error)):
+            im.load_session_username(bot)
+
+    # The startup pass carries on after the refusal and says the name was not confirmed
+    def test_the_startup_pass_continues(self, monitored_account, tmp_path, capsys):
+        monitored_account.setattr(im.instaloader.Profile, "own_profile", lambda ctx: (_ for _ in ()).throw(im.instaloader.exceptions.ConnectionException(self.GENERIC_REFUSAL)))
+        TestStoryAvailabilityCheck._run(monitored_account, tmp_path, False)
+        output = capsys.readouterr().out
+        assert "not confirmed, using loop.account" in output
+        assert "Error:" not in output
+
+
 @pytest.mark.parametrize("kind", ["followers", "followings"])
 @pytest.mark.parametrize("challenge", [False, True])
 # Records a periodic list failure once when it passes from the paginator to the real monitor
