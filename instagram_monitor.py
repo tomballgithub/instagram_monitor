@@ -8612,8 +8612,8 @@ def _public_web_targets(ctx) -> Dict[str, Dict[str, Any]]:
 
 
 # Tells the operator once per run and target that the profile is read from its public pages and what that costs
-def _announce_public_web_fallback(username: str) -> None:
-    message = f"Profile lookup for {username} answered HTTP 400, reading its public embed and profile page instead (recent posts only, following count and bio only when the page allows)"
+def _announce_public_web_fallback(username: str, status: int = 400) -> None:
+    message = f"Profile lookup for {username} answered HTTP {status}, reading its public embed and profile page instead (recent posts only, following count and bio only when the page allows)"
     # The notice can arrive while a progress line is still open, so it starts on a line of its own
     if getattr(_thread_local, 'in_partial_line', False):
         print()
@@ -8634,6 +8634,8 @@ def _public_web_snapshot(bot: instaloader.Instaloader, username: str, target: Di
 
 # Keeps healthy and signed-in requests unchanged. An anonymous HTTP 400 moves the target onto its public embed and
 # profile page for the rest of the run, even when they fail, so later checks never repeat the refused request.
+# An HTTP 404 does the same once the embed has been read, since Instagram answers it for the whole endpoint and for a
+# profile that does not exist alike. When the embed cannot be read either, the 404 is raised as before and nothing is kept.
 # 401, 429 and every other failure propagate without another request
 def _anonymous_profile_info(bot: instaloader.Instaloader, username: str) -> Dict[str, Any]:
     username = normalize_instagram_username(username)
@@ -8644,11 +8646,23 @@ def _anonymous_profile_info(bot: instaloader.Instaloader, username: str) -> Dict
     targets = _public_web_targets(ctx)
     target = targets.get(username)
     if target is None:
+        not_found = None
         try:
             return ctx.get_iphone_json(path, {})
         except instaloader.exceptions.QueryReturnedBadRequestException:
-            target = {"data": None, "fetched_at": 0.0, "page_retry_at": 0.0}
-            targets[username] = target
+            pass
+        except instaloader.exceptions.QueryReturnedNotFoundException as error:
+            not_found = error
+        target = {"data": None, "fetched_at": 0.0, "page_retry_at": 0.0}
+        targets[username] = target
+        if not_found is not None:
+            try:
+                data = _public_web_snapshot(bot, username, target)
+            except Exception:
+                targets.pop(username, None)
+                raise not_found
+            _announce_public_web_fallback(username, 404)
+            return data
         _announce_public_web_fallback(username)
     elif target["data"] is not None and time.monotonic() - target["fetched_at"] < PUBLIC_WEB_SNAPSHOT_SECONDS:
         return target["data"]

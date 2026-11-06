@@ -116,6 +116,43 @@ def test_other_failures_do_not_fall_back(im_module, monkeypatch, error_name, mes
     bot.context.get_page_data.assert_not_called()
 
 
+# Instagram answering 404 to the whole anonymous endpoint reads the target from its public sources like a 400 does, and says so.
+def test_not_found_reads_the_embed_and_announces_http_404(im_module, monkeypatch, capsys):
+    bot, response = _bot(im_module, monkeypatch)
+    bot.context.get_iphone_json.side_effect = im_module.instaloader.exceptions.QueryReturnedNotFoundException(
+        "JSON Query to api/v1/users/web_profile_info/?username=target: 404 Not Found")
+    profile = im_module.profile_from_username_resilient(bot, "target")
+    assert (profile.userid, profile.username, profile.followers) == (77, "target", 12)
+    assert "answered HTTP 404" in capsys.readouterr().out
+    # The target stays on the public sources, so a second lookup does not repeat the refused request
+    im_module.profile_from_username_resilient(bot, "target")
+    assert bot.context.get_iphone_json.call_count == 1
+    response.close.assert_called()
+
+
+# A 404 for a profile that does not exist still raises it, since the embed cannot be read either, and nothing is remembered.
+@pytest.mark.parametrize("status", [404, 302])
+def test_not_found_without_an_embed_raises_the_original_error(im_module, monkeypatch, capsys, status):
+    bot, response = _bot(im_module, monkeypatch)
+    response.status_code = status
+    bot.context.get_iphone_json.side_effect = im_module.instaloader.exceptions.QueryReturnedNotFoundException("404 Not Found")
+    for _ in range(2):
+        with pytest.raises(im_module.instaloader.exceptions.QueryReturnedNotFoundException):
+            im_module.profile_from_username_resilient(bot, "target")
+    assert bot.context.get_iphone_json.call_count == 2
+    assert "answered HTTP" not in capsys.readouterr().out
+
+
+# A signed-in session never moves to the anonymous sources on a 404.
+def test_logged_in_not_found_does_not_fall_back(im_module, monkeypatch):
+    bot, _ = _bot(im_module, monkeypatch)
+    bot.context.is_logged_in = True
+    bot.context.get_iphone_json.side_effect = im_module.instaloader.exceptions.QueryReturnedNotFoundException("404 Not Found")
+    with pytest.raises(im_module.instaloader.exceptions.QueryReturnedNotFoundException):
+        im_module._anonymous_profile_info(bot, "target")
+    bot.context._session.get.assert_not_called()
+
+
 # Healthy mobile responses and logged-in callers keep their existing source.
 def test_healthy_response_is_unchanged(im_module, monkeypatch):
     bot, _ = _bot(im_module, monkeypatch)

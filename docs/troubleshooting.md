@@ -105,6 +105,8 @@ A session login is limited per account instead, so [importing a session](configu
 
 Instagram answers HTTP 400 to anonymous profile lookups for some public professional profiles. Such a target is then read from its public embed for the rest of the run. A notice is printed once. HTTP 401, 429 and connection errors never switch a target.
 
+In early November 2026 Instagram began answering HTTP 404 to `api/v1/users/web_profile_info/` for anonymous lookups of profiles that exist, which stopped every anonymous and browser-mode run at `loading profile from username` with `404 Not Found` after two retries. A 404 now switches the target to its public embed the same way, and the notice says `answered HTTP 404`. A profile that really does not exist answers 404 as well, so the switch is only made once the embed has been read. When the embed cannot be read either, the original 404 is reported and the next check asks again.
+
 The embed gives the follower count, the post count and the six newest posts. The public profile page adds the following count and the bio when logged-out visitors can open it. A page that fails is skipped for six hours. Missing fields are never treated as zero or empty. Changes to them are reported once they return.
 
 Each check costs one embed request and at most one page request. If the embed cannot be read, the check reports `Public embed fallback failed`.
