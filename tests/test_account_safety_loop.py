@@ -247,7 +247,7 @@ class TestFirstCheckWait:
         monkeypatch.setattr(im, "MIN_H1", 22)
         monkeypatch.setattr(im, "MAX_H1", 23)
         monkeypatch.setattr(im, "DAYS_BETWEEN", 2)
-        monkeypatch.setattr(im, "FIRST_CHECK_DAYS", 2 if pending else 1)
+        monkeypatch.setattr(im, "FIRST_CHECK_SKIP_DAYS", 1 if pending else 0)
         monkeypatch.setattr(im, "FIRST_CHECK_PENDING", {"target"} if pending else set())
         stop_event = SimpleNamespace(is_set=lambda: False, wait=lambda seconds: waited.append(seconds))
         with pytest.raises(FirstRequest):
@@ -259,8 +259,8 @@ class TestFirstCheckWait:
         events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 20, 10, 0), pending=True)
 
         assert events == ["client created", "session loaded", "profile requested"]
-        # Tomorrow's window opens at 22:00, which is 25 hours 50 minutes after 20:10 today
-        assert waited == 25 * 3600 + 50 * 60
+        # Tonight's check would be at 22:10, so tomorrow's is 22:10 too, which is 26 hours after 20:10 today
+        assert waited == 26 * 3600
 
     # Without the days, the same start waits only for tonight's window, so the days are what added the wait
     def test_today_waits_only_for_tonights_window(self, monitored_account, tmp_path):
@@ -276,11 +276,11 @@ class TestFirstCheckWait:
 
         assert waited == 0
 
-    # Started inside the window with tomorrow chosen, it still waits for tomorrow
+    # Started inside the window with tomorrow chosen, it waits a day, to the same time tomorrow
     def test_inside_the_window_with_tomorrow_waits_a_day(self, monitored_account, tmp_path):
         _events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 22, 30, 0), pending=True)
 
-        assert waited == 23 * 3600 + 30 * 60
+        assert waited == 24 * 3600
 
 
 class TestStoryAvailabilityCheck:

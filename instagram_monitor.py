@@ -13580,74 +13580,80 @@ def _next_allowed_datetime_at_or_after(planned_dt: datetime, allowed_hours: List
     return planned_dt
 
 
-# Returns the earliest time the next check may run when DAYS_BETWEEN spaces checks by calendar days
-# It is the start of the day that many days after now_dt, moved by the minutes and seconds of the randomized interval so
-# checks do not begin on the dot of the first allowed hour
-def earliest_check_after_days_between(now_dt: datetime, base_sleep_seconds: int) -> datetime:
-    day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=DAYS_BETWEEN)
-    return day_start + timedelta(seconds=int(base_sleep_seconds) % 3600)
+# Moves a check the usual schedule planned onto the calendar day that many days after now_dt, by whole days, so it keeps
+# the time of day the schedule gave it and does not start on the dot of the first allowed hour. A check already that far
+# away, or further, is returned unchanged, so this only ever delays a check
+def shift_check_by_days(now_dt: datetime, planned_dt: datetime, days: int) -> datetime:
+    extra_days = days - (planned_dt.date() - now_dt.date()).days
+    return planned_dt + timedelta(days=extra_days) if extra_days > 0 else planned_dt
 
 
-# Days before the first check of this run, where 1 is today and 2 is tomorrow
+# Days to skip before the first check of this run, where 0 is today and 1 is tomorrow
 # It is asked at startup when DAYS_BETWEEN is above 1, so a restart does not have to check on a day the schedule skips
-FIRST_CHECK_DAYS = 1
+FIRST_CHECK_SKIP_DAYS = 0
 
-# Targets that have not yet had FIRST_CHECK_DAYS applied to their first check, so each is delayed once and a restarted pass is not
+# Targets that have not yet had FIRST_CHECK_SKIP_DAYS applied to their first check, so each is delayed once and a restarted pass is not
 FIRST_CHECK_PENDING: set = set()
 
 
-# Asks how many days to wait before the first check when DAYS_BETWEEN spaces checks by more than a day
-# 1, which is also the answer to a bare Enter, means today. A run with no terminal to ask keeps today
+# Asks how many days to skip before the first check when DAYS_BETWEEN spaces checks by more than a day
+# 0, which is also the answer to a bare Enter, means today and 1 means tomorrow. A run with no terminal to ask keeps today
 # The answer is applied later, in the wait before a target's first request, so the rest of the start-up still runs now
 def ask_first_check_days(targets=()) -> int:
-    global FIRST_CHECK_DAYS
-    FIRST_CHECK_DAYS = 1
+    global FIRST_CHECK_SKIP_DAYS
+    FIRST_CHECK_SKIP_DAYS = 0
     FIRST_CHECK_PENDING.clear()
     if DAYS_BETWEEN <= 1 or not CHECK_POSTS_IN_HOURS_RANGE or DASHBOARD_ENABLED or not sys.stdin or not sys.stdin.isatty():
-        return FIRST_CHECK_DAYS
-    prompt = colorize("info", f"* DAYS_BETWEEN is {DAYS_BETWEEN}. Days before the first check (1 = today, 2 = tomorrow, ...) [1]: ")
+        return FIRST_CHECK_SKIP_DAYS
+    prompt = colorize("info", f"* DAYS_BETWEEN is {DAYS_BETWEEN}. Days to skip before the first check (0 = today, 1 = tomorrow, ...) [0]: ")
     while True:
         try:
             raw = read_interactively(input, prompt).strip()
         except EOFError:
             print("")
-            return FIRST_CHECK_DAYS
+            return FIRST_CHECK_SKIP_DAYS
         except KeyboardInterrupt:
             # Ctrl+C ends the run here the way it does anywhere else
             signal_handler(signal.SIGINT, None)
             raise
         if not raw:
-            return FIRST_CHECK_DAYS
-        if raw.isdigit() and int(raw) >= 1:
-            FIRST_CHECK_DAYS = int(raw)
-            if FIRST_CHECK_DAYS > 1:
+            return FIRST_CHECK_SKIP_DAYS
+        if raw.isascii() and raw.isdigit():
+            FIRST_CHECK_SKIP_DAYS = int(raw)
+            if FIRST_CHECK_SKIP_DAYS > 0:
                 FIRST_CHECK_PENDING.update(targets)
-            return FIRST_CHECK_DAYS
-        print("  Please enter a whole number of 1 or more.")
+            return FIRST_CHECK_SKIP_DAYS
+        print("  Please enter a whole number of 0 or more.")
 
 
-# Moves a planned first check to the day FIRST_CHECK_DAYS chose, keeping the minutes and seconds of the plan's own delay
-# Returns the planned time unchanged for today, and never earlier than the plan
-def apply_first_check_days(now_dt: datetime, planned_dt: datetime, delay_seconds: int = 0) -> datetime:
-    if FIRST_CHECK_DAYS <= 1:
+# Moves a planned first check by the days FIRST_CHECK_SKIP_DAYS chose, by whole days, so it keeps the time of day the plan has
+# Returns the planned time unchanged for today
+def apply_first_check_days(now_dt: datetime, planned_dt: datetime) -> datetime:
+    if FIRST_CHECK_SKIP_DAYS <= 0:
         return planned_dt
-    day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=FIRST_CHECK_DAYS - 1)
-    return max(planned_dt, day_start + timedelta(seconds=int(delay_seconds) % 3600))
+    return shift_check_by_days(now_dt, planned_dt, FIRST_CHECK_SKIP_DAYS)
 
 
-# Returns the time the first check of a target must wait for when FIRST_CHECK_DAYS pushed it past today, or None
+# Returns the time the first check of a target must wait for when FIRST_CHECK_SKIP_DAYS pushed it past today, or None
 # Taken once per target, at the wait that already precedes its first request. By then the client and the session are set
 # up, so a missing session file or a stopped account is reported tonight and not on the day the check finally runs
-def take_first_check_time(user: str, now_dt: datetime) -> Optional[datetime]:
+# The time is the one the first check would have had today, moved by whole days
+def take_first_check_time(user: str, now_dt: datetime, allowed: List[int]) -> Optional[datetime]:
     if user not in FIRST_CHECK_PENDING:
         return None
     FIRST_CHECK_PENDING.discard(user)
-    planned = apply_first_check_days(now_dt, now_dt)
-    return planned if planned > now_dt else None
+    if FIRST_CHECK_SKIP_DAYS <= 0:
+        return None
+    usual = _next_allowed_datetime_at_or_after(now_dt, allowed)
+    if usual is None:
+        return None
+    planned = _next_allowed_datetime_at_or_after(apply_first_check_days(now_dt, usual), allowed)
+    return planned if planned is not None and planned > now_dt else None
 
 
 # Computes the next sleep duration and next_check value, factoring in CHECK_POSTS_IN_HOURS_RANGE and DAYS_BETWEEN
 # after_check is True when a check just completed, since only a completed check starts the wait of DAYS_BETWEEN days
+# The wait moves the time the usual schedule picked by whole days, so it keeps that time of day
 # A retry after a failed check or a skipped hour keeps the plain interval, and DAYS_BETWEEN is ignored while the hour ranges are off
 def compute_next_check_with_hours_range(now_dt: datetime, base_sleep_seconds: int, after_check: bool = False) -> Tuple[int, Any]:
     if base_sleep_seconds < 0:
@@ -13663,11 +13669,12 @@ def compute_next_check_with_hours_range(now_dt: datetime, base_sleep_seconds: in
         return 300, "No allowed hours (hour ranges disabled or misconfigured)"
 
     planned_dt = now_dt + timedelta(seconds=base_sleep_seconds)
-    if after_check and DAYS_BETWEEN > 0:
-        planned_dt = max(planned_dt, earliest_check_after_days_between(now_dt, base_sleep_seconds))
     adjusted = _next_allowed_datetime_at_or_after(planned_dt, allowed)
     if adjusted is None:
         return 300, "No allowed hours (hour ranges disabled or misconfigured)"
+    if after_check and DAYS_BETWEEN > 0:
+        # A whole number of days keeps the hour, and the second pass only matters where a clock change moved it
+        adjusted = _next_allowed_datetime_at_or_after(shift_check_by_days(now_dt, adjusted, DAYS_BETWEEN), allowed) or adjusted
 
     sleep_s = int((adjusted - now_dt).total_seconds())
     return max(1, sleep_s), adjusted
@@ -15478,9 +15485,9 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             else:
                 now_hr = now_local_naive()
                 # The days chosen at startup for the first check count here, after the client and the session are set up
-                first_check_at = take_first_check_time(user, now_hr)
+                first_check_at = take_first_check_time(user, now_hr, allowed)
                 if first_check_at is not None or now_hr.hour not in allowed:
-                    next_allowed = _next_allowed_datetime_at_or_after(first_check_at or now_hr, allowed)
+                    next_allowed = first_check_at or _next_allowed_datetime_at_or_after(now_hr, allowed)
                     if next_allowed:
                         sleep_s = max(1, int((next_allowed - now_hr).total_seconds()))
                         update_check_times(next_time=next_allowed, user=user, increment_count=False)
@@ -22527,9 +22534,9 @@ def run_main():
                     planned = adjusted
                     delay = max(0, int((planned - now).total_seconds()))
             planned_actions.append((u, delay, planned))
-            # FIRST_CHECK_DAYS moves the first request to a later day. The target still starts after its stagger, so its
-            # set-up runs now, and the wait before its first request is what covers the days, so only the shown time moves
-            shown = apply_first_check_days(now, planned, delay)
+            # FIRST_CHECK_SKIP_DAYS moves the first request to a later day by whole days. The target still starts after its stagger,
+            # so its set-up runs now, and the wait before its first request is what covers the days, so only the shown time moves
+            shown = apply_first_check_days(now, planned)
             if CHECK_POSTS_IN_HOURS_RANGE and shown != planned:
                 shown_allowed = hours_to_check()
                 shown = (_next_allowed_datetime_at_or_after(shown, shown_allowed) if shown_allowed else None) or shown
