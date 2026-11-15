@@ -103,9 +103,9 @@ A session login is limited per account instead, so [importing a session](configu
 <a id="anonymous-profile-http-400"></a>
 ## Anonymous Profile Lookup Returns HTTP 400
 
-Instagram answers HTTP 400 to anonymous profile lookups for some public professional profiles. Such a target is then read from its public embed for the rest of the run. A notice is printed once. HTTP 401, 429 and connection errors never switch a target.
+Instagram answers `api/v1/users/web_profile_info/` with HTTP 400 for anonymous lookups of some public professional profiles. In early November 2026 it began answering HTTP 404 for profiles that exist, which stopped every anonymous and browser-mode run at `loading profile from username` with `404 Not Found` after two retries.
 
-In early November 2026 Instagram began answering HTTP 404 to `api/v1/users/web_profile_info/` for anonymous lookups of profiles that exist, which stopped every anonymous and browser-mode run at `loading profile from username` with `404 Not Found` after two retries. A 404 now switches the target to its public embed the same way, and the notice says `answered HTTP 404`. A profile that really does not exist answers 404 as well, so the switch is only made once the embed has been read. When the embed cannot be read either, the original 404 is reported and the next check asks again.
+An anonymous run therefore no longer asks that endpoint. It reads each target from its public embed, and prints a notice once per target. A signed-in run still uses the endpoint and never switches. When the embed cannot be read, the check reports the embed's own error, such as an HTTP 401 or 429 limit on this address, or a private account, and the next check reads it again.
 
 The embed gives the follower count, the post count and the six newest posts. The public profile page adds the following count and the bio when logged-out visitors can open it. A page that fails is skipped for six hours. Missing fields are never treated as zero or empty. Changes to them are reported once they return.
 
@@ -121,7 +121,7 @@ Limits:
 <a id="profile-lookups-report-a-retired-endpoint"></a>
 ## Profile Lookups Report a Retired Endpoint
 
-In September 2026 Instagram retired `api/v1/users/web_profile_info/` for accounts that are signed in. It answers `400 feedback_required` no matter how healthy the account is, while GraphQL and the profile page keep working for the same session in the same second. Runs without a login normally read profiles from `i.instagram.com`. A separate anonymous HTTP 400 failure is handled by the [public profile fallback](#anonymous-profile-http-400).
+In September 2026 Instagram retired `api/v1/users/web_profile_info/` for accounts that are signed in. It answers `400 feedback_required` no matter how healthy the account is, while GraphQL and the profile page keep working for the same session in the same second. Runs without a login do not use it either, and read profiles from the [public embed](#anonymous-profile-http-400).
 
 Version 3.9.1 and earlier read every profile through that endpoint, so a signed-in run on those versions fails at the first lookup of every target. Re-importing the session does not help. Upgrade to 4.1 or later.
 

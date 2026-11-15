@@ -8612,8 +8612,8 @@ def _public_web_targets(ctx) -> Dict[str, Dict[str, Any]]:
 
 
 # Tells the operator once per run and target that the profile is read from its public pages and what that costs
-def _announce_public_web_fallback(username: str, status: int = 400) -> None:
-    message = f"Profile lookup for {username} answered HTTP {status}, reading its public embed and profile page instead (recent posts only, following count and bio only when the page allows)"
+def _announce_public_web_fallback(username: str) -> None:
+    message = f"Reading {username} from its public embed and profile page, since Instagram no longer answers anonymous profile lookups (recent posts only, following count and bio only when the page allows)"
     # The notice can arrive while a progress line is still open, so it starts on a line of its own
     if getattr(_thread_local, 'in_partial_line', False):
         print()
@@ -8632,37 +8632,21 @@ def _public_web_snapshot(bot: instaloader.Instaloader, username: str, target: Di
     return data
 
 
-# Keeps healthy and signed-in requests unchanged. An anonymous HTTP 400 moves the target onto its public embed and
-# profile page for the rest of the run, even when they fail, so later checks never repeat the refused request.
-# An HTTP 404 does the same once the embed has been read, since Instagram answers it for the whole endpoint and for a
-# profile that does not exist alike. When the embed cannot be read either, the 404 is raised as before and nothing is kept.
-# 401, 429 and every other failure propagate without another request
+# Signed-in requests keep the mobile endpoint. An anonymous run never asks it, because Instagram answers it with HTTP
+# 400 or 404 for every anonymous lookup, and Instaloader's own anonymous profile read has moved to the public page
+# for the same reason. The target is read from its public embed and profile page, which stay in use for the rest of
+# the run even when a read fails, so a later check does not announce or restart the switch. A read that fails raises
+# its own error, such as an IP limit or a private account
 def _anonymous_profile_info(bot: instaloader.Instaloader, username: str) -> Dict[str, Any]:
     username = normalize_instagram_username(username)
     ctx = bot.context
-    path = f"api/v1/users/web_profile_info/?username={username}"
     if ctx.is_logged_in:
-        return ctx.get_iphone_json(path, {})
+        return ctx.get_iphone_json(f"api/v1/users/web_profile_info/?username={username}", {})
     targets = _public_web_targets(ctx)
     target = targets.get(username)
     if target is None:
-        not_found = None
-        try:
-            return ctx.get_iphone_json(path, {})
-        except instaloader.exceptions.QueryReturnedBadRequestException:
-            pass
-        except instaloader.exceptions.QueryReturnedNotFoundException as error:
-            not_found = error
         target = {"data": None, "fetched_at": 0.0, "page_retry_at": 0.0}
         targets[username] = target
-        if not_found is not None:
-            try:
-                data = _public_web_snapshot(bot, username, target)
-            except Exception:
-                targets.pop(username, None)
-                raise not_found
-            _announce_public_web_fallback(username, 404)
-            return data
         _announce_public_web_fallback(username)
     elif target["data"] is not None and time.monotonic() - target["fetched_at"] < PUBLIC_WEB_SNAPSHOT_SECONDS:
         return target["data"]
@@ -8691,7 +8675,7 @@ class _AnonymousWebProfile(instaloader.Profile):
         return unicodedata.normalize("NFC", value) if isinstance(value, str) else None
 
 
-# Builds a Profile object from web_profile_info or from the public snapshot that replaces it after an anonymous HTTP 400
+# Builds a Profile object from web_profile_info for a signed-in client or from the public snapshot an anonymous one reads
 def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) -> Optional[instaloader.Profile]:
     data = _anonymous_profile_info(bot, username)
     if not isinstance(data, dict):
@@ -8880,8 +8864,8 @@ def _profile_by_user_id(ctx, username: str, user_id: str) -> Optional[instaloade
 
 # Resolves a profile by username. Instagram retired web_profile_info for accounts that are signed in, answering
 # feedback_required however healthy the account is, so a signed-in run resolves the id through search or the public
-# profile page and reads the profile with the GraphQL query Instaloader already uses. Anonymous runs keep the mobile
-# endpoint and switch a target to its public embed and profile page when that endpoint answers HTTP 400
+# profile page and reads the profile with the GraphQL query Instaloader already uses. Anonymous runs read a target from
+# its public embed and profile page, since Instagram answers the mobile endpoint with HTTP 400 or 404 for them
 def profile_from_username_resilient(bot: instaloader.Instaloader, username: str) -> instaloader.Profile:
     ctx = bot.context
     if not ctx.is_logged_in:
@@ -12217,10 +12201,10 @@ def classify_error_parts(error_msg: str, is_logged_in: bool = False) -> Tuple[st
             return "instagram.rate_limited", "Instagram is rate-limiting anonymous requests from this IP", "Instagram is rate-limiting anonymous requests from this IP address, which counts everything behind it and is often hit on the very first request. Wait for it to pass or use another address. A session login is limited per account instead, so importing one usually works from here", ANONYMOUS_RATE_LIMIT_GUIDE_URL, True
         return "instagram.rate_limited", "Instagram is rate-limiting this account or IP", "Instagram is rate-limiting you. Raise INSTA_CHECK_INTERVAL and set ENABLE_JITTER = True in the configuration file, then restart and monitor fewer users. To use command-line settings instead, include --check-interval SECONDS --enable-jitter on each run", ANTI_DETECTION_INTERVAL_GUIDE_URL, True
 
-    # A target whose anonymous profile lookup Instagram refuses with HTTP 400 is read from its public embed. When that
-    # fails too, the embed's status describes an IP limit or a private account, never the session it does not use
+    # An anonymous target is read from its public embed, since Instagram refuses the profile lookup. When that fails
+    # too, the embed's status describes an IP limit or a private account, never the session it does not use
     if any(t in m for t in FAILURE_TERMS['public_fallback']):
-        return "instagram.public_fallback_failed", "Instagram refuses this profile's lookup and its public embed could not be read", f"Instagram answers HTTP 400 to the anonymous profile lookup for this account, so the tool reads its public embed instead, and that failed too. HTTP 401 or a login redirect on the embed is usually a limit on this IP address that passes with time. A private account has no public embed, so it can only be monitored with a session. Importing one with '{session_recovery_command()}'{session_recovery_browser_hint()} reads profiles another way", ANONYMOUS_PROFILE_FALLBACK_GUIDE_URL, True
+        return "instagram.public_fallback_failed", "Instagram refuses this profile's lookup and its public embed could not be read", f"Instagram refuses the anonymous profile lookup, so the tool reads the account's public embed instead, and that failed too. HTTP 401 or a login redirect on the embed is usually a limit on this IP address that passes with time. A private account has no public embed, so it can only be monitored with a session. Importing one with '{session_recovery_command()}'{session_recovery_browser_hint()} reads profiles another way", ANONYMOUS_PROFILE_FALLBACK_GUIDE_URL, True
 
     # An endpoint Instagram retired answers feedback_required whatever the account is doing, so its reply describes
     # the endpoint. Reading it as an account block would stop a session every other endpoint still answers

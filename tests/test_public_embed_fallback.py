@@ -40,7 +40,8 @@ def _page(**changes):
     return [{"xig_user_by_username": profile}, {"xig_user_by_username": {"polaris_ordered_timeline_connection": timeline}}]
 
 
-# Creates an anonymous context whose mobile request fails with the reported deleted schema.
+# Creates an anonymous context whose mobile profile endpoint fails the test when it is asked, since Instagram answers it
+# with HTTP 400 or 404 for every anonymous lookup.
 def _bot(im_module, monkeypatch, payload=None):
     response = Mock(status_code=200, text=_html(payload or _payload()), headers={})
     session = Mock()
@@ -48,8 +49,7 @@ def _bot(im_module, monkeypatch, payload=None):
     context = SimpleNamespace(is_logged_in=False, request_timeout=20, _session=session,
                               do_sleep=Mock(), _rate_controller=Mock(), get_iphone_json=Mock(),
                               get_page_data=Mock(return_value=_page()))
-    context.get_iphone_json.side_effect = im_module.instaloader.exceptions.QueryReturnedBadRequestException(
-        "400 Bad Request: Asset asset://laser.provider/ig_business_category_subvertical has been deleted. You cannot use this schema")
+    context.get_iphone_json.side_effect = AssertionError("an anonymous lookup asked the retired profile endpoint")
     monkeypatch.setattr(im_module, "ensure_instagram_session_wrapped", lambda session: None)
     monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
     return SimpleNamespace(context=context), response
@@ -63,7 +63,7 @@ def _clock(im_module, monkeypatch):
 
 
 # The embed is the base and the page adds only the following count and biography the embed lacks.
-def test_schema_failure_reads_embed_with_page_details(im_module, monkeypatch):
+def test_anonymous_lookup_reads_embed_with_page_details(im_module, monkeypatch):
     bot, response = _bot(im_module, monkeypatch)
     profile = im_module.profile_from_username_resilient(bot, "target")
     post, kind = im_module.latest_post_mobile("target", bot)
@@ -73,7 +73,7 @@ def test_schema_failure_reads_embed_with_page_details(im_module, monkeypatch):
     assert profile.profile_pic_url_no_iphone == "https://example.com/s100x100/avatar.jpg"
     assert (profile.followees, profile.biography) == (5, "Page biography")
     assert (post.shortcode, post.caption, post.likes, post.comments, kind) == ("NEWEST", "Example caption", 142, 1, "post")
-    assert bot.context.get_iphone_json.call_count == 1
+    bot.context.get_iphone_json.assert_not_called()
     assert bot.context._session.get.call_count == 1
     bot.context.get_page_data.assert_called_once_with("target/")
     response.close.assert_called_once()
@@ -96,80 +96,50 @@ def test_fallback_is_announced_once_on_its_own_line(im_module, monkeypatch, caps
     assert len(logs) == 1 and logs[0][1] == {"user": "target", "level": "system"}
 
 
-# Authentication, throttling, action blocks and server errors never spend a request on the public sources.
+# An anonymous run never asks the mobile profile endpoint, so no 404 or 400 is received, retried or printed, and the
+# notice says why the public sources are read instead of quoting a status.
+def test_anonymous_lookup_never_asks_the_profile_endpoint(im_module, monkeypatch, capsys):
+    bot, response = _bot(im_module, monkeypatch)
+    profile = im_module.profile_from_username_resilient(bot, "target")
+    im_module.profile_from_username_resilient(bot, "target")
+    assert (profile.userid, profile.username, profile.followers) == (77, "target", 12)
+    bot.context.get_iphone_json.assert_not_called()
+    output = capsys.readouterr().out
+    assert "no longer answers anonymous profile lookups" in output
+    assert "HTTP" not in output
+    response.close.assert_called()
+
+
+# A signed-in session keeps the profile endpoint, and a 404 or any other failure from it is raised without a public read.
 @pytest.mark.parametrize("error_name, message", [
+    ("QueryReturnedNotFoundException", "404 Not Found"),
+    ("QueryReturnedBadRequestException", "400 Bad Request"),
     ("ConnectionException", "JSON Query to api/v1/users/web_profile_info/: 401 Unauthorized"),
     ("TooManyRequestsException", "429 Too Many Requests"),
     ("AbortDownloadException", '400 Bad Request - "fail" status, message "feedback_required"'),
-    ("ConnectionException", "500 Internal Server Error"),
 ])
-def test_other_failures_do_not_fall_back(im_module, monkeypatch, error_name, message):
+def test_signed_in_failures_do_not_fall_back(im_module, monkeypatch, error_name, message):
     bot, _ = _bot(im_module, monkeypatch)
+    bot.context.is_logged_in = True
     error_type = getattr(im_module.instaloader.exceptions, error_name)
     bot.context.get_iphone_json.side_effect = error_type(message)
     for _ in range(2):
         with pytest.raises(error_type):
-            im_module.profile_from_username_resilient(bot, "target")
-    # Nothing is remembered, so the next check asks the profile endpoint again rather than the public sources
+            im_module._anonymous_profile_info(bot, "target")
     assert bot.context.get_iphone_json.call_count == 2
     bot.context._session.get.assert_not_called()
     bot.context.get_page_data.assert_not_called()
 
 
-# Instagram answering 404 to the whole anonymous endpoint reads the target from its public sources like a 400 does, and says so.
-def test_not_found_reads_the_embed_and_announces_http_404(im_module, monkeypatch, capsys):
-    bot, response = _bot(im_module, monkeypatch)
-    bot.context.get_iphone_json.side_effect = im_module.instaloader.exceptions.QueryReturnedNotFoundException(
-        "JSON Query to api/v1/users/web_profile_info/?username=target: 404 Not Found")
-    profile = im_module.profile_from_username_resilient(bot, "target")
-    assert (profile.userid, profile.username, profile.followers) == (77, "target", 12)
-    assert "answered HTTP 404" in capsys.readouterr().out
-    # The target stays on the public sources, so a second lookup does not repeat the refused request
-    im_module.profile_from_username_resilient(bot, "target")
-    assert bot.context.get_iphone_json.call_count == 1
-    response.close.assert_called()
-
-
-# A 404 for a profile that does not exist still raises it, since the embed cannot be read either, and nothing is remembered.
-@pytest.mark.parametrize("status", [404, 302])
-def test_not_found_without_an_embed_raises_the_original_error(im_module, monkeypatch, capsys, status):
-    bot, response = _bot(im_module, monkeypatch)
-    response.status_code = status
-    bot.context.get_iphone_json.side_effect = im_module.instaloader.exceptions.QueryReturnedNotFoundException("404 Not Found")
-    for _ in range(2):
-        with pytest.raises(im_module.instaloader.exceptions.QueryReturnedNotFoundException):
-            im_module.profile_from_username_resilient(bot, "target")
-    assert bot.context.get_iphone_json.call_count == 2
-    assert "answered HTTP" not in capsys.readouterr().out
-
-
-# A signed-in session never moves to the anonymous sources on a 404.
-def test_logged_in_not_found_does_not_fall_back(im_module, monkeypatch):
+# A signed-in session keeps reading the profile from the mobile endpoint and never touches the public sources.
+def test_signed_in_response_is_unchanged(im_module, monkeypatch):
     bot, _ = _bot(im_module, monkeypatch)
     bot.context.is_logged_in = True
-    bot.context.get_iphone_json.side_effect = im_module.instaloader.exceptions.QueryReturnedNotFoundException("404 Not Found")
-    with pytest.raises(im_module.instaloader.exceptions.QueryReturnedNotFoundException):
-        im_module._anonymous_profile_info(bot, "target")
-    bot.context._session.get.assert_not_called()
-
-
-# Healthy mobile responses and logged-in callers keep their existing source.
-def test_healthy_response_is_unchanged(im_module, monkeypatch):
-    bot, _ = _bot(im_module, monkeypatch)
     original = {"data": {"user": {"id": "77", "username": "target"}}}
     bot.context.get_iphone_json.side_effect = None
     bot.context.get_iphone_json.return_value = original
     assert im_module._anonymous_profile_info(bot, "target") is original
-    bot.context._session.get.assert_not_called()
-    bot.context.get_page_data.assert_not_called()
-
-
-# Even the same schema exception cannot switch a signed-in session onto an anonymous source.
-def test_logged_in_schema_failure_does_not_fall_back(im_module, monkeypatch):
-    bot, _ = _bot(im_module, monkeypatch)
-    bot.context.is_logged_in = True
-    with pytest.raises(im_module.instaloader.exceptions.QueryReturnedBadRequestException):
-        im_module._anonymous_profile_info(bot, "target")
+    bot.context.get_iphone_json.assert_called_once_with("api/v1/users/web_profile_info/?username=target", {})
     bot.context._session.get.assert_not_called()
     bot.context.get_page_data.assert_not_called()
 
@@ -188,12 +158,12 @@ def test_snapshot_is_shared_within_a_check_and_refreshed_later(im_module, monkey
     changed["followers_count"] = 13
     response.text = _html(changed)
     assert im_module.profile_from_username_resilient(bot, "target").followers == 13
-    assert bot.context.get_iphone_json.call_count == 1
+    bot.context.get_iphone_json.assert_not_called()
     assert (bot.context._session.get.call_count, bot.context.get_page_data.call_count) == (2, 2)
 
 
-# A failed embed closes its response and keeps the target on the public sources, so no later check repeats the 400.
-@pytest.mark.parametrize("status", [302, 401, 429, 500])
+# A failed embed closes its response and raises its own error, and a later check reads the embed again without the notice.
+@pytest.mark.parametrize("status", [302, 401, 404, 429, 500])
 def test_failed_embed_keeps_the_target_on_public_sources(im_module, monkeypatch, status):
     bot, response = _bot(im_module, monkeypatch)
     response.status_code = status
@@ -201,7 +171,7 @@ def test_failed_embed_keeps_the_target_on_public_sources(im_module, monkeypatch,
         with pytest.raises(RuntimeError, match=f"Public embed fallback failed for target: HTTP {status}"):
             im_module.profile_from_username_resilient(bot, "target")
     assert response.close.call_count == 2
-    assert bot.context.get_iphone_json.call_count == 1
+    bot.context.get_iphone_json.assert_not_called()
     assert bot.context._session.get.call_count == 2
     # The page only adds to a working embed, so a failed embed spends no request on it
     bot.context.get_page_data.assert_not_called()
