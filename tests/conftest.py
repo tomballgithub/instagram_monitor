@@ -167,6 +167,8 @@ def deterministic_globals(monkeypatch, tmp_path):
     monkeypatch.setattr(im, "DAYS_BETWEEN", 0, raising=False)
     monkeypatch.setattr(im, "FIRST_CHECK_SKIP_DAYS", 0, raising=False)
     monkeypatch.setattr(im, "FIRST_CHECK_PENDING", set(), raising=False)
+    monkeypatch.setattr(im, "FIRST_CHECK_NOW", set(), raising=False)
+    monkeypatch.setattr(im, "FIRST_CHECK_NEXT", {}, raising=False)
     monkeypatch.setattr(im, "WEBHOOK_ENABLED", False, raising=False)
     monkeypatch.setattr(im, "WEBHOOK_URL", "", raising=False)
     monkeypatch.setattr(im, "WEBHOOK_PROVIDER", "discord", raising=False)

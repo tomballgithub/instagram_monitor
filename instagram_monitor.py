@@ -1221,6 +1221,16 @@ def _startup_sigint_handler(signum, frame):
 # Reads one answer with Python's default Ctrl+C behavior, so the prompt reports the outcome instead of the signal handler
 def read_interactively(reader, *args, **kwargs):
     try:
+        return _read_with_default_interrupt(reader, *args, **kwargs)
+    finally:
+        # The answer's Enter ends the prompt's line on screen without passing through the logger, which would go on counting
+        # its characters toward TRUNCATE_CHARS and clip the next prompt
+        end_prompt_line()
+
+
+# Reads one answer with Ctrl+C raising KeyboardInterrupt, as the prompts expect
+def _read_with_default_interrupt(reader, *args, **kwargs):
+    try:
         previous_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, signal.default_int_handler)
     except (ValueError, OSError):
@@ -1233,6 +1243,14 @@ def read_interactively(reader, *args, **kwargs):
             signal.signal(signal.SIGINT, previous_handler)
         except (ValueError, OSError):
             pass
+
+
+# Tells the logger that the person's Enter started a new line, so the terminal truncation counts the next text from the left edge
+# With newline_in_logs the log files end the prompt's line too, which the typed Enter does on screen only
+def end_prompt_line(newline_in_logs: bool = False) -> None:
+    method = getattr(sys.stdout, "end_prompt_line", None)
+    if callable(method):
+        method(newline_in_logs)
 
 
 # Reads one hidden value with debug output forced off, so the secret cannot reach the debug stream while it is handled
@@ -5849,6 +5867,14 @@ class Logger(object):
             colorized_message = apply_color_to_text(self._truncate_terminal(message))
             self.terminal.write(colorized_message)
             self.terminal.flush()
+
+    # Restarts the terminal truncation count after a typed answer, which the console ends with a new line that never reaches write()
+    # With newline_in_logs the log files end the prompt's line too, since the prompt was written without one
+    def end_prompt_line(self, newline_in_logs=False):
+        with STDOUT_LOCK:
+            self._terminal_column, self._terminal_clipped = 0, False
+        if newline_in_logs:
+            self.log_only("\n")
 
     # Writes a message to the log file(s) only (ANSI stripped), bypassing the terminal
     def log_only(self, message):
@@ -13579,20 +13605,60 @@ FIRST_CHECK_SKIP_DAYS = 0
 # Targets that have not yet had FIRST_CHECK_SKIP_DAYS applied to their first check, so each is delayed once and a restarted pass is not
 FIRST_CHECK_PENDING: set = set()
 
+# Targets the person asked to check right away at startup, in addition to the first scheduled check, which a test run needs
+FIRST_CHECK_NOW: set = set()
 
-# Asks how many days to skip before the first check when DAYS_BETWEEN spaces checks by more than a day
-# 0, which is also the answer to a bare Enter, means today and 1 means tomorrow. A run with no terminal to ask keeps today
-# The answer is applied later, in the wait before a target's first request, so the rest of the start-up still runs now
+# When the scheduled first check of a target that checks right away is due, kept for after that check, or None when it is due already
+FIRST_CHECK_NEXT: Dict[str, Optional[datetime]] = {}
+
+
+# Reads one answer to a start-up question, and ends the question's line in the log files, which the typed Enter ends on screen only
+def read_startup_answer(prompt: str) -> str:
+    answer = read_interactively(input, prompt)
+    end_prompt_line(newline_in_logs=True)
+    return answer
+
+
+# Asks whether to also check right now, in addition to the first scheduled check
+# Enter and n mean no, so the run waits for the scheduled check alone, and input that ends means no too
+def ask_check_now() -> bool:
+    prompt = colorize("info", "- Would you like to run a check now, bypassing CHECK_POSTS_IN_HOURS_RANGE? [y/N]: ")
+    while True:
+        try:
+            raw = read_startup_answer(prompt).strip().lower()
+        except EOFError:
+            print("")
+            return False
+        except KeyboardInterrupt:
+            # Ctrl+C ends the run here the way it does anywhere else
+            signal_handler(signal.SIGINT, None)
+            raise
+        if raw in ("", "n", "no"):
+            return False
+        if raw in ("y", "yes"):
+            return True
+        print("  Please answer y or n.")
+
+
+# Asks how many days to skip before the first check when DAYS_BETWEEN spaces checks by more than a day, and then whether to
+# also check right now. 0, which is also the answer to a bare Enter, means today and 1 means tomorrow. A run with no terminal
+# to ask keeps today and does not check early. The answers are applied later, in the wait before a target's first request, so
+# the rest of the start-up still runs now
 def ask_first_check_days(targets=()) -> int:
     global FIRST_CHECK_SKIP_DAYS
     FIRST_CHECK_SKIP_DAYS = 0
     FIRST_CHECK_PENDING.clear()
+    FIRST_CHECK_NOW.clear()
+    FIRST_CHECK_NEXT.clear()
     if DAYS_BETWEEN <= 1 or not CHECK_POSTS_IN_HOURS_RANGE or DASHBOARD_ENABLED or not sys.stdin or not sys.stdin.isatty():
         return FIRST_CHECK_SKIP_DAYS
-    prompt = colorize("info", f"* DAYS_BETWEEN is {DAYS_BETWEEN}. Days to skip before the first check (0 = today, 1 = tomorrow, ...) [0]: ")
+    # A blank line sets the questions apart from the start-up output above them, and they follow as sub-items of the setting
+    print("")
+    print(colorize("info", f"* DAYS_BETWEEN is {DAYS_BETWEEN}"))
+    prompt = colorize("info", "- When would you like the first check to occur? (0 = today, 1 = tomorrow, ...) [0]: ")
     while True:
         try:
-            raw = read_interactively(input, prompt).strip()
+            raw = read_startup_answer(prompt).strip()
         except EOFError:
             print("")
             return FIRST_CHECK_SKIP_DAYS
@@ -13600,14 +13666,16 @@ def ask_first_check_days(targets=()) -> int:
             # Ctrl+C ends the run here the way it does anywhere else
             signal_handler(signal.SIGINT, None)
             raise
-        if not raw:
-            return FIRST_CHECK_SKIP_DAYS
-        if raw.isascii() and raw.isdigit():
-            FIRST_CHECK_SKIP_DAYS = int(raw)
-            if FIRST_CHECK_SKIP_DAYS > 0:
-                FIRST_CHECK_PENDING.update(targets)
-            return FIRST_CHECK_SKIP_DAYS
+        if not raw or (raw.isascii() and raw.isdigit()):
+            break
         print("  Please enter a whole number of 0 or more.")
+    if raw:
+        FIRST_CHECK_SKIP_DAYS = int(raw)
+        if FIRST_CHECK_SKIP_DAYS > 0:
+            FIRST_CHECK_PENDING.update(targets)
+    if ask_check_now():
+        FIRST_CHECK_NOW.update(targets)
+    return FIRST_CHECK_SKIP_DAYS
 
 
 # Moves a planned first check by the days FIRST_CHECK_SKIP_DAYS chose, by whole days, so it keeps the time of day the plan has
@@ -13628,11 +13696,41 @@ def take_first_check_time(user: str, now_dt: datetime, allowed: List[int]) -> Op
     FIRST_CHECK_PENDING.discard(user)
     if FIRST_CHECK_SKIP_DAYS <= 0:
         return None
+    return scheduled_first_check_time(now_dt, allowed)
+
+
+# Returns the time the first scheduled check falls on, which is the check the usual schedule would make moved by the days
+# chosen at startup, or None when that time is not later than now_dt
+def scheduled_first_check_time(now_dt: datetime, allowed: List[int]) -> Optional[datetime]:
     usual = _next_allowed_datetime_at_or_after(now_dt, allowed)
     if usual is None:
         return None
     planned = _next_allowed_datetime_at_or_after(apply_first_check_days(now_dt, usual), allowed)
     return planned if planned is not None and planned > now_dt else None
+
+
+# Reports whether the person asked this target to check right now, once, and keeps the time of its scheduled first check
+# for after that check. A target that checks right now does not wait for the days or for the hour ranges
+def take_first_check_now(user: str, now_dt: datetime) -> bool:
+    if user not in FIRST_CHECK_NOW:
+        return False
+    FIRST_CHECK_NOW.discard(user)
+    FIRST_CHECK_PENDING.discard(user)
+    allowed = hours_to_check() if CHECK_POSTS_IN_HOURS_RANGE else []
+    FIRST_CHECK_NEXT[user] = scheduled_first_check_time(now_dt, allowed) if allowed else None
+    return True
+
+
+# Returns when the scheduled first check is due for a target that checked right now, once, or None when there is none or
+# it is not later than now_dt, which leaves the next check to the usual schedule
+def take_scheduled_first_check(user: str, now_dt: datetime) -> Optional[datetime]:
+    planned = FIRST_CHECK_NEXT.pop(user, None)
+    return planned if planned is not None and planned > now_dt else None
+
+
+# Formats a planned check time as a weekday, a date and a time of day in the configured clock
+def format_planned_check(planned_dt: datetime) -> str:
+    return f"{calendar.day_abbr[planned_dt.weekday()]} {planned_dt.strftime('%d %b %Y, ' + ('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S'))}"
 
 
 # Computes the next sleep duration and next_check value, factoring in CHECK_POSTS_IN_HOURS_RANGE and DAYS_BETWEEN
@@ -15671,7 +15769,14 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
 
         # If hour-range gating is enabled and we're currently outside allowed hours, wait until the next allowed window
         # before fetching any target data, manual rechecks (manual_override_active) bypass this gating
-        if CHECK_POSTS_IN_HOURS_RANGE and not manual_override_active:
+        # A check the person asked for right now at startup bypasses it too, and the scheduled first check follows it
+        check_now = take_first_check_now(user, now_local_naive())
+        if check_now:
+            scheduled_at = FIRST_CHECK_NEXT.get(user)
+            now_message = f"Checking {user} right now, as asked" + (f". The first scheduled check is {format_planned_check(scheduled_at)}" if scheduled_at else "")
+            print(f"* {now_message}")
+            log_activity(now_message, user=user, level='system')
+        if CHECK_POSTS_IN_HOURS_RANGE and not manual_override_active and not check_now:
             allowed = hours_to_check()
             if not allowed:
                 update_check_times(next_time="No allowed hours (hour ranges disabled or misconfigured)", user=user, increment_count=False)
@@ -15691,7 +15796,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         if WEB_DASHBOARD_ENABLED:
                             update_ui_data(targets={user: {'status': 'Waiting (hours range)'}})
                         if first_check_at is not None:
-                            first_message = f"First check for {user}: {calendar.day_abbr[next_allowed.weekday()]} {next_allowed.strftime('%d %b %Y, ' + ('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S'))} (in {display_time(sleep_s)})"
+                            first_message = f"First check for {user}: {format_planned_check(next_allowed)} (in {display_time(sleep_s)})"
                             print(f"* {first_message}")
                             log_activity(first_message, user=user, level='system')
                         if HOURS_VERBOSE or DEBUG_MODE or (VERBOSE_MODE and CHECK_POSTS_IN_HOURS_RANGE):
@@ -16573,7 +16678,12 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
     # Don't increment CHECK_COUNT here - it will be incremented in the main loop
     now = now_local_naive()
     r_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
-    r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time, after_check=True)
+    scheduled_first = take_scheduled_first_check(user, now)
+    if scheduled_first is not None:
+        # The check made right now was an extra one, so the scheduled first check keeps its day and time of day
+        r_sleep_time, next_check_val = max(1, int((scheduled_first - now).total_seconds())), scheduled_first
+    else:
+        r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time, after_check=True)
     update_check_times(
         last_time=now,
         next_time=next_check_val,
@@ -22736,7 +22846,8 @@ def run_main():
             delay = base_delay + add_jitter
             planned = now + timedelta(seconds=delay)
             # If hour ranges are enabled, show/schedule the real planned time (first allowed time >= planned)
-            if CHECK_POSTS_IN_HOURS_RANGE:
+            # A target asked to check right now starts after its stagger alone, whatever the hour ranges say
+            if CHECK_POSTS_IN_HOURS_RANGE and u not in FIRST_CHECK_NOW:
                 allowed = hours_to_check()
                 adjusted = _next_allowed_datetime_at_or_after(planned, allowed) if allowed else None
                 if adjusted:
@@ -22745,14 +22856,19 @@ def run_main():
             planned_actions.append((u, delay, planned))
             # FIRST_CHECK_SKIP_DAYS moves the first request to a later day by whole days. The target still starts after its stagger,
             # so its set-up runs now, and the wait before its first request is what covers the days, so only the shown time moves
-            shown = apply_first_check_days(now, planned)
+            shown = planned if u in FIRST_CHECK_NOW else apply_first_check_days(now, planned)
             if CHECK_POSTS_IN_HOURS_RANGE and shown != planned:
                 shown_allowed = hours_to_check()
                 shown = (_next_allowed_datetime_at_or_after(shown, shown_allowed) if shown_allowed else None) or shown
             msg_time = shown.strftime('%I:%M:%S %p' if TIME_FORMAT_12H else '%H:%M:%S')
             if shown.date() != now.date():
                 msg_time += f" on {calendar.day_abbr[shown.weekday()]} {shown.strftime('%d %b')}"
-            print(f"  - {u} @ ~{msg_time} (in {display_time(max(0, int((shown - now).total_seconds())))})")
+            then_text = ""
+            if u in FIRST_CHECK_NOW:
+                now_allowed = hours_to_check() if CHECK_POSTS_IN_HOURS_RANGE else []
+                scheduled_at = scheduled_first_check_time(now, now_allowed) if now_allowed else None
+                then_text = f", then {format_planned_check(scheduled_at)}" if scheduled_at else ""
+            print(f"  - {u} @ ~{msg_time} (in {display_time(max(0, int((shown - now).total_seconds())))}){then_text}")
             debug_print("Target scheduled", user=u, delay_s=delay)
 
             # Populate initial dashboard check times

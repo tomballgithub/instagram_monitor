@@ -248,25 +248,91 @@ class TestFirstCheckDays:
 
     # A bare Enter is today, which is the answer the prompt offers
     def test_enter_means_today(self, im_module, monkeypatch):
-        asked = self.answers(im_module, monkeypatch, "")
+        asked = self.answers(im_module, monkeypatch, "", "")
 
         assert im_module.ask_first_check_days() == 0
-        assert len(asked) == 1 and "0 = today, 1 = tomorrow" in asked[0] and "DAYS_BETWEEN is 2" in asked[0]
+        assert len(asked) == 2 and "0 = today, 1 = tomorrow" in asked[0] and "[0]: " in asked[0]
+
+    # A blank line sets the questions apart, a line names the setting, and the two questions follow it as sub-items
+    def test_the_questions_are_sub_items_of_the_setting(self, im_module, monkeypatch, capsys):
+        asked = self.answers(im_module, monkeypatch, "", "")
+
+        im_module.ask_first_check_days()
+
+        assert capsys.readouterr().out == "\n* DAYS_BETWEEN is 2\n"
+        assert asked[0] == "- When would you like the first check to occur? (0 = today, 1 = tomorrow, ...) [0]: "
+        assert asked[1] == "- Would you like to run a check now, bypassing CHECK_POSTS_IN_HOURS_RANGE? [y/N]: "
+
+    # Nothing is printed when nothing is asked
+    def test_nothing_is_printed_when_nothing_is_asked(self, im_module, monkeypatch, capsys):
+        self.answers(im_module, monkeypatch, "3")
+        monkeypatch.setattr(im_module, "DAYS_BETWEEN", 1)
+
+        im_module.ask_first_check_days()
+
+        assert capsys.readouterr().out == ""
+
+    # The terminal truncation counts columns across writes, and the Enter that ends a prompt never reaches it, so without a
+    # restart the second prompt is clipped after the columns the first one used
+    def test_the_second_prompt_is_not_clipped_by_the_first(self, im_module, monkeypatch, capsys):
+        monkeypatch.setattr(im_module, "TRUNCATE_CHARS", 138)
+        first = "- " + "a" * 101
+        second = "- Would you like to run a check now, bypassing CHECK_POSTS_IN_HOURS_RANGE? [y/N]: "
+
+        clipped = im_module.Logger()
+        clipped.write(first)
+        clipped.write(second)
+        assert capsys.readouterr().out == first + second[:138 - len(first)]
+
+        restarted = im_module.Logger()
+        restarted.write(first)
+        restarted.end_prompt_line()
+        restarted.write(second)
+        assert capsys.readouterr().out == first + second
+
+    # Reading an answer restarts the count by itself, so every prompt benefits and not only these two
+    def test_reading_an_answer_restarts_the_truncation_count(self, im_module, monkeypatch, capsys):
+        monkeypatch.setattr(im_module, "TRUNCATE_CHARS", 138)
+        logger = im_module.Logger()
+        monkeypatch.setattr(im_module.sys, "stdout", logger)
+        first = "- " + "a" * 101
+        second = "- Would you like to run a check now, bypassing CHECK_POSTS_IN_HOURS_RANGE? [y/N]: "
+
+        logger.write(first)
+        assert im_module.read_interactively(lambda prompt: "y", "ignored") == "y"
+        logger.write(second)
+
+        assert capsys.readouterr().out == first + second
+
+    # A question answered at a prompt ends its line in the log files, where the prompt was written without one
+    def test_an_answered_question_ends_its_line_in_the_log(self, im_module, monkeypatch, tmp_path):
+        log_path = tmp_path / "main.log"
+        logger = im_module.Logger(str(log_path))
+        monkeypatch.setattr(im_module.sys, "stdout", logger)
+        monkeypatch.setattr(im_module, "read_interactively", lambda reader, prompt: "1")
+
+        logger.write("- first question: ")
+        im_module.read_startup_answer("ignored")
+        logger.write("- second question: ")
+        im_module.read_startup_answer("ignored")
+        logger.main_log.close()
+
+        assert log_path.read_text(encoding="utf-8") == "- first question: \n- second question: \n"
 
     # One is tomorrow, and the answer is kept for the planning that follows
     @pytest.mark.parametrize("reply, expected", [("1", 1), (" 2 ", 2), ("0", 0)])
     def test_the_answer_is_the_number_of_days(self, im_module, monkeypatch, reply, expected):
-        self.answers(im_module, monkeypatch, reply)
+        self.answers(im_module, monkeypatch, reply, "")
 
         assert im_module.ask_first_check_days() == expected
         assert im_module.FIRST_CHECK_SKIP_DAYS == expected
 
     # Anything that is not a whole number of zero or more is asked again
     def test_a_bad_answer_is_asked_again(self, im_module, monkeypatch, capsys):
-        asked = self.answers(im_module, monkeypatch, "tomorrow", "-1", "1.5", "\u00b2", "2")
+        asked = self.answers(im_module, monkeypatch, "tomorrow", "-1", "1.5", "\u00b2", "2", "")
 
         assert im_module.ask_first_check_days() == 2
-        assert len(asked) == 5
+        assert len(asked) == 6
         assert capsys.readouterr().out.count("Please enter a whole number of 0 or more.") == 4
 
     # Input that ends leaves the first check today instead of stopping startup
@@ -306,7 +372,7 @@ class TestFirstCheckDays:
 
     # The answer is remembered for the targets that were started, so each is delayed once
     def test_the_answer_marks_the_targets_pending(self, im_module, monkeypatch):
-        self.answers(im_module, monkeypatch, "1")
+        self.answers(im_module, monkeypatch, "1", "")
 
         im_module.ask_first_check_days(["a", "b"])
 
@@ -314,7 +380,7 @@ class TestFirstCheckDays:
 
     # Today leaves nothing pending, so no target waits
     def test_today_marks_nothing_pending(self, im_module, monkeypatch):
-        self.answers(im_module, monkeypatch, "0")
+        self.answers(im_module, monkeypatch, "0", "")
 
         im_module.ask_first_check_days(["a"])
 
@@ -335,6 +401,99 @@ class TestFirstCheckDays:
         monkeypatch.setattr(im_module, "FIRST_CHECK_PENDING", {"target"})
 
         assert im_module.take_first_check_time("target", datetime(2024, 1, 1, 22, 40, 12), [22, 23]) == datetime(2024, 1, 2, 22, 40, 12)
+
+    # After the days, a second question offers a check right now, and Enter or n declines it
+    @pytest.mark.parametrize("reply", ["", "n", "N", " no "])
+    def test_declining_the_check_now_marks_nothing(self, im_module, monkeypatch, reply):
+        asked = self.answers(im_module, monkeypatch, "1", reply)
+
+        im_module.ask_first_check_days(["a", "b"])
+
+        assert im_module.FIRST_CHECK_NOW == set()
+        assert len(asked) == 2 and "run a check now, bypassing CHECK_POSTS_IN_HOURS_RANGE?" in asked[1] and "[y/N]" in asked[1]
+
+    # Yes marks every target, and it is asked whatever the days are, since a test run may want today's check as well
+    @pytest.mark.parametrize("days", ["0", "1", ""])
+    @pytest.mark.parametrize("reply", ["y", "Y", "yes", " YES "])
+    def test_accepting_the_check_now_marks_the_targets(self, im_module, monkeypatch, days, reply):
+        self.answers(im_module, monkeypatch, days, reply)
+
+        im_module.ask_first_check_days(["a", "b"])
+
+        assert im_module.FIRST_CHECK_NOW == {"a", "b"}
+
+    # The check now does not replace the days, so the scheduled first check still waits for them
+    def test_the_check_now_keeps_the_days(self, im_module, monkeypatch):
+        self.answers(im_module, monkeypatch, "2", "y")
+
+        assert im_module.ask_first_check_days(["a"]) == 2
+        assert im_module.FIRST_CHECK_PENDING == {"a"} and im_module.FIRST_CHECK_NOW == {"a"}
+
+    # Anything but a yes or a no is asked again
+    def test_a_bad_check_now_answer_is_asked_again(self, im_module, monkeypatch, capsys):
+        asked = self.answers(im_module, monkeypatch, "1", "maybe", "1", "y")
+
+        im_module.ask_first_check_days(["a"])
+
+        assert len(asked) == 4 and im_module.FIRST_CHECK_NOW == {"a"}
+        assert capsys.readouterr().out.count("Please answer y or n.") == 2
+
+    # Input that ends at the second question means no, and keeps the days that were answered
+    def test_the_end_of_input_at_the_second_question_means_no(self, im_module, monkeypatch):
+        self.answers(im_module, monkeypatch, "1", EOFError())
+
+        assert im_module.ask_first_check_days(["a"]) == 1
+        assert im_module.FIRST_CHECK_NOW == set() and im_module.FIRST_CHECK_PENDING == {"a"}
+
+    # Asking again forgets what an earlier start asked for
+    def test_a_new_question_clears_the_earlier_answers(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "FIRST_CHECK_NOW", {"old"})
+        monkeypatch.setattr(im_module, "FIRST_CHECK_NEXT", {"old": self.START})
+        self.answers(im_module, monkeypatch, "0", "")
+
+        im_module.ask_first_check_days(["a"])
+
+        assert im_module.FIRST_CHECK_NOW == set() and im_module.FIRST_CHECK_NEXT == {}
+
+    # A target asked to check now starts at once, and keeps the time its scheduled first check falls on for after that check
+    def test_a_target_that_checks_now_keeps_its_scheduled_time(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "FIRST_CHECK_SKIP_DAYS", 1)
+        monkeypatch.setattr(im_module, "FIRST_CHECK_PENDING", {"target"})
+        monkeypatch.setattr(im_module, "FIRST_CHECK_NOW", {"target"})
+
+        assert im_module.take_first_check_now("target", self.START) is True
+        # Tonight's check would be 22:10, so tomorrow's is 22:10, and the target no longer waits for it before starting
+        assert im_module.FIRST_CHECK_NEXT["target"] == datetime(2024, 1, 2, 22, 10, 0)
+        assert im_module.take_first_check_time("target", self.START, [22, 23]) is None
+        assert im_module.take_first_check_now("target", self.START) is False
+
+    # With today chosen, the scheduled check is tonight's, and with nothing later than now there is none to keep
+    def test_the_scheduled_time_is_tonight_with_today_and_none_inside_the_window(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "FIRST_CHECK_NOW", {"target", "inside"})
+
+        assert im_module.take_first_check_now("target", self.START) is True
+        assert im_module.FIRST_CHECK_NEXT["target"] == datetime(2024, 1, 1, 22, 10, 0)
+        assert im_module.take_first_check_now("inside", datetime(2024, 1, 1, 22, 30, 0)) is True
+        assert im_module.FIRST_CHECK_NEXT["inside"] is None
+
+    # Another target, or no hour ranges to place the scheduled check in, is left alone
+    def test_other_targets_do_not_check_now(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "FIRST_CHECK_NOW", {"target"})
+        assert im_module.take_first_check_now("someone.else", self.START) is False
+
+        monkeypatch.setattr(im_module, "CHECK_POSTS_IN_HOURS_RANGE", False)
+        assert im_module.take_first_check_now("target", self.START) is True
+        assert im_module.FIRST_CHECK_NEXT["target"] is None
+
+    # The kept time is handed over once, and only while it is still ahead
+    def test_the_scheduled_time_is_taken_once_while_it_is_ahead(self, im_module, monkeypatch):
+        later = datetime(2024, 1, 2, 22, 10, 0)
+        monkeypatch.setattr(im_module, "FIRST_CHECK_NEXT", {"target": later, "late": later})
+
+        assert im_module.take_scheduled_first_check("target", self.START) == later
+        assert im_module.take_scheduled_first_check("target", self.START) is None
+        assert im_module.take_scheduled_first_check("late", datetime(2024, 1, 3, 0, 0, 0)) is None
+        assert im_module.take_scheduled_first_check("unknown", self.START) is None
 
     # A target that was never pending, or whose answer was today, is left alone
     def test_other_targets_are_left_alone(self, im_module, monkeypatch):

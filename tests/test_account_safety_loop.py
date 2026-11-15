@@ -226,7 +226,7 @@ class TestFirstCheckWait:
 
     # Runs the real pass for one target up to its first profile request, returning what happened in order and how long it waited
     @staticmethod
-    def _run(monkeypatch, tmp_path, start, pending):
+    def _run(monkeypatch, tmp_path, start, pending, now=False):
         events = []
         waited = []
 
@@ -249,6 +249,7 @@ class TestFirstCheckWait:
         monkeypatch.setattr(im, "DAYS_BETWEEN", 2)
         monkeypatch.setattr(im, "FIRST_CHECK_SKIP_DAYS", 1 if pending else 0)
         monkeypatch.setattr(im, "FIRST_CHECK_PENDING", {"target"} if pending else set())
+        monkeypatch.setattr(im, "FIRST_CHECK_NOW", {"target"} if now else set())
         stop_event = SimpleNamespace(is_set=lambda: False, wait=lambda seconds: waited.append(seconds))
         with pytest.raises(FirstRequest):
             im.instagram_monitor_user("target", "events.csv", False, True, True, True, True, False, stop_event=stop_event, skip_follow_changes=True)
@@ -282,6 +283,59 @@ class TestFirstCheckWait:
 
         assert waited == 24 * 3600
 
+    # A check asked for right now does not wait for the days or for the window, and the scheduled first check is kept for after it
+    def test_a_check_now_does_not_wait_and_keeps_the_scheduled_check(self, monitored_account, tmp_path):
+        events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 20, 10, 0), pending=True, now=True)
+
+        assert events == ["client created", "session loaded", "profile requested"]
+        assert waited == 0
+        # Tonight's check would be at 22:10, so the scheduled first check is the same time tomorrow
+        assert im.FIRST_CHECK_NEXT["target"] == datetime(2024, 1, 2, 22, 10, 0)
+
+    # With today chosen, the check now is the only one that skips the wait, and tonight's check is the scheduled one
+    def test_a_check_now_with_today_keeps_tonights_check(self, monitored_account, tmp_path):
+        _events, waited = self._run(monitored_account, tmp_path, datetime(2024, 1, 1, 20, 10, 0), pending=False, now=True)
+
+        assert waited == 0
+        assert im.FIRST_CHECK_NEXT["target"] == datetime(2024, 1, 1, 22, 10, 0)
+
+    # After the start-up check made right now, the next check is the scheduled first check and not DAYS_BETWEEN days on
+    def test_the_next_check_after_a_check_now_is_the_scheduled_one(self, monitored_account, tmp_path):
+        planned = []
+
+        class StartedUp(BaseException):
+            pass
+
+        # Records the next check the start-up works out, which is the call that also records the check just made, and ends the pass there
+        def record(*args, **kwargs):
+            if "last_time" in kwargs:
+                planned.append(kwargs["next_time"])
+                raise StartedUp()
+
+        profile = SimpleNamespace(username="target", userid=123, followers=0, followees=0, biography="", is_private=False, followed_by_viewer=False, mediacount=0, profile_pic_url_no_iphone="")
+        bot = SimpleNamespace(context=SimpleNamespace(_session=SimpleNamespace(), is_logged_in=True, iphone_headers={}), load_session_from_file=lambda *args: None)
+        monitored_account.setattr(im, "instaloader_client", lambda **kwargs: bot, raising=False)
+        monitored_account.setattr(im, "profile_from_username_resilient", lambda _bot, username: profile, raising=False)
+        monitored_account.setattr(im, "update_check_times", record)
+        monitored_account.setattr(im, "now_local_naive", lambda: datetime(2024, 1, 1, 20, 10, 0))
+        monitored_account.setattr(im, "CHECK_POSTS_IN_HOURS_RANGE", True)
+        monitored_account.setattr(im, "MIN_H1", 22)
+        monitored_account.setattr(im, "MAX_H1", 23)
+        monitored_account.setattr(im, "DAYS_BETWEEN", 2)
+        monitored_account.setattr(im, "FIRST_CHECK_SKIP_DAYS", 1)
+        monitored_account.setattr(im, "FIRST_CHECK_PENDING", {"target"})
+        monitored_account.setattr(im, "FIRST_CHECK_NOW", {"target"})
+        monitored_account.setattr(im, "CHECK_STORY_AVAILABILITY", False)
+        monitored_account.setattr(im, "INSTA_CHECK_INTERVAL", 60)
+        monitored_account.setattr(im, "RANDOM_SLEEP_DIFF_LOW", 0)
+        monitored_account.setattr(im, "RANDOM_SLEEP_DIFF_HIGH", 0)
+
+        with pytest.raises(StartedUp):
+            im.instagram_monitor_user("target", str(tmp_path / "events.csv"), False, True, True, True, True, False, skip_follow_changes=True)
+
+        # Tonight's check would be at 22:10, so the scheduled first check is 22:10 tomorrow, not the DAYS_BETWEEN wait after this check
+        assert planned == [datetime(2024, 1, 2, 22, 10, 0)]
+        assert "target" not in im.FIRST_CHECK_NEXT
 
 class TestStoryAvailabilityCheck:
     """The story check is one request before any story detail, so a setting has to be able to switch it off."""
