@@ -13,6 +13,127 @@ def _fake_accounts(usernames):
 
 
 class TestFetchUsernamesPaginated:
+    # An account sent again by a later page is kept once, in the place it first came, and the repeats are counted
+    def test_an_account_sent_twice_is_kept_once(self, im_module):
+        result = im_module.fetch_usernames_paginated(None, lambda: _fake_accounts(["a", "b", "a", "c", "b"]), max_per_batch=0, total_limit=0, fetch_delay=0, advanced_fetch=False, estimated_limit=0, user="target")
+
+        assert result == ["a", "b", "c"]
+        assert result.repeated == 2
+        assert result.complete is True
+
+    # Repeats do not use up the total limit, so a limited scan still reads that many different accounts
+    def test_repeats_do_not_count_toward_the_total_limit(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+        result = im_module.fetch_usernames_paginated(None, lambda: _fake_accounts(["a", "a", "b", "b", "c", "d"]), max_per_batch=50, total_limit=3, fetch_delay=0, advanced_fetch=True, estimated_limit=5, user="target")
+
+        assert result == ["a", "b", "c"]
+        assert result.repeated == 2
+
+    # A list that is short because pages repeated accounts comes back short, so it cannot shrink the saved list.
+    # Counting the repeats made it as long as Instagram's count, so it was compared and real followers were reported removed
+    def test_a_list_padded_with_repeats_is_short_not_complete(self, im_module, monkeypatch, capsys):
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_SHORT_ADDITIONS", True)
+        saved = [f"user{index}" for index in range(212)]
+        sent = [f"user{index}" for index in range(180)] + [f"user{index}" for index in range(20)] + ["new_one"] + [f"user{index}" for index in range(20, 25)]
+        result = im_module.fetch_usernames_paginated(None, lambda: _fake_accounts(sent), max_per_batch=0, total_limit=0, fetch_delay=0, advanced_fetch=False, estimated_limit=0, user="target")
+        assert len(result) == 181 and result.repeated == 25
+
+        im_module.reject_shrinking_username_baseline(result, len(sent), saved, "followers", "target")
+
+        assert list(result) == saved + ["new_one"]
+        assert "came back with 181 of the 206 Instagram reports, fewer than the 212 in the saved list" in capsys.readouterr().out
+
+    # The scan says how many accounts it was sent again
+    def test_the_scan_reports_the_repeats(self, im_module, monkeypatch):
+        lines = []
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_EVER_SEEN", False)
+        monkeypatch.setattr(im_module, "print_above_progress", lines.append)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+        def fetch():
+            result = im_module.PaginatedUsernameResult(["a", "b"])
+            result.repeated = 28
+            result.complete = True
+            return result
+
+        im_module.fetch_follow_list_retrying_incomplete("followers", "target", None, 30, "* Downloading Followers", None, None, None, fetch)
+
+        assert "* Instagram sent 28 account(s) of the followers list more than once, so each was kept once: 2 different accounts were read" in lines
+
+    # A scan that was sent no repeats says nothing about them
+    def test_a_scan_with_no_repeats_is_quiet(self, im_module, monkeypatch):
+        lines = []
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_EVER_SEEN", False)
+        monkeypatch.setattr(im_module, "print_above_progress", lines.append)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+        def fetch():
+            result = im_module.PaginatedUsernameResult(["a", "b"])
+            result.complete = True
+            return result
+
+        im_module.fetch_follow_list_retrying_incomplete("followings", "target", None, 2, "* Downloading Followings", None, None, None, fetch)
+
+        assert lines == []
+
+    # A count that rose by more than the list shows new accounts is said out loud, with what Instagram can do to a list
+    def test_a_rise_in_the_count_without_new_names_is_warned_about(self, im_module, monkeypatch):
+        lines = []
+        monkeypatch.setattr(im_module, "print_above_progress", lines.append)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+        im_module.warn_count_rose_without_new_names("followings", "target", (4846, 4848), ["a", "b"], {"a", "b"})
+
+        assert len(lines) == 1
+        assert lines[0].startswith("* The followings count rose by 2 (from 4846 to 4848) but the list shows 0 new account(s).")
+        assert "may be among those left out" in lines[0]
+
+    # Some new names, but fewer than the rise, still warns, and says how many were found
+    def test_fewer_new_names_than_the_rise_is_warned_about(self, im_module, monkeypatch):
+        lines = []
+        monkeypatch.setattr(im_module, "print_above_progress", lines.append)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+        im_module.warn_count_rose_without_new_names("followers", "target", (10, 14), ["a", "b", "new"], {"a", "b"})
+
+        assert "rose by 4 (from 10 to 14) but the list shows 1 new account(s)" in lines[0]
+
+    # A rise the new names account for, a count that fell or held, and a count that cannot be read say nothing
+    @pytest.mark.parametrize("counts, result", [((10, 12), ["x", "y"]), ((10, 12), ["x", "y", "z"]), ((12, 10), []), ((10, 10), []), ((None, 10), []), ((10, None), [])])
+    def test_no_warning_when_the_new_names_cover_the_rise(self, im_module, monkeypatch, counts, result):
+        lines = []
+        monkeypatch.setattr(im_module, "print_above_progress", lines.append)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+        im_module.warn_count_rose_without_new_names("followers", "target", counts, result, {"a", "b"})
+
+        assert lines == []
+
+    # The read wrapper warns with the counts it is given, and not without a saved list or without counts
+    @pytest.mark.parametrize("previous, counts, warned", [(["a", "b"], (2, 5), True), (None, (2, 5), False), (["a", "b"], None, False), (["a", "b"], (2, 3), False)])
+    def test_the_read_wrapper_warns_only_with_a_saved_list_and_counts(self, im_module, monkeypatch, previous, counts, warned):
+        lines = []
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_EVER_SEEN", False)
+        monkeypatch.setattr(im_module, "print_above_progress", lines.append)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+
+        def fetch():
+            result = im_module.PaginatedUsernameResult(["a", "b", "new"])
+            result.complete = True
+            return result
+
+        im_module.fetch_follow_list_retrying_incomplete("followers", "target", previous, 5, "* Downloading Followers", None, None, None, fetch, counts=counts)
+
+        assert any("count rose by" in line for line in lines) is warned
+
+    # A saved list that holds an account twice is read once, in order
+    def test_a_saved_list_with_repeats_is_read_once(self, im_module, tmp_path):
+        path = tmp_path / "followers.json"
+        path.write_text(json.dumps([4, ["a", "b", "a", "c", "b"]]), encoding="utf-8")
+
+        assert im_module.read_follow_record(str(path)) == [4, ["a", "b", "c"]]
+
     # Basic fetching drains the generator when advanced batching is disabled
     def test_basic_fetch_drains_generator(self, im_module):
         result = im_module.fetch_usernames_paginated(None, lambda: _fake_accounts(["a", "b", "c"]), max_per_batch=1, total_limit=1, fetch_delay=0, advanced_fetch=False, estimated_limit=0, user="target")

@@ -382,8 +382,10 @@ class TestScanWiring:
 
         assert im_module.FOLLOW_LIST_BROWSER_PAGE_SIZE == 25 and im_module.FOLLOW_LIST_BROWSER_REFETCH_TRIES == 3
         assert context.route.call_count == 1
-        assert page.on.call_args.args[0] == "response"
-        assert isinstance(page.on.call_args.args[1].__self__, im_module.BrowserFollowListWatcher)
+        # The watcher hears the list answers and the list requests that failed before any answer came back
+        handlers = {call.args[0]: call.args[1] for call in page.on.call_args_list}
+        assert set(handlers) == {"response", "requestfailed"}
+        assert all(isinstance(handler.__self__, im_module.BrowserFollowListWatcher) for handler in handlers.values())
 
     # The harvest is handed the watcher, which is what lets the recovered names reach the caller
     def test_the_harvest_receives_the_watcher(self, im_module, monkeypatch, tmp_path):
@@ -407,7 +409,8 @@ class TestScanWiring:
         self.scan(im_module)
 
         assert (context.route.call_count == 1) is routed
-        assert (page.on.call_count == 1) is watched
+        assert (page.on.call_count == 2) is watched
+        assert (page.on.call_count == 0) is not watched
         assert (harvest.call_args.kwargs["watcher"] is not None) is watched
 
 
@@ -527,6 +530,7 @@ class TestHarvestPatience:
             self.clock = clock
             self.on_wait = on_wait
             self.waits = 0
+            self.waited = 0.0
             self.reads = 0
             self.nudges = 0
 
@@ -543,6 +547,7 @@ class TestHarvestPatience:
         # Moves the clock by the pause and runs the hook
         def wait_for_timeout(self, milliseconds):
             self.waits += 1
+            self.waited += milliseconds / 1000
             self.clock[0] += milliseconds / 1000
             if self.on_wait:
                 self.on_wait(self.waits)
@@ -566,7 +571,7 @@ class TestHarvestPatience:
         list(im_module.harvest_follow_list_dialog(dialog, 1, stall_limit=3, watcher=watcher))
 
         assert dialog.reads > 3 and dialog.nudges > 0
-        assert 9 <= dialog.waits <= 13
+        assert 9 <= dialog.waited <= 13
 
     # A list Instagram has ended stops at the quiet limit with no waiting
     def test_a_finished_list_stops_at_the_quiet_limit(self, im_module, quick_watcher, clock):
@@ -595,3 +600,371 @@ class TestHarvestPatience:
 
         assert sorted(names) == ["a", "b", "c"]
         assert dialog.waits < 30
+
+
+class TestWhatTheListRequestsMet:
+    """A stalled list used to say only that the end was not marked. It now says what the list requests met, so throttling and a hung connection read differently."""
+
+    URL = "https://www.instagram.com/api/v1/friendships/1/followers/?count=25"
+
+    # Builds a list response with the given status and body
+    @classmethod
+    def answer(cls, status, body):
+        return SimpleNamespace(url=cls.URL, status=status, json=lambda: body)
+
+    # An error status, an answer with no accounts and a request that never completed are each counted, and said once the list has been read
+    def test_the_report_names_what_was_met(self, im_module, monkeypatch, capsys):
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+        watcher = im_module.BrowserFollowListWatcher("followers", 0)
+        for _ in range(2):
+            watcher.on_response(self.answer(429, {"message": "Please wait a few minutes before you try again.", "status": "fail"}))
+        watcher.on_response(self.answer(200, {"users": [{"username": "a"}], "next_max_id": "x"}))
+        watcher.on_request_failed(SimpleNamespace(url=self.URL, failure="net::ERR_TIMED_OUT"))
+        watcher.collect(Mock(), set())
+
+        watcher.report(SimpleNamespace(username="target.user"))
+
+        output = capsys.readouterr().out
+        assert "The list requests met: HTTP 429 x2, a request failed (net::ERR_TIMED_OUT), an answer without accounts (Please wait a few minutes before you try again.) x2" in output
+        assert "Instagram had not marked the end of the list" in output
+
+    # A list that went well says nothing extra, and requests for other things are not counted
+    def test_a_clean_list_adds_no_line(self, im_module, monkeypatch, capsys):
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+        watcher = im_module.BrowserFollowListWatcher("followers", 0)
+        watcher.on_response(self.answer(200, {"users": [{"username": "a"}]}))
+        watcher.on_request_failed(SimpleNamespace(url="https://www.instagram.com/static/logo.png", failure="net::ERR_ABORTED"))
+        watcher.collect(Mock(), set())
+
+        watcher.report(SimpleNamespace(username="target.user"))
+
+        assert watcher.problems == {}
+        assert "The list requests met" not in capsys.readouterr().out
+
+
+class TestReadingStatusMinimum:
+    """The reading status flashed by too fast to read, so it now stays up for a minimum without slowing the scan."""
+
+    # Runs one pass of the harvest over a dialog that holds one name and cannot be scrolled, and records the waits and status changes in order
+    @staticmethod
+    def run(im_module, monkeypatch, scroll_delay):
+        events = []
+        page = Mock()
+        page.evaluate.side_effect = lambda script, *args: ["a"] if script == im_module.BROWSER_DIALOG_NAMES_JS else (len(events) < 50 and script == im_module.BROWSER_DIALOG_SCROLL_JS and not any(e[0] == "wait" for e in events))
+        page.wait_for_timeout.side_effect = lambda ms: events.append(("wait", ms))
+        monkeypatch.setattr(im_module, "browser_follow_list_progress", lambda stage, increment=0: events.append(("stage", stage)))
+        list(im_module.harvest_follow_list_dialog(page, scroll_delay))
+        return events
+
+    # The reading status is held for the minimum and the cooldown that follows is shortened by the same time, so the pace is unchanged
+    def test_the_hold_comes_out_of_the_cooldown(self, im_module, monkeypatch):
+        events = self.run(im_module, monkeypatch, 1.5)
+
+        stages = [event[1] for event in events if event[0] == "stage"]
+        waits = [event[1] for event in events if event[0] == "wait"]
+        assert stages[0] == im_module.BROWSER_STAGE_READING
+        assert events.index(("wait", waits[0])) < events.index(("stage", im_module.BROWSER_STAGE_COOLDOWN))
+        assert 400 <= waits[0] <= 500
+        assert abs(waits[0] + waits[1] - 1500) <= 1
+
+    # The minimum is the half second that was asked for
+    def test_the_minimum_is_half_a_second(self, im_module):
+        assert im_module.BROWSER_STAGE_MIN_SECONDS == 0.5
+
+
+# Builds a response for a page of the given size that asked for count accounts and may hand out a cursor for a next page
+def sized_response(size, count="25", cursor="25", prefix="n"):
+    url = FOLLOWERS_URL + (f"?count={count}" if count else "")
+    body = {"users": [{"username": f"{prefix}{index}"} for index in range(size)]}
+    if cursor:
+        body["next_max_id"] = cursor
+    return FakeResponse(url, body=body)
+
+
+class TestCursorShapes:
+    """With debugging on, the report shows what the page cursors look like, so it is clear whether Instagram numbers its pages."""
+
+    # Numeric cursors show as they are, other ones only by their length, and nothing shows without debugging
+    def test_cursor_shapes_show_only_when_debugging(self, im_module, monkeypatch):
+        lines = []
+        monkeypatch.setattr(im_module, "print_above_progress", lines.append)
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+        watcher = im_module.BrowserFollowListWatcher("followers", 0)
+        for cursor in ("25", "50", "QVFDabc", "100", "125", "150"):
+            watcher.on_response(sized_response(25, cursor=cursor))
+        watcher.collect(Mock(), set())
+
+        monkeypatch.setattr(im_module, "DEBUG_MODE", False)
+        watcher.report(SimpleNamespace(username="target.user"))
+        assert not any("Page cursors" in line for line in lines)
+
+        monkeypatch.setattr(im_module, "DEBUG_MODE", True)
+        watcher.report(SimpleNamespace(username="target.user"))
+        assert "* Page cursors: first 25, 50, text of 7 characters, 100; latest 150" in lines
+
+
+class TestResumeAfterSilence:
+    """A list that goes quiet is carried on after FOLLOW_LIST_BROWSER_RESUME_AFTER seconds, not the whole patience."""
+
+    # A watcher that read one page and has been silent for the given seconds
+    @staticmethod
+    def silent_for(im_module, seconds):
+        watcher = im_module.BrowserFollowListWatcher("followers", 1)
+        watcher.on_response(sized_response(25, cursor="25"))
+        watcher.collect(Mock(), set())
+        watcher.last_response -= seconds
+        return watcher
+
+    # The shipped half minute carries a silent list on, while a quicker page is still waited for
+    def test_the_shipped_silence_is_half_a_minute(self, im_module):
+        assert im_module.FOLLOW_LIST_BROWSER_RESUME_AFTER == 30
+        assert self.silent_for(im_module, 20).should_resume() is False
+        assert self.silent_for(im_module, 31).should_resume() is True
+
+    # The silence is never longer than the patience, since the scan stops waiting then, and 0 means the patience
+    @pytest.mark.parametrize("setting, expected", [(30, 30), (10, 10), (500, 90), (0, 90)])
+    def test_the_silence_is_capped_at_the_patience(self, im_module, monkeypatch, setting, expected):
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_RESUME_AFTER", setting)
+
+        assert im_module.BrowserFollowListWatcher("followers", 1).resume_after_seconds() == expected
+
+    # A silent list is still waited for until the silence is reached, so the scan does not end before it can carry on
+    def test_the_scan_still_waits_until_the_silence_is_reached(self, im_module):
+        assert self.silent_for(im_module, 20).waiting_for_more() is True
+        assert self.silent_for(im_module, 31).waiting_for_more() is True
+        assert self.silent_for(im_module, 100).waiting_for_more() is False
+
+
+# A list answer with the given status and no readable body, such as the page a gateway returns instead of JSON
+def failed_answer(url, status):
+    answer = FakeResponse(url, body=None)
+    answer.status = status
+    return answer
+
+
+# Builds the answer the resume request returns for a page of accounts, with the cursor for the page after it
+def resumed_page(names, next_cursor):
+    return {"status": 200, "retryAfter": None, "users": list(names), "next": next_cursor, "message": None}
+
+
+class TestResumingAStalledList:
+    """A list that stopped after a failed page used to be read again from the top. It is now carried on from the cursor of its last good page."""
+
+    @pytest.fixture(autouse=True)
+    # Makes every pause instant and silent, and sets the shipped retry settings
+    def quiet(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "log_activity", lambda *args, **kwargs: None)
+        monkeypatch.setattr(im_module, "print_above_progress", lambda message: None)
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_RESUME_TRIES", 3)
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_RESUME_WAIT", 10)
+
+    # A watcher that has read one good page, which handed out the cursor 25
+    @staticmethod
+    def watcher_after_one_page(im_module, names=("a", "b"), cursor="25"):
+        watcher = im_module.BrowserFollowListWatcher("followers", 0)
+        watcher.on_response(FakeResponse(FOLLOWERS_URL + "?count=25", body={"users": [{"username": name} for name in names], "next_max_id": cursor}))
+        watcher.collect(Mock(), set())
+        return watcher
+
+    # The address of the next page is the last good page's address with the cursor it handed out in place of any earlier one
+    def test_the_next_page_keeps_the_query_and_swaps_the_cursor(self, im_module):
+        watcher = im_module.BrowserFollowListWatcher("followers", 0)
+        watcher.page_url = FOLLOWERS_URL + "?count=25&max_id=ABC&search_surface=follow_list_page"
+        watcher.cursor = "DEF"
+
+        assert watcher.next_page_url() == FOLLOWERS_URL + "?count=25&search_surface=follow_list_page&max_id=DEF"
+
+    # A failed page after the last good one, or the whole patience with nothing, starts a resume. Pushing back, the end and a missing cursor do not
+    def test_when_a_list_is_resumed(self, im_module, monkeypatch):
+        watcher = self.watcher_after_one_page(im_module)
+        assert watcher.should_resume() is False
+
+        watcher.on_response(failed_answer(CURSOR_URL, 502))
+        assert watcher.should_resume() is True
+
+        throttled = self.watcher_after_one_page(im_module)
+        throttled.on_response(failed_answer(CURSOR_URL, 429))
+        assert throttled.should_resume() is False
+
+        silent = self.watcher_after_one_page(im_module)
+        silent.last_response -= im_module.BROWSER_NO_END_PATIENCE_SECONDS + 1
+        assert silent.should_resume() is True
+
+        dropped = self.watcher_after_one_page(im_module)
+        dropped.on_request_failed(SimpleNamespace(url=CURSOR_URL, failure="net::ERR_TIMED_OUT"))
+        assert dropped.should_resume() is True
+
+        finished = self.watcher_after_one_page(im_module, cursor="")
+        finished.on_response(failed_answer(CURSOR_URL, 502))
+        assert finished.ended and finished.should_resume() is False
+
+        recovered = self.watcher_after_one_page(im_module)
+        recovered.on_response(failed_answer(CURSOR_URL, 502))
+        recovered.on_response(FakeResponse(CURSOR_URL, body={"users": [{"username": "c"}], "next_max_id": "50"}))
+        recovered.last_ok_at = recovered.transient_at + 1
+        assert recovered.should_resume() is False
+
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_RESUME_TRIES", 0)
+        off = self.watcher_after_one_page(im_module)
+        off.on_response(failed_answer(CURSOR_URL, 502))
+        assert off.should_resume() is False
+
+        assert im_module.BrowserFollowListWatcher("followers", 0).should_resume() is False
+
+    # A page that failed once is asked for again, then the list is followed to its end, and each page is asked for with the cursor before it
+    def test_a_failed_page_is_asked_for_again_and_the_list_is_followed(self, im_module):
+        watcher = self.watcher_after_one_page(im_module)
+        watcher.on_response(failed_answer(CURSOR_URL, 502))
+        page = FakeRefetchPage([{"status": 502, "retryAfter": None, "users": None, "next": None, "message": None}, resumed_page(["c", "d"], "50"), resumed_page(["e"], None)])
+
+        batches = list(watcher.resume(page, 2, {"a", "b"}))
+
+        assert batches == [["c", "d"], ["e"]]
+        assert [path.split("max_id=")[1] for path in page.paths] == ["25", "25", "50"]
+        assert page.waits[0] == 10000 and 2000 <= page.waits[1] <= 3000
+        assert watcher.ended and watcher.resumed_pages == 2 and watcher.resumed_names == 3 and watcher.resume_stopped == ""
+
+    # A request that never completed is retried like a gateway error, whether the page reports it or the script throws
+    @pytest.mark.parametrize("first", [{"status": 0, "error": "TypeError: Failed to fetch"}, RuntimeError("Execution context was destroyed")])
+    def test_a_dropped_request_is_retried(self, im_module, first):
+        watcher = self.watcher_after_one_page(im_module)
+        page = FakeRefetchPage([first, resumed_page(["c"], None)])
+
+        assert list(watcher.resume(page, 1, set())) == [["c"]]
+        assert len(page.paths) == 2 and watcher.ended
+
+    # The same page failing every time ends it, and the report says why
+    def test_it_gives_up_after_the_tries(self, im_module):
+        watcher = self.watcher_after_one_page(im_module)
+        gateway = {"status": 502, "retryAfter": None, "users": None, "next": None, "message": None}
+        page = FakeRefetchPage([gateway, gateway, gateway, gateway])
+
+        assert list(watcher.resume(page, 1, set())) == []
+
+        assert len(page.paths) == 3 and page.waits == [10000, 10000]
+        assert watcher.resume_stopped == "HTTP 502 3 times in a row" and watcher.should_resume() is False and watcher.waiting_for_more() is False
+
+    # Instagram pushing back ends it at once and is never asked again: more traffic is the wrong answer
+    @pytest.mark.parametrize("answer, said", [
+        ({"status": 429, "retryAfter": "60", "users": None, "next": None, "message": None}, "Instagram answered with HTTP 429, asking for a 60 second wait"),
+        ({"status": 403, "retryAfter": None, "users": None, "next": None, "message": None}, "Instagram answered with HTTP 403"),
+        ({"status": 200, "retryAfter": None, "users": None, "next": None, "message": "Please wait a few minutes"}, "Instagram answered with an answer without accounts (Please wait a few minutes)"),
+    ])
+    def test_pushback_stops_it_at_once(self, im_module, answer, said):
+        watcher = self.watcher_after_one_page(im_module)
+        page = FakeRefetchPage([answer, resumed_page(["never"], None)])
+
+        assert list(watcher.resume(page, 1, set())) == []
+
+        assert len(page.paths) == 1 and page.waits == []
+        assert watcher.resume_stopped == said
+
+    # A stop request ends it between pages without asking for more
+    def test_a_stop_request_ends_it(self, im_module):
+        watcher = self.watcher_after_one_page(im_module)
+        stop = threading.Event()
+        stop.set()
+        page = FakeRefetchPage([resumed_page(["c"], None)])
+
+        assert list(watcher.resume(page, 1, set(), stop)) == []
+        assert page.paths == []
+
+    # Pages that repeat accounts in the slots of new ones are asked for again, as in the dialog
+    def test_a_repeating_page_is_asked_for_again(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "BROWSER_REFETCH_DELAY_MS", 10)
+        watcher = im_module.BrowserFollowListWatcher("followers", 1)
+        watcher.on_response(FakeResponse(FOLLOWERS_URL + "?count=25", body={"users": [{"username": "a"}, {"username": "b"}], "next_max_id": "25"}))
+        watcher.collect(Mock(), set())
+        # The page after the cursor repeats "a" where a new account belongs, and asking again returns the missing one
+        page = FakeRefetchPage([resumed_page(["a", "c"], None), page_of("d")])
+
+        batches = list(watcher.resume(page, 1, {"a", "b"}))
+
+        assert sorted(name for batch in batches for name in batch) == ["c", "d"]
+        assert len(page.paths) == 2
+
+    # The responses the dialog's own requests would raise while resuming are ignored, so they cannot be read twice
+    def test_dialog_answers_are_ignored_while_resuming(self, im_module):
+        watcher = self.watcher_after_one_page(im_module)
+
+        def late_answer():
+            watcher.on_response(FakeResponse(CURSOR_URL, ["zzz"]))
+
+        page = FakeRefetchPage([resumed_page(["c"], None)], on_request=late_answer)
+
+        assert list(watcher.resume(page, 1, set())) == [["c"]]
+        assert watcher.pending == []
+
+    # The report says what resuming did, and why it stopped when it did
+    def test_the_report_says_what_resuming_did(self, im_module, capsys, monkeypatch):
+        monkeypatch.setattr(im_module, "print_above_progress", lambda message: print(message))
+        watcher = self.watcher_after_one_page(im_module)
+        watcher.on_response(failed_answer(CURSOR_URL, 502))
+        page = FakeRefetchPage([resumed_page(["c", "d"], "50"), {"status": 429, "retryAfter": None, "users": None, "next": None, "message": None}])
+        list(watcher.resume(page, 1, set()))
+
+        watcher.report(SimpleNamespace(username="target.user"))
+
+        output = capsys.readouterr().out
+        assert "The list stopped growing (HTTP 502). Asking Instagram for the next page directly, up to 3 tries for each page, 10 seconds apart" in output
+        assert "Carried the list on by asking for the next page directly: 1 page(s), 2 account(s) read. It stopped because Instagram answered with HTTP 429" in output
+        assert "while resuming: HTTP 429" in output
+
+    # Driven through the harvest: the list stalls after a 502, is resumed from its cursor to the end, and no nudging or patience is needed
+    def test_the_harvest_resumes_a_stalled_list(self, im_module):
+        watcher = self.watcher_after_one_page(im_module)
+        watcher.on_response(failed_answer(CURSOR_URL, 502))
+        clock = [1000.0]
+        dialog = ResumingDialog(clock, [resumed_page(["c", "d"], "50"), resumed_page(["e"], None)])
+
+        batches = list(im_module.harvest_follow_list_dialog(dialog, 1, stall_limit=3, watcher=watcher))
+
+        assert batches == [["c", "d"], ["e"]]
+        assert watcher.ended and dialog.nudges == 0
+        assert [path.split("max_id=")[1] for path in dialog.paths] == ["25", "50"]
+
+    # A resume that stopped does not leave the scan waiting out the rest of the patience
+    def test_the_harvest_does_not_wait_after_a_stopped_resume(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "BROWSER_NO_END_PATIENCE_SECONDS", 600)
+        watcher = self.watcher_after_one_page(im_module)
+        watcher.on_response(failed_answer(CURSOR_URL, 502))
+        clock = [1000.0]
+        dialog = ResumingDialog(clock, [{"status": 429, "retryAfter": None, "users": None, "next": None, "message": None}])
+
+        batches = list(im_module.harvest_follow_list_dialog(dialog, 1, stall_limit=3, watcher=watcher))
+
+        assert batches == []
+        assert watcher.resume_stopped and dialog.nudges == 0 and dialog.waited < 30
+
+    # With resuming off the scan behaves as before: it nudges and waits out the patience
+    def test_with_resuming_off_the_old_behavior_stands(self, im_module, monkeypatch):
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_RESUME_TRIES", 0)
+        monkeypatch.setattr(im_module, "BROWSER_NO_END_PATIENCE_SECONDS", 10)
+        watcher = self.watcher_after_one_page(im_module)
+        watcher.on_response(failed_answer(CURSOR_URL, 502))
+        clock = [1000.0]
+        dialog = ResumingDialog(clock, [])
+        monkeypatch.setattr(im_module.time, "monotonic", lambda: clock[0])
+        watcher.last_response = clock[0]
+
+        batches = list(im_module.harvest_follow_list_dialog(dialog, 1, stall_limit=3, watcher=watcher))
+
+        assert batches == [] and dialog.paths == [] and dialog.nudges > 0
+
+
+
+class ResumingDialog(TestHarvestPatience.QuietDialog):
+    """A dialog that renders nothing new and answers the in-page resume request with the scripted results."""
+
+    # Takes the clock to move and the results the resume request returns in order
+    def __init__(self, clock, results):
+        super().__init__(clock)
+        self.results = list(results)
+        self.paths = []
+
+    # Answers the resume script with the next scripted result and everything else like the quiet dialog does
+    def evaluate(self, script, args=None):
+        if args is not None and isinstance(args, list) and args and str(args[0]).startswith("/api/v1/friendships/"):
+            self.paths.append(args[0])
+            return self.results.pop(0)
+        return super().evaluate(script, args)

@@ -311,6 +311,108 @@ class TestBrowserLifecycle:
         assert [call.args[0] for call in page.goto.call_args_list] == [LOGIN_URL]
         context.close.assert_called_once()
 
+    # Runs the scan with the dialog opening failing as the given errors say, then succeeding, and records the pauses
+    @staticmethod
+    def reload_run(im_module, monkeypatch, tmp_path, outcomes, retries=2, wait=30, stop=None):
+        context, page = TestBrowserLifecycle.driver_with(monkeypatch, tmp_path, im_module, [SESSION_COOKIE])
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_PAGE_RETRIES", retries)
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_PAGE_RETRY_WAIT", wait)
+        monkeypatch.setattr(im_module, "open_browser_follow_list_dialog", Mock(side_effect=outcomes))
+        pauses = []
+
+        def sleep(seconds, stop_event=None):
+            pauses.append(seconds)
+            return bool(stop_event is not None and stop_event.is_set())
+
+        monkeypatch.setattr(im_module, "interruptible_sleep", sleep)
+        return context, page, pauses, lambda: list(im_module.browser_follow_list_batches(anonymous_bot(), target_profile(), "followers", stop_event=stop))
+
+    # A page that does not load is loaded again after the configured pause, and the scan then reads the list
+    def test_a_page_that_did_not_load_is_loaded_again(self, im_module, monkeypatch, tmp_path, capsys):
+        slow = im_module.BrowserFollowListNotLoadedError("the profile's followers control could not be clicked")
+        context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [slow, slow, None], wait=45)
+
+        assert run() == [["a", "b"]]
+
+        assert pauses == [45.0, 45.0]
+        assert [call.args[0] for call in page.goto.call_args_list] == ["https://www.instagram.com/target.user/"] * 3
+        output = capsys.readouterr().out
+        assert "did not finish loading. Loading it again in 45 seconds (reload 1 of 2)" in output and "(reload 2 of 2)" in output
+        context.close.assert_called_once()
+
+    # A profile page that times out loading is the same slow load, so it gets the same reloads
+    def test_a_page_load_timeout_is_loaded_again(self, im_module, monkeypatch, tmp_path, capsys):
+        context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [None, None], wait=20)
+        page.goto.side_effect = [TimeoutError("Page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating"), None]
+
+        assert run() == [["a", "b"]]
+
+        assert pauses == [20.0] and page.goto.call_count == 2
+        assert "did not finish loading. Loading it again in 20 seconds (reload 1 of 2)" in capsys.readouterr().out
+
+    # A timeout that outlasts every reload is reported as a page that did not load, with what the browser said
+    def test_a_page_that_never_loads_is_reported_as_such(self, im_module, monkeypatch, tmp_path):
+        _context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [None], retries=1)
+        page.goto.side_effect = TimeoutError("Page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating")
+
+        with pytest.raises(im_module.BrowserFollowListNotLoadedError, match=r"did not load within 30 seconds \(Page.goto: Timeout 30000ms exceeded\.\)"):
+            run()
+
+        assert pauses == [30.0] and page.goto.call_count == 2
+
+    # Any other error opening the page is not a slow load and is not retried
+    def test_another_navigation_error_is_not_reloaded(self, im_module, monkeypatch, tmp_path):
+        _context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [None])
+        page.goto.side_effect = RuntimeError("net::ERR_PROXY_CONNECTION_FAILED")
+
+        with pytest.raises(RuntimeError, match="ERR_PROXY_CONNECTION_FAILED"):
+            run()
+
+        assert pauses == [] and page.goto.call_count == 1
+
+    # After the last reload the failure is reported, and the browser is still closed
+    def test_the_failure_is_reported_after_the_last_reload(self, im_module, monkeypatch, tmp_path):
+        slow = im_module.BrowserFollowListNotLoadedError("the profile's followers control could not be clicked")
+        context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [slow, slow], retries=1)
+
+        with pytest.raises(im_module.BrowserFollowListNotLoadedError):
+            run()
+
+        assert pauses == [30.0] and page.goto.call_count == 2
+        context.close.assert_called_once()
+
+    # With no reloads allowed a page that did not load is reported at once
+    def test_no_reloads_when_none_are_allowed(self, im_module, monkeypatch, tmp_path):
+        slow = im_module.BrowserFollowListNotLoadedError("the profile's followers control could not be clicked")
+        _context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [slow], retries=0)
+
+        with pytest.raises(im_module.BrowserFollowListNotLoadedError):
+            run()
+
+        assert pauses == [] and page.goto.call_count == 1
+
+    # A page that loaded without the control is a layout change, so loading it again would not help
+    def test_a_layout_change_is_not_reloaded(self, im_module, monkeypatch, tmp_path):
+        changed = im_module.BrowserFollowListError("the profile's followers control could not be clicked")
+        _context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [changed])
+
+        with pytest.raises(im_module.BrowserFollowListError):
+            run()
+
+        assert pauses == [] and page.goto.call_count == 1
+
+    # A stop request during the pause ends the scan without reading anything or loading the page again
+    def test_a_stop_during_the_pause_ends_the_scan(self, im_module, monkeypatch, tmp_path):
+        slow = im_module.BrowserFollowListNotLoadedError("the profile's followers control could not be clicked")
+        stop = threading.Event()
+        stop.set()
+        context, page, pauses, run = self.reload_run(im_module, monkeypatch, tmp_path, [slow], stop=stop)
+
+        assert run() == []
+
+        assert pauses == [30.0] and page.goto.call_count == 1
+        context.close.assert_called_once()
+
     # A session run keeps handing its cookies over and never waits for a sign-in
     def test_a_session_scan_still_hands_over_its_cookies(self, im_module, monkeypatch, tmp_path):
         context, page = self.driver_with(monkeypatch, tmp_path, im_module, [])
@@ -702,7 +804,7 @@ class TestMonitoringPass:
 
         assert self.run_pass(im_module, tmp_path) is None
 
-    # A browser that is not signed in ends the run with the sign-in advice rather than a bare traceback
+    # A browser that is not signed in is reported with the sign-in advice rather than a bare traceback, and the run waits for the next check
     def test_the_loop_reports_a_missing_sign_in_with_advice(self, im_module, anonymous_pass, tmp_path, capsys):
         anonymous_pass.setattr(im_module, "FOLLOW_LIST_SOURCE", "browser")
 
@@ -713,12 +815,12 @@ class TestMonitoringPass:
 
         anonymous_pass.setattr(im_module, "browser_follow_list_batches", batches)
 
-        with pytest.raises(SystemExit):
-            self.run_pass(im_module, tmp_path)
+        self.run_pass(im_module, tmp_path)
 
         output = capsys.readouterr().out
         assert "The browser is not signed in to Instagram" in output
         assert "FOLLOW_LIST_BROWSER_HEADLESS" in output
+        assert "The followers list will be read again at the next check" in output
 
 
     # Replaces the target with a private one the anonymous lookup cannot view, which reports followings but no followers
@@ -828,7 +930,7 @@ class TestExpiredSignIn:
         if click_fails:
             page.locator.return_value.or_.return_value.first.click.side_effect = RuntimeError("selector failed")
         else:
-            page.wait_for_selector.side_effect = RuntimeError("selector failed")
+            page.wait_for_function.side_effect = RuntimeError("selector failed")
 
         with pytest.raises(im_module.BrowserFollowListError, match="browser is not signed in"):
             im_module.open_browser_follow_list_dialog(page, "target.user", "followers", anonymous=True)
@@ -1033,15 +1135,16 @@ class TestKeepOpen:
 
     # Runs one scan with the hold stubbed, recording whether it ran and whether it ran before the browser closed
     @staticmethod
-    def scan(im_module, monkeypatch, tmp_path, keep_open, headless, fail=False):
+    def scan(im_module, monkeypatch, tmp_path, keep_open, headless, fail=False, held=None):
         order = []
+        held = [] if held is None else held
         context, page = TestBrowserLifecycle.driver_with(monkeypatch, tmp_path, im_module, [SESSION_COOKIE])
         context.close.side_effect = lambda: order.append("close")
         if fail:
             page.goto.side_effect = RuntimeError("the profile page failed to load")
         monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR", keep_open)
         monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_HEADLESS", headless)
-        monkeypatch.setattr(im_module, "hold_browser_open", lambda browser_context, stop_event=None: order.append("hold"))
+        monkeypatch.setattr(im_module, "hold_browser_open", lambda browser_context, stop_event=None, failure=None: order.append("hold") or held.append(failure))
         monkeypatch.setattr(im_module, "open_browser_follow_list_dialog", Mock())
         try:
             list(im_module.browser_follow_list_batches(anonymous_bot(), target_profile(), "followers"))
@@ -1056,6 +1159,28 @@ class TestKeepOpen:
     # A scan that failed is held too, which is the case the setting exists for, and its error still propagates
     def test_a_failed_scan_is_held_open_and_still_fails(self, im_module, monkeypatch, tmp_path):
         assert self.scan(im_module, monkeypatch, tmp_path, keep_open=True, headless=False, fail=True) == ["hold", "close", "raised"]
+
+    # The hold is given the error that stopped the scan, so the reason can be said before the window is held
+    def test_the_hold_is_given_the_failure(self, im_module, monkeypatch, tmp_path):
+        held = []
+
+        self.scan(im_module, monkeypatch, tmp_path, keep_open=True, headless=False, fail=True, held=held)
+
+        assert [str(error) for error in held] == ["the profile page failed to load"]
+
+    # The reason is printed first, and the hold message that was always printed follows it unchanged
+    def test_the_reason_is_said_before_the_hold(self, im_module, capsys):
+        im_module.hold_browser_open(SimpleNamespace(pages=[]), failure=RuntimeError("no profile links appeared after clicking the followers control"))
+
+        output = capsys.readouterr().out.splitlines()
+        assert output[0] == "* The scan stopped with: RuntimeError: no profile links appeared after clicking the followers control"
+        assert output[1].startswith("* The scan failed and FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR is on")
+
+    # With no failure given only the hold message is printed, as before
+    def test_no_reason_line_without_a_failure(self, im_module, capsys):
+        im_module.hold_browser_open(SimpleNamespace(pages=[]))
+
+        assert capsys.readouterr().out.count("\n") == 1
 
     # A hidden browser has nothing to look at, so it is closed as usual even after a failure
     def test_a_hidden_browser_is_not_held(self, im_module, monkeypatch, tmp_path):

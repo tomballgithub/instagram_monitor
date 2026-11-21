@@ -1,6 +1,6 @@
 """Tests for check-interval scheduling and the CHECK_POSTS_IN_HOURS_RANGE window logic."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest

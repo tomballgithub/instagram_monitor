@@ -433,6 +433,49 @@ FOLLOW_LIST_BROWSER_REFETCH_TRIES = 3
 # viewer without anyone having unfollowed. Removals are reported when a complete list comes back
 FOLLOW_LIST_SHORT_ADDITIONS = False
 
+# Times to ask for the next page of a list directly when the dialog stopped getting pages, instead of reading the list again from the top
+# This is for a page that failed for a moment (a 5xx answer such as 502, or a request that never completed) or that never arrived.
+# Instagram's own cursor for the next page is kept, so the pages already read are not read again. Each page is tried up to this many
+# times, FOLLOW_LIST_BROWSER_RESUME_WAIT seconds apart. An answer that is Instagram pushing back (429 or any other 4xx, or a message
+# instead of accounts) is never retried this way. 0 turns resuming off
+FOLLOW_LIST_BROWSER_RESUME_TRIES = 3
+
+# Seconds to wait before each of those tries
+FOLLOW_LIST_BROWSER_RESUME_WAIT = 10
+
+# Seconds of silence, with no new page arriving, after which a stalled list is carried on by asking for its next page directly
+# A page that failed for a moment is carried on at once whatever this says. It cannot be longer than the 90 seconds the scan waits
+# for a next page, and 0 uses those 90 seconds
+FOLLOW_LIST_BROWSER_RESUME_AFTER = 30
+
+# Times to load the profile page again when it did not finish loading, so no followers or following control ever appeared
+# A slow connection or proxy can leave the page showing only grey placeholders for longer than FOLLOW_LIST_BROWSER_TIMEOUT.
+# The scan waits FOLLOW_LIST_BROWSER_PAGE_RETRY_WAIT seconds before each reload. A page that did load, but without the control,
+# is a change in Instagram's layout and is reported at once. 0 reports a page that did not load without loading it again
+FOLLOW_LIST_BROWSER_PAGE_RETRIES = 2
+
+# Seconds to wait before each of those reloads
+FOLLOW_LIST_BROWSER_PAGE_RETRY_WAIT = 30
+
+# Times to read a follower or following list again when the browser scan stopped short of Instagram's count
+# Every attempt first reports the accounts it did read that the saved list lacks as added, since they are new whatever else
+# is missing, and then waits FOLLOW_LIST_BROWSER_INCOMPLETE_WAIT seconds before the next one. When the last attempt is
+# still short, that is not treated as a failure: the saved list is kept and the next check reads the list again
+# 0 reports what the first attempt read and does not read the list again
+FOLLOW_LIST_BROWSER_INCOMPLETE_RETRIES = 1
+
+# Seconds to wait before each of those attempts
+FOLLOW_LIST_BROWSER_INCOMPLETE_WAIT = 300
+
+# How a follower or following list decides which accounts are new
+# False = an account is new when the saved list lacks it, so one that left a list and came back, or that a short list left out,
+# is reported as added again
+# True = a file of every account ever seen is kept beside the saved lists, as instagram_<target>_followers.ever_seen.json and
+# instagram_<target>_followings.ever_seen.json. Names are only ever added to it, never deleted, and it is updated as soon as
+# names are read, including from a list that came back short. An account is reported as added only the first time it is ever
+# seen. Removals are still reported against the saved list
+FOLLOW_LIST_EVER_SEEN = False
+
 # ----------------------------
 # Account Safety
 # ----------------------------
@@ -940,6 +983,14 @@ FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR = False
 FOLLOW_LIST_BROWSER_PAGE_SIZE = 25
 FOLLOW_LIST_BROWSER_REFETCH_TRIES = 3
 FOLLOW_LIST_SHORT_ADDITIONS = False
+FOLLOW_LIST_BROWSER_RESUME_TRIES = 3
+FOLLOW_LIST_BROWSER_RESUME_WAIT = 10
+FOLLOW_LIST_BROWSER_RESUME_AFTER = 30
+FOLLOW_LIST_BROWSER_PAGE_RETRIES = 2
+FOLLOW_LIST_BROWSER_PAGE_RETRY_WAIT = 30
+FOLLOW_LIST_BROWSER_INCOMPLETE_RETRIES = 1
+FOLLOW_LIST_BROWSER_INCOMPLETE_WAIT = 300
+FOLLOW_LIST_EVER_SEEN = False
 IDENTITY_BUDGET_PER_DAY = 0
 CIRCUIT_BREAKER = True
 BROWSER_MODE_CIRCUIT_BREAKER_DISABLE = False
@@ -1569,6 +1620,8 @@ def read_follow_record(path):
         raise ValueError("the saved follow count must be a nonnegative integer")
     if not isinstance(record[1], list) or any(not isinstance(value, str) or not value.strip() for value in record[1]):
         raise ValueError("saved usernames must be a list of nonempty strings")
+    # A list saved before repeats were skipped can hold an account twice, which would count it twice and hide how short the list is
+    record[1] = list(dict.fromkeys(record[1]))
     return record
 
 
@@ -7474,12 +7527,16 @@ def format_diagnostic_line(operation, fields):
 
 
 # Prints one timestamped diagnostic line only when debug mode is enabled
-def debug_print(_operation, **fields):
+# _part names a colour style from the theme, and paints everything after the timestamp, the target included, in it
+def debug_print(_operation, _part=None, **fields):
     if DEBUG_MODE:
         message = format_diagnostic_line(_operation, fields)
         timestamp = get_hour_min_from_ts(now_local(), show_seconds=True)
         user = getattr(_thread_local, 'user', None)
         user_prefix = f" [{user}]" if user else ""
+        shown = f"{user_prefix} {message}"
+        if _part:
+            shown = " " + colorize(_part, shown.lstrip())
 
         # If we just printed a partial line (no newline), add one before the debug message to avoid clobbering
         if getattr(_thread_local, 'in_partial_line', False):
@@ -7488,7 +7545,7 @@ def debug_print(_operation, **fields):
 
         # Secret-resolution fields contain setting names, source labels and presence flags only
         # codeql[py/clear-text-logging-sensitive-data]
-        print(f"[DEBUG {timestamp}]{user_prefix} {message}")  # substitution applied in LOGGER.write
+        print(f"[DEBUG {timestamp}]{shown}")  # substitution applied in LOGGER.write
 
 
 # Prints one operational event only when verbose mode is enabled
@@ -14184,6 +14241,27 @@ BROWSER_REFETCH_JS = """async ([path, appId, asbdId]) => {
   return {status: response.status, retryAfter: response.headers.get('retry-after'), users: users};
 }"""
 
+# Asks for the next list page from inside the profile page, like the request above, and also returns the cursor for the page after it
+# A request that never completes is returned as status 0 with the reason, so the caller can tell it from an answer
+BROWSER_RESUME_JS = """async ([path, appId, asbdId]) => {
+  const csrf = (document.cookie.match(/(?:^|; )csrftoken=([^;]*)/) || [])[1] || '';
+  let response;
+  try {
+    response = await fetch(path, {credentials: 'include', headers: {
+      'X-IG-App-ID': appId, 'X-ASBD-ID': asbdId, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf, 'Accept': '*/*'}});
+  } catch (error) {
+    return {status: 0, error: String(error).slice(0, 80)};
+  }
+  let body = null;
+  try { body = await response.json(); } catch (error) { body = null; }
+  const users = body && Array.isArray(body.users) ? body.users.map(user => user && user.username).filter(Boolean) : null;
+  const message = body && typeof body.message === 'string' ? body.message.slice(0, 80) : null;
+  return {status: response.status, retryAfter: response.headers.get('retry-after'), users: users, next: body && body.next_max_id ? String(body.next_max_id) : null, message: message};
+}"""
+
+# The most pages one scan asks for directly, which is more than any list Instagram shows
+BROWSER_RESUME_MAX_PAGES = 600
+
 # Shortfall against the reported count that is tolerated before a scan is rejected as truncated
 BROWSER_SHORTFALL_TOLERANCE = 10
 
@@ -14256,6 +14334,23 @@ class BrowserFollowListPrivateError(BrowserFollowListError):
     pass
 
 
+# Raised when the profile page had not finished loading, so the control that opens the list was never there to click
+# Told apart from a page that loaded without the control, which is a layout the tool does not read, because only a load can be retried
+class BrowserFollowListNotLoadedError(BrowserFollowListError):
+    pass
+
+
+# Raised when a scan ends short of Instagram's count, with the names it did read once the fetch has gathered them, so the caller
+# can use what was read and decide what a list that stopped early is worth
+class BrowserFollowListIncompleteError(BrowserFollowListError):
+    # Keeps how many accounts were read and how many Instagram reports
+    def __init__(self, message: str, harvested: int = 0, expected: int = 0):
+        super().__init__(message)
+        self.harvested = harvested
+        self.expected = expected
+        self.names: List[str] = []
+
+
 # What a profile page says to an account that does not follow a private profile
 BROWSER_PRIVATE_PROFILE_PATTERN = re.compile(r"this (?:account|profile) is private", re.IGNORECASE)
 
@@ -14313,7 +14408,10 @@ def print_above_progress(message: str) -> None:
 
 # Leaves the visible browser open for inspection until its last window is closed, so a failed scan can be looked at
 # where it stopped. Returns at once on a stop request, and never raises, since it runs while an error is propagating
-def hold_browser_open(browser_context, stop_event=None) -> None:
+# The error is only reported once the run goes on, which is after the window is closed, so the reason is said first
+def hold_browser_open(browser_context, stop_event=None, failure: Optional[BaseException] = None) -> None:
+    if failure is not None:
+        print_above_progress(f"* The scan stopped with: {format_error_message(failure)}")
     print_above_progress("* The scan failed and FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR is on, so the browser stays open to inspect. Close its window to continue")
     wait_for_browser_windows_closed(browser_context, stop_event)
 
@@ -14447,6 +14545,10 @@ def browser_launch_options() -> Dict[str, Any]:
 # The bar fills whatever width its text leaves, so statuses of different lengths would make it grow and shrink each time
 BROWSER_STAGE_READING = "Reading names"
 BROWSER_STAGE_COOLDOWN = "Cooldown wait"
+
+# Seconds the reading status stays on the bar before the cooldown replaces it, which is taken out of the cooldown wait so the pace is unchanged
+# Reading a rendered dialog takes a fraction of a second, so without a minimum the status flashed by too fast to read
+BROWSER_STAGE_MIN_SECONDS = 0.5
 
 
 # Updates the current thread's browser scan status and count without HTTP response hooks
@@ -14584,15 +14686,63 @@ class BrowserFollowListWatcher:
         self.responses = 0
         self.ended = False
         self.last_response = time.monotonic()
+        # What the list requests met other than a page of accounts, so a stalled list can say why it stalled
+        self.problems: Dict[str, int] = {}
+        # Where the list stands, so a stalled one can carry on: the address and cursor of the last good page, when a good page
+        # and a transient failure last arrived, and what resuming did
+        self.page_url = ""
+        self.cursor = ""
+        self.last_ok_at = 0.0
+        self.transient_at = 0.0
+        self.last_transient = ""
+        self.resuming = False
+        self.resume_stopped = ""
+        self.resumed_pages = 0
+        self.resumed_names = 0
+        # What the cursors of the pages looked like, the first few and the latest, to show how Instagram numbers its pages
+        self.cursor_shapes: List[str] = []
+        self.latest_cursor_shape = ""
+
+    # Notes what a page's cursor looks like without keeping it: a plain number is shown as it is, anything else only by its length
+    def note_cursor(self, cursor: str) -> None:
+        if not cursor:
+            return
+        shape = cursor if cursor.isdigit() and len(cursor) <= 12 else f"text of {len(cursor)} characters"
+        if len(self.cursor_shapes) < 4:
+            self.cursor_shapes.append(shape)
+        self.latest_cursor_shape = shape
+
+    # Notes a failure that is worth asking for the page again after, such as a 5xx answer or a request that never completed
+    def note_transient(self, text: str) -> None:
+        self.transient_at = time.monotonic()
+        self.last_transient = text
+
+    # Counts one thing the list requests met, such as an error status or a request that never completed
+    def note_problem(self, text: str) -> None:
+        self.problems[text] = self.problems.get(text, 0) + 1
+
+    # Notes a list request that failed before any answer came back, such as a timeout through the proxy
+    def on_request_failed(self, request) -> None:
+        if self.pattern.search(str(request.url)) and not self.resuming:
+            text = f"a request failed ({str(getattr(request, 'failure', None) or 'no reason given')[:60]})"
+            self.note_problem(text)
+            self.note_transient(text)
 
     # Queues a response to the list for reading, unless it answers one of this watcher's own requests
     def on_response(self, response) -> None:
         url = str(response.url)
-        if not self.pattern.search(url):
+        if not self.pattern.search(url) or self.resuming:
             return
         if self.skip.get(url, 0) > 0:
             self.skip[url] -= 1
             return
+        status = getattr(response, 'status', 200)
+        if isinstance(status, int) and status != 200:
+            self.note_problem(f"HTTP {status}")
+            if status >= 500:
+                self.note_transient(f"HTTP {status}")
+        elif isinstance(status, int):
+            self.last_ok_at = time.monotonic()
         self.pending.append(response)
         self.responses += 1
         self.last_response = time.monotonic()
@@ -14600,7 +14750,100 @@ class BrowserFollowListWatcher:
     # Returns whether Instagram has been sending pages and has not yet marked the end of the list, within the patience allowed
     # Until a page has arrived there is nothing to wait for, and the scan keeps its own quiet-scroll limit
     def waiting_for_more(self) -> bool:
-        return self.responses > 0 and not self.ended and time.monotonic() - self.last_response < BROWSER_NO_END_PATIENCE_SECONDS
+        return self.responses > 0 and not self.ended and not self.resume_stopped and time.monotonic() - self.last_response < BROWSER_NO_END_PATIENCE_SECONDS
+
+    # Returns how many seconds of silence carry a stalled list on, which is FOLLOW_LIST_BROWSER_RESUME_AFTER and never more than the patience
+    def resume_after_seconds(self) -> float:
+        after = float(FOLLOW_LIST_BROWSER_RESUME_AFTER)
+        return min(after, BROWSER_NO_END_PATIENCE_SECONDS) if after > 0 else float(BROWSER_NO_END_PATIENCE_SECONDS)
+
+    # Returns whether the list should be carried on by asking for its next page directly: a page failed for a moment after the last good
+    # one, or nothing arrived for FOLLOW_LIST_BROWSER_RESUME_AFTER seconds. It needs the cursor of a good page, and never follows an answer that pushed back
+    def should_resume(self) -> bool:
+        if int(FOLLOW_LIST_BROWSER_RESUME_TRIES) <= 0 or self.ended or self.resume_stopped or not self.cursor or not self.page_url or self.responses == 0:
+            return False
+        # A failure and a good page can land on the same tick of a coarse clock, so a tie counts as the failure coming last
+        if self.transient_at and self.transient_at >= self.last_ok_at:
+            return True
+        return time.monotonic() - self.last_response >= self.resume_after_seconds()
+
+    # Returns the address of the page after the last good one, which is that page's address with the cursor it handed out
+    def next_page_url(self) -> str:
+        parts = urlsplit(self.page_url)
+        query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "max_id"]
+        query.append(("max_id", self.cursor))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+    # Carries a stalled list on by asking for each next page directly, from the cursor of the last good page, and yields the new names
+    # of every page. A page that failed for a moment is asked for again up to FOLLOW_LIST_BROWSER_RESUME_TRIES times,
+    # FOLLOW_LIST_BROWSER_RESUME_WAIT seconds apart. Anything that looks like Instagram pushing back ends it, since more traffic is the
+    # wrong answer to that, and what stopped it is kept in resume_stopped for the report
+    def resume(self, page, scroll_delay: float, seen: set, stop_event=None):
+        tries = max(1, int(FOLLOW_LIST_BROWSER_RESUME_TRIES))
+        wait = max(0.0, float(FOLLOW_LIST_BROWSER_RESUME_WAIT))
+        reason = self.last_transient or "no page arrived"
+        print_above_progress(f"* The list stopped growing ({reason}). Asking Instagram for the next page directly, up to {tries} tries for each page, {int(wait)} seconds apart")
+        self.resuming = True
+        failures = 0
+        try:
+            while self.cursor and not self.ended:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                if self.resumed_pages >= BROWSER_RESUME_MAX_PAGES:
+                    self.resume_stopped = f"it reached the limit of {BROWSER_RESUME_MAX_PAGES} pages"
+                    return
+                url = self.next_page_url()
+                parts = urlsplit(url)
+                path = parts.path + (f"?{parts.query}" if parts.query else "")
+                try:
+                    result = page.evaluate(BROWSER_RESUME_JS, [path, INSTAGRAM_WEB_APP_ID, INSTAGRAM_WEB_ASBD_ID])
+                except Exception as failure:
+                    result = {'status': 0, 'error': format_error_message(failure)[:80]}
+                result = result if isinstance(result, dict) else {}
+                status = result.get('status')
+                users = result.get('users')
+                if status == 200 and isinstance(users, list):
+                    failures = 0
+                    self.resumed_pages += 1
+                    self.page_url = url
+                    self.cursor = str(result.get('next') or "")
+                    self.note_cursor(self.cursor)
+                    if not self.cursor:
+                        self.ended = True
+                    before = len(self.known)
+                    repeated = self.remember(users)
+                    self.resumed_names += len(self.known) - before
+                    # A page can come back with accounts it already sent in the slots where new ones belong, as in the dialog
+                    if repeated and self.tries > 0 and not self.stopped:
+                        self.refetch(page, url)
+                    fresh = [name for name in self.unreported if name not in seen]
+                    self.unreported = []
+                    if fresh:
+                        yield fresh
+                    if self.ended:
+                        return
+                    browser_follow_list_progress(BROWSER_STAGE_COOLDOWN)
+                    page.wait_for_timeout(int(float(scroll_delay) * 1000 * (1 + random.random() / 2)))
+                    continue
+                if status == 0:
+                    label = f"a request failed ({str(result.get('error') or 'no reason given')})"
+                elif isinstance(status, int) and status != 200:
+                    label = f"HTTP {status}"
+                else:
+                    label = "an answer without accounts" + (f" ({result['message']})" if result.get('message') else "")
+                self.note_problem(f"while resuming: {label}")
+                if not (status == 0 or (isinstance(status, int) and status >= 500)):
+                    wait_text = f", asking for a {result['retryAfter']} second wait" if result.get('retryAfter') else ""
+                    self.resume_stopped = f"Instagram answered with {label}{wait_text}"
+                    return
+                failures += 1
+                if failures >= tries:
+                    self.resume_stopped = f"{label} {failures} times in a row"
+                    return
+                browser_follow_list_progress("Waiting to retry")
+                page.wait_for_timeout(int(wait * 1000))
+        finally:
+            self.resuming = False
 
     # Takes in the names of one page and returns how many were already known, which are the slots the page lost
     def remember(self, names) -> int:
@@ -14651,14 +14894,21 @@ class BrowserFollowListWatcher:
             try:
                 body = response.json()
             except Exception:
+                self.note_problem("an answer that could not be read")
                 continue
             users = body.get('users') if isinstance(body, dict) else None
             if not isinstance(users, list):
+                said = body.get('message') if isinstance(body, dict) else None
+                self.note_problem(f"an answer without accounts ({str(said)[:60]})" if said else "an answer without accounts")
                 continue
             names = [user.get('username') for user in users if isinstance(user, dict) and user.get('username')]
             # Instagram ends a list with a page that carries no cursor for a next one
             if not body.get('next_max_id'):
                 self.ended = True
+            # The cursor and address of the last good page are what a stalled list is carried on from
+            self.cursor = str(body.get('next_max_id') or "")
+            self.note_cursor(self.cursor)
+            self.page_url = str(response.url)
             if self.remember(names) and self.tries > 0 and not self.stopped:
                 self.queue.append(str(response.url))
         while self.queue and not self.stopped:
@@ -14677,6 +14927,16 @@ class BrowserFollowListWatcher:
             messages.append(message)
         if self.responses and not self.ended:
             messages.append(f"Instagram had not marked the end of the list when reading stopped, so the list may be incomplete. The scan waits up to {BROWSER_NO_END_PATIENCE_SECONDS} seconds for a next page")
+        if self.resumed_pages or self.resume_stopped:
+            message = f"Carried the list on by asking for the next page directly: {self.resumed_pages} page(s), {self.resumed_names} account(s) read"
+            if self.resume_stopped:
+                message += f". It stopped because {self.resume_stopped}"
+            messages.append(message)
+        if self.problems:
+            summary = ", ".join(f"{name} x{count}" if count > 1 else name for name, count in self.problems.items())
+            messages.append(f"The list requests met: {summary}")
+        if DEBUG_MODE and self.cursor_shapes:
+            messages.append(f"Page cursors: first {', '.join(self.cursor_shapes)}; latest {self.latest_cursor_shape}")
         for message in messages:
             print_above_progress(f"* {message}")
             log_activity(message, user=profile.username, level='system')
@@ -14697,6 +14957,7 @@ def harvest_follow_list_dialog(page, scroll_delay: float, stall_limit: int = BRO
             return
 
         browser_follow_list_progress(BROWSER_STAGE_READING)
+        reading_started = time.monotonic()
         rendered = page.evaluate(BROWSER_DIALOG_NAMES_JS)
         if rendered is None:
             raise BrowserFollowListError("Instagram's follower list dialog closed before the list was read")
@@ -14718,6 +14979,16 @@ def harvest_follow_list_dialog(page, scroll_delay: float, stall_limit: int = BRO
         else:
             stalls += 1
             if stalls >= stall_limit:
+                # A list that stopped after a failed page, or that went quiet for the whole patience, is carried on from the
+                # cursor of its last good page instead of being given up on
+                if watcher is not None and watcher.should_resume():
+                    for batch in watcher.resume(page, scroll_delay, seen, stop_event):
+                        seen.update(batch)
+                        yield batch
+                    stalls = 0
+                    if watcher.ended or watcher.resume_stopped or (stop_event is not None and stop_event.is_set()):
+                        break
+                    continue
                 # Quiet scrolls do not end a list Instagram has not finished sending. Wake the dialog's loading and
                 # keep waiting, up to the patience allowed since the last page arrived
                 if watcher is None or not watcher.waiting_for_more():
@@ -14726,8 +14997,12 @@ def harvest_follow_list_dialog(page, scroll_delay: float, stall_limit: int = BRO
 
         if not page.evaluate(BROWSER_DIALOG_SCROLL_JS):
             break
+        # Keeps the reading status up for its minimum, and takes that time out of the cooldown so the scroll pace stays the same
+        hold = max(0.0, BROWSER_STAGE_MIN_SECONDS - (time.monotonic() - reading_started))
+        if hold > 0:
+            page.wait_for_timeout(int(hold * 1000))
         browser_follow_list_progress(BROWSER_STAGE_COOLDOWN)
-        page.wait_for_timeout(max(0, int(float(scroll_delay) * 1000)))
+        page.wait_for_timeout(max(0, int((float(scroll_delay) - hold) * 1000)))
 
     late = late_names()
     if late:
@@ -14803,19 +15078,98 @@ def browser_follow_list_readiness() -> Tuple[bool, str, str]:
     return True, detail, ""
 
 
+# Whether any profile link inside a dialog is on screen. Waiting on the first matching link would stall on one that is hidden,
+# such as a link in another dialog that comes first on the page, while the list itself is already showing
+BROWSER_DIALOG_LINKS_JS = """() => [...document.querySelectorAll('div[role="dialog"] a[href^="/"]')].some(link => link.getClientRects().length > 0)"""
+
+# Counts the dialogs on the page, the profile links in them and how many of those links are on screen
+BROWSER_DIALOG_PROBE_JS = """() => {
+  const links = [...document.querySelectorAll('div[role="dialog"] a[href^="/"]')];
+  return {dialogs: document.querySelectorAll('div[role="dialog"]').length, links: links.length, visible: links.filter(link => link.getClientRects().length > 0).length};
+}"""
+
+
+# Says what the page held when no profile link appeared in a dialog, or returns an empty string when the page cannot be read
+# Counts only, so it shows whether a dialog opened and whether its links were there but off screen, which are different failures
+def describe_dialog_state(page) -> str:
+    try:
+        state = page.evaluate(BROWSER_DIALOG_PROBE_JS)
+        dialogs, links, visible = int(state["dialogs"]), int(state["links"]), int(state["visible"])
+    except Exception:
+        return ""
+    if not dialogs:
+        return "no dialog was on the page"
+    return f"{dialogs} dialog{'s' if dialogs != 1 else ''} on the page held {links} profile link{'s' if links != 1 else ''}, {visible} of them on screen"
+
+
+# Lists the links on the page that mention followers or following, with the page's own address path and whether a form is shown
+BROWSER_CONTROL_PROBE_JS = """() => {
+  const links = [...document.querySelectorAll('a')].map(link => (link.innerText || link.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ')).filter(text => /follow/i.test(text));
+  return {path: location.pathname, links: links.slice(0, 6), form: document.querySelectorAll('input[type="password"]').length > 0};
+}"""
+
+
+# Says what the profile page held when its followers or following control could not be clicked, or returns an empty string
+# Shows the links that mention following, so a changed label or a page that is not the profile reads differently from a slow one
+# Returns the path, the follow links and whether a password field is shown, or None when the page cannot be read
+def read_profile_state(page) -> Optional[Dict[str, Any]]:
+    try:
+        state = page.evaluate(BROWSER_CONTROL_PROBE_JS)
+        return {"path": str(state["path"]), "links": [str(link)[:40] for link in state["links"]], "form": bool(state["form"])}
+    except Exception:
+        return None
+
+
+# Describes a state read by read_profile_state, or returns an empty string for a page that could not be read
+def describe_profile_state(state: Optional[Dict[str, Any]]) -> str:
+    if state is None:
+        return ""
+    links = state["links"]
+    found = "links mentioning follow: " + ", ".join(f"'{link}'" for link in links) if links else "no link on the page mentions follow"
+    return f"page {state['path']}, {found}" + (", and a password field is shown" if state["form"] else "")
+
+
+# Returns the first line of an error, which is all Playwright's call log leaves out of the way
+def first_error_line(error: BaseException) -> str:
+    lines = [line.strip() for line in str(error).splitlines() if line.strip()]
+    return lines[0] if lines else type(error).__name__
+
+
+# Opens the target's profile page, and reports a page that did not load in time as one that can be loaded again
+def open_browser_profile_page(page, target: str) -> None:
+    try:
+        page.goto(f"https://www.instagram.com/{target}/", wait_until="domcontentloaded")
+    except Exception as load_error:
+        if isinstance(load_error, BrowserFollowListError) or type(load_error).__name__ != "TimeoutError":
+            raise
+        raise BrowserFollowListNotLoadedError(f"The profile page for {target} did not load within {int(FOLLOW_LIST_BROWSER_TIMEOUT)} seconds ({first_error_line(load_error)})") from load_error
+
+
 # Opens the requested follow list and waits for its first rendered profile link
 def open_browser_follow_list_dialog(page, target: str, kind: str, anonymous: bool = False) -> None:
     detail = f"the profile's {kind} control could not be clicked"
+    clicked = False
     try:
         direct_link = page.locator(f'a[href="/{target}/{kind}/"]')
         # Newer layouts use href="#" for count links, so their accessible names identify the list
         count_link = page.get_by_role("link", name=re.compile(rf"^\d[\d.,\s]*[KMB]?\s+{kind}$", re.IGNORECASE))
         direct_link.or_(count_link).first.click()
+        clicked = True
         detail = f"no profile links appeared after clicking the {kind} control"
-        page.wait_for_selector('div[role="dialog"] a[href^="/"]')
+        page.wait_for_function(BROWSER_DIALOG_LINKS_JS)
     except Exception as dialog_error:
         # Account interruptions take priority over a missing control or an unreadable dialog
         guard_browser_page_state(page, anonymous)
+        if clicked:
+            state = describe_dialog_state(page)
+            detail += f" within {int(FOLLOW_LIST_BROWSER_TIMEOUT)} seconds" + (f" ({state})" if state else "")
+        else:
+            profile_state = read_profile_state(page)
+            state = describe_profile_state(profile_state)
+            detail += f" ({first_error_line(dialog_error)}" + (f"; {state}" if state else "") + ")"
+            # A page with no follow link at all had not loaded its header. One that has them but could not be clicked is a layout change
+            if profile_state is not None and not profile_state["links"] and not profile_state["form"]:
+                raise BrowserFollowListNotLoadedError(f"Instagram's follower list dialog could not be read for {target}: {detail}") from dialog_error
         raise BrowserFollowListError(f"Instagram's follower list dialog could not be read for {target}: {detail}") from dialog_error
     guard_browser_page_state(page, anonymous)
 
@@ -15052,6 +15406,7 @@ def browser_follow_list_batches(bot, profile, kind: str, stop_event=None):
             raise BrowserFollowListError(f"The browser could not start: {format_error_message(launch_error)}. Run 'playwright install chromium' or set FOLLOW_LIST_BROWSER_CHANNEL to a browser installed here") from launch_error
 
         failed = False
+        failure: Optional[BaseException] = None
         try:
             browser_context.set_default_timeout(max(1, int(FOLLOW_LIST_BROWSER_TIMEOUT)) * 1000)
             # A session hands the browser its cookies. An anonymous run has none to hand over, so the browser
@@ -15067,39 +15422,56 @@ def browser_follow_list_batches(bot, profile, kind: str, stop_event=None):
             watcher = BrowserFollowListWatcher(kind, int(FOLLOW_LIST_BROWSER_REFETCH_TRIES)) if int(FOLLOW_LIST_BROWSER_REFETCH_TRIES) > 0 else None
             if watcher is not None:
                 page.on("response", watcher.on_response)
+                page.on("requestfailed", watcher.on_request_failed)
 
             # A page Instagram puts in the way gets one more try after a person clears it in the visible window.
-            # A second interruption is reported instead of waited on again, so the scan cannot loop on one
-            for attempt in range(2):
+            # A second interruption is reported instead of waited on again, so the scan cannot loop on one.
+            # A page that did not finish loading is loaded again, as often as FOLLOW_LIST_BROWSER_PAGE_RETRIES allows
+            interruption_cleared = False
+            reloads_allowed = max(0, int(FOLLOW_LIST_BROWSER_PAGE_RETRIES))
+            reloads_done = 0
+            while True:
                 try:
                     browser_follow_list_progress("Opening profile")
-                    page.goto(f"https://www.instagram.com/{target}/", wait_until="domcontentloaded")
+                    open_browser_profile_page(page, target)
                     guard_browser_page_state(page, anonymous)
                     guard_private_profile(page, profile, kind)
 
                     browser_follow_list_progress("Opening list")
                     open_browser_follow_list_dialog(page, target, kind, anonymous)
                     break
-                except BrowserFollowListError:
+                except BrowserFollowListError as scan_error:
+                    if isinstance(scan_error, BrowserFollowListNotLoadedError) and reloads_done < reloads_allowed:
+                        reloads_done += 1
+                        pause = max(0.0, float(FOLLOW_LIST_BROWSER_PAGE_RETRY_WAIT))
+                        notice = f"The profile page for {target} did not finish loading. Loading it again in {int(pause)} seconds (reload {reloads_done} of {reloads_allowed})"
+                        print_above_progress(f"* {notice}")
+                        log_activity(notice, user=target, level='system')
+                        browser_follow_list_progress("Waiting to reload")
+                        if interruptible_sleep(pause, stop_event):
+                            return
+                        continue
                     interruption = browser_interruption(page)
-                    if attempt or interruption is None or not can_wait_for_person(anonymous):
+                    if interruption_cleared or interruption is None or not can_wait_for_person(anonymous):
                         raise
                     if not wait_for_interruption_to_clear(page, interruption[1], profile, float(FOLLOW_LIST_BROWSER_LOGIN_WAIT), stop_event):
                         if stop_event is not None and stop_event.is_set():
                             return
                         raise
+                    interruption_cleared = True
             yield from harvest_follow_list_dialog(page, FOLLOW_LIST_BROWSER_SCROLL_DELAY, stop_event=stop_event, watcher=watcher)
             if watcher is not None:
                 watcher.report(profile)
-        except Exception:
+        except Exception as scan_error:
             failed = True
+            failure = scan_error
             raise
         finally:
             try:
                 # Held only after a failure, so whatever the scan stopped on can be inspected. A scan that worked
                 # closes the browser and carries on
                 if failed and FOLLOW_LIST_BROWSER_KEEP_OPEN_ON_ERROR and not FOLLOW_LIST_BROWSER_HEADLESS:
-                    hold_browser_open(browser_context, stop_event)
+                    hold_browser_open(browser_context, stop_event, failure)
             finally:
                 try:
                     browser_context.close()
@@ -15139,7 +15511,7 @@ def iter_browser_follow_list(bot, profile, kind: str, record_exposure: bool = Fa
     # A dialog that stops rendering early looks the same as a finished list, so a large shortfall is
     # reported instead of returned. Saving it would drop the missing accounts from the next comparison
     if expected > 0 and (expected - harvested) > max(BROWSER_SHORTFALL_TOLERANCE, expected // 10):
-        raise BrowserFollowListError(f"The browser rendered only {harvested} of about {expected} {kind} before the dialog stopped growing, so the list is incomplete")
+        raise BrowserFollowListIncompleteError(f"The browser rendered only {harvested} of about {expected} {kind} before the dialog stopped growing, so the list is incomplete", harvested, expected)
 
 
 # Returns True when a REST failure describes the endpoint rather than the account, the only case worth a second attempt
@@ -15229,8 +15601,23 @@ def follow_list_generator(bot, profile, kind: str, record_exposure: bool = False
 
 
 # Carries fetched usernames plus whether the source generator was fully exhausted
+# repeated counts the accounts a scan was sent again after an earlier page had already sent them
 class PaginatedUsernameResult(list):
     complete = False
+    repeated = 0
+
+
+# Passes on each account of a list once, however many pages sent it, and counts the repeats on the result
+# Instagram fills part of many list pages with accounts it already sent. A repeat that is kept stands in for an account that
+# was never read, so the list looks complete while real accounts are missing from it, and they are reported as removed
+def skip_repeated_accounts(accounts, result):
+    seen = set()
+    for account in accounts:
+        if account.username in seen:
+            result.repeated += 1
+            continue
+        seen.add(account.username)
+        yield account
 
 
 # Returns whether a fetched username list is safe to compare or persist
@@ -15297,8 +15684,8 @@ def save_rejected_username_list(baseline_file: str, reported_count, result, prev
     log_activity(msg, user=user, level='system')
 
 
-# Atomically replaces a complete follower or following baseline file
-def save_username_baseline(filename, reported_count, usernames):
+# Atomically replaces a JSON file, so a reader never sees half of it
+def write_json_atomically(filename, payload) -> None:
     destination = os.path.abspath(filename)
     destination_dir = os.path.dirname(destination)
     os.makedirs(destination_dir, exist_ok=True)
@@ -15306,13 +15693,90 @@ def save_username_baseline(filename, reported_count, usernames):
     try:
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=destination_dir, prefix=f".{os.path.basename(destination)}.", suffix='.tmp', delete=False) as handle:
             temporary_path = handle.name
-            json.dump([reported_count, list(usernames)], handle, indent=2)
+            json.dump(payload, handle, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, destination)
     finally:
         if temporary_path and os.path.exists(temporary_path):
             os.remove(temporary_path)
+
+
+# Atomically replaces a complete follower or following baseline file
+def save_username_baseline(filename, reported_count, usernames):
+    write_json_atomically(filename, [reported_count, list(usernames)])
+
+
+# Returns the file that holds every account ever seen in one list, beside the saved list it belongs to
+# For instagram_KK_followers.json it is instagram_KK_followers.ever_seen.json
+def ever_seen_file(baseline_file: str) -> str:
+    stem, extension = os.path.splitext(baseline_file)
+    return f"{stem}.ever_seen{extension}"
+
+
+# Returns every account ever seen in one list, an empty list when there is no file yet, or None when the file cannot be read
+# An unreadable file is never written over, since that would delete names, so the caller carries on without it
+def read_ever_seen(baseline_file: str) -> Optional[List[str]]:
+    path = ever_seen_file(baseline_file)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            names = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return list(names) if isinstance(names, list) and all(isinstance(name, str) for name in names) else None
+
+
+# Adds the names read from a list to the file of accounts ever seen, at once, and returns the ones that were not in it
+# A file that does not exist yet starts from seed, the saved list, since those accounts have been seen. Names are never removed,
+# and a file that cannot be read is reported and left as it is
+def record_ever_seen(baseline_file: str, names, seed=(), user: str = "", kind: str = "") -> Optional[List[str]]:
+    existing = read_ever_seen(baseline_file)
+    if existing is None:
+        msg = f"The list of every {kind} ever seen in '{ever_seen_file(baseline_file)}' could not be read, so it is left as it is and not updated"
+        print_above_progress(f"* {msg}")
+        log_activity(msg, user=user, level='system')
+        return None
+    created = not os.path.exists(ever_seen_file(baseline_file))
+    if created:
+        existing = list(dict.fromkeys(seed))
+    known = set(existing)
+    fresh = [name for name in dict.fromkeys(names) if name not in known]
+    if fresh or created:
+        try:
+            write_json_atomically(ever_seen_file(baseline_file), existing + fresh)
+        except OSError as error:
+            msg = f"The list of every {kind} ever seen could not be written to '{ever_seen_file(baseline_file)}': {error}"
+            print_above_progress(f"* {msg}")
+            log_activity(msg, user=user, level='system')
+    return fresh
+
+
+# Says in the debug output that the ever-seen lists are in use and how many accounts each holds, once the run knows where the
+# saved lists are. A list with no file yet starts from the saved list at the first read, and one that cannot be read is said so
+def debug_ever_seen_lists(followers_file: str, followings_file: str) -> None:
+    if not FOLLOW_LIST_EVER_SEEN:
+        return
+    sizes: Dict[str, Any] = {}
+    for kind, baseline in (("followers", followers_file), ("followings", followings_file)):
+        held = read_ever_seen(baseline)
+        sizes[kind] = "unreadable" if held is None else (len(held) if os.path.exists(ever_seen_file(baseline)) else "no file yet")
+    # Yellow, the theme's warning colour, so the mode is easy to spot among the other debug lines
+    debug_print("Ever-seen lists enabled", _part="warning", **sizes)
+
+
+# Compares two lists the way the setting asks: an account the ever-seen list already held before this list was read is not
+# reported as added again, and removals are the saved list's, as always
+# The list that was read carries the accounts known before it, taken before the read recorded its own names, so the comparison
+# is not told that everything in it was already seen. Without that, or with the setting off, the plain comparison is made
+def compare_follow_lists(user, kind, old_list, new_list, csv_file_name):
+    known = getattr(new_list, 'ever_seen_before', None)
+    if not FOLLOW_LIST_EVER_SEEN or known is None:
+        return compare_and_log_follower_changes(user, kind, old_list, new_list, csv_file_name)
+    saved = set(old_list)
+    seen_again = [name for name in dict.fromkeys(new_list) if name in known and name not in saved]
+    return compare_and_log_follower_changes(user, kind, list(old_list) + seen_again, new_list, csv_file_name)
 
 
 # Latches the account safety stop and ends the scan with whatever it had already fetched
@@ -15341,6 +15805,130 @@ def fetch_usernames_paginated(bot, get_generator_fn, max_per_batch, total_limit,
         raise
     finally:
         IDENTITY_SCAN_LOCK.release()
+
+
+# Reports the names a partial list holds that the saved list lacks as added, the way a complete list reports them
+# They are new whatever else the list is missing, so nothing is reported as removed
+def report_additions_from_incomplete_list(user: str, kind: str, previous, additions: List[str], csv_file_name, harvested: int, expected: int) -> None:
+    saved = list(previous)
+    added_list, _removed, added_list_html, _removed_html, added_list_webhook, _removed_webhook, added_mbody, _removed_mbody = compare_and_log_follower_changes(user, kind, saved, saved + additions, csv_file_name)
+    note = f"Found in a partial list: {harvested} of about {expected} {kind} were read, so nothing is reported as removed"
+    subject = f"Instagram user {user} has {len(additions)} new {kind}! (partial list)"
+    body = f"New {kind} found for user {user}\n{added_mbody}{added_list}\n{note}{get_cur_ts(nl_ch + 'Timestamp: ')}"
+    # Each piece is escaped where it is built. The account list is the HTML the comparison made from user names and profile addresses
+    kind_html = escape(kind)
+    heading_html = escape(added_mbody.strip())
+    names_html = added_list_html.strip().replace(chr(10), '<br>')
+    note_html = escape(note)
+    body_html = f"New {kind_html} found for user <b>{escape(user)}</b><br><br><b>{heading_html}</b><br>{names_html}<br><br><i>{note_html}</i>{get_cur_ts('<br>Timestamp: ')}"
+    send_notification_channels("status", subject, body, body_html, email_enabled=STATUS_NOTIFICATION, **follower_change_embed(user, kind, len(saved), len(saved) + len(additions), added_list_webhook, ""))
+
+
+# Says so when Instagram's count of a list rose by more than the list shows new accounts
+# Instagram can leave accounts out of a list it shows to one viewer, so a new account can be among the ones left out, and the scan
+# cannot see it. This line is the only sign that a change went unnoticed. A fall in the count, or a list with no saved list to
+# compare with, says nothing. counts is the count at the last check and the count now, known holds the accounts that are not news
+def warn_count_rose_without_new_names(kind: str, user: str, counts, result, known) -> None:
+    try:
+        old_count, new_count = int(counts[0]), int(counts[1])
+    except (TypeError, ValueError, IndexError):
+        return
+    rise = new_count - old_count
+    if rise <= 0:
+        return
+    found = sum(1 for name in result if name not in known)
+    if found >= rise:
+        return
+    msg = f"The {kind} count rose by {rise} (from {old_count} to {new_count}) but the list shows {found} new account(s). Instagram can leave accounts out of a list it shows to one viewer, so a new one may be among those left out. It can still show up on a later check"
+    print_above_progress(f"* {msg}")
+    log_activity(msg, user=user, level='system')
+
+
+# Reads a follower or following list, and reads it again after a pause when the browser scan stopped short of Instagram's count
+# Every attempt first reports the accounts it read that are new, and a later list does not report them again. The saved list is
+# passed as previous, or None when there is no baseline to compare with
+# With FOLLOW_LIST_EVER_SEEN off, new means the saved list lacks the account, and the account joins the saved list in memory
+# With it on, new means the ever-seen list lacks it, and every name read is recorded in that file at once, so nothing is
+# reported twice, even after a restart, and the saved list is left as it is
+# When the last attempt is still short the list is not an error: it comes back marked incomplete, or, with the setting off and
+# new names found, as the saved list plus them, and the next check reads the list again. Any other failure is raised as before
+# counts, the count at the last check and the count now, lets a rise the list does not show be reported
+def fetch_follow_list_retrying_incomplete(kind: str, user: str, previous, expected, title: str, stop_event, csv_file_name, baseline_file, fetch, counts=None):
+    retries = max(0, int(FOLLOW_LIST_BROWSER_INCOMPLETE_RETRIES))
+    wait_seconds = max(0.0, float(FOLLOW_LIST_BROWSER_INCOMPLETE_WAIT))
+    attempt = 0
+    added: List[str] = []
+    # The accounts the ever-seen list held, or None with the setting off or no file to keep it in
+    seen_before: Optional[set] = None
+    had_file = False
+    if FOLLOW_LIST_EVER_SEEN and baseline_file:
+        held = read_ever_seen(baseline_file)
+        if held is None:
+            record_ever_seen(baseline_file, [], user=user, kind=kind)
+        else:
+            had_file = os.path.exists(ever_seen_file(baseline_file))
+            seen_before = set(held) if had_file else set(previous or ())
+    while True:
+        try:
+            result = fetch()
+            repeated = getattr(result, 'repeated', 0)
+            if repeated:
+                msg = f"Instagram sent {repeated} account(s) of the {kind} list more than once, so each was kept once: {len(result)} different accounts were read"
+                print_above_progress(f"* {msg}")
+                log_activity(msg, user=user, level='system')
+            if counts is not None and previous is not None:
+                warn_count_rose_without_new_names(kind, user, counts, result, seen_before if seen_before is not None else set(previous))
+            if seen_before is not None:
+                result.ever_seen_before = frozenset(seen_before)
+                record_ever_seen(baseline_file, result, seed=previous or (), user=user, kind=kind)
+            return result
+        except BrowserFollowListIncompleteError as incomplete:
+            names = list(incomplete.names)
+            harvested = incomplete.harvested or len(names)
+            reported = incomplete.expected or int(expected or 0)
+            if seen_before is not None:
+                fresh = [name for name in dict.fromkeys(names) if name not in seen_before]
+                # With no saved list and no ever-seen list yet there is nothing to compare with, so no name is news
+                if fresh and (had_file or previous is not None):
+                    close_pbar()
+                    report_additions_from_incomplete_list(user, kind, previous or [], fresh, csv_file_name, harvested, reported)
+                    added.extend(fresh)
+                record_ever_seen(baseline_file, names, seed=previous or (), user=user, kind=kind)
+                seen_before.update(names)
+                had_file = True
+            elif previous is not None:
+                known = set(previous)
+                new_names = [name for name in dict.fromkeys(names) if name not in known]
+                if new_names:
+                    close_pbar()
+                    report_additions_from_incomplete_list(user, kind, previous, new_names, csv_file_name, harvested, reported)
+                    previous.extend(new_names)
+                    added.extend(new_names)
+            stopped = stop_event is not None and stop_event.is_set()
+            if attempt < retries and not stopped:
+                attempt += 1
+                close_pbar()
+                msg = f"The {kind} list stopped at {harvested} of about {reported}. Reading it again in {display_time(wait_seconds)} (attempt {attempt + 1} of {retries + 1})"
+                print_above_progress(f"* {msg}")
+                log_activity(msg, user=user, level='system')
+                if interruptible_sleep(wait_seconds, stop_event):
+                    stopped = True
+                else:
+                    setup_name_fetch_pbar(expected, title)
+                    continue
+            tries = f" after {retries} {'retry' if retries == 1 else 'retries'}" if retries and not stopped else ""
+            if added and seen_before is None:
+                result = PaginatedUsernameResult(previous)
+                result.complete = True
+                outcome = f"{len(added)} new were reported and joined to the saved list, which is otherwise kept"
+            else:
+                result = PaginatedUsernameResult(names)
+                result.complete = False
+                outcome = f"{len(added)} new were reported and recorded in the list of every {kind} ever seen, and the saved list is kept" if added else "the saved list is kept"
+            msg = f"The {kind} list is still incomplete at {harvested} of about {reported}{tries}. That is not treated as a failure: {outcome}, and the next check reads the list again"
+            print_above_progress(f"* {msg}")
+            log_activity(msg, user=user, level='system')
+            return result
 
 
 # Says why one name fetch must not start: the text for the screen, the text for the log, the ledger error behind it if
@@ -15433,7 +16021,7 @@ def _fetch_usernames_paginated_locked(bot, get_generator_fn, max_per_batch, tota
         report_name_fetch_refusal(refusal, user)
         return results
 
-    gen = get_generator_fn()  # single generator — keeps cursor position across batches
+    gen = skip_repeated_accounts(get_generator_fn(), results)  # single generator — keeps cursor position across batches
     if advanced_fetch:
         msg = f"Fetching {build_follow_string(advanced_fetch, estimated_limit, max_per_batch, fetch_delay, alt_format=True)}"
         if thread_pbar:
@@ -15476,9 +16064,12 @@ def _fetch_usernames_paginated_locked(bot, get_generator_fn, max_per_batch, tota
         except ExposureLedgerError as safety_error:
             results.extend(batch)
             return _stop_fetch_for_unavailable_ledger(safety_error, results, user)
-        except Exception:
+        except Exception as fetch_error:
             # Names already returned still cost the account, so bank them before the error propagates
             results.extend(batch)
+            # A list that stopped early still holds names the saved list may lack, so the caller is given them
+            if isinstance(fetch_error, BrowserFollowListIncompleteError):
+                fetch_error.names = list(results)
             if not identities_counted_at_source:
                 # A ledger that dies here must not replace the Instagram error the caller needs to see
                 try:
@@ -16009,12 +16600,15 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
         profile_pic_file = f"instagram_{user}_profile_pic.jpg"
         profile_pic_file_old = f"instagram_{user}_profile_pic_old.jpg"
         profile_pic_file_tmp = f"instagram_{user}_profile_pic_tmp.jpg"
+    debug_ever_seen_lists(insta_followers_file, insta_followings_file)
     followers = []
     followings = []
     followers_old = followers
     followings_old = followings
     followers_read = []
     followings_read = []
+    followers_read_failed = False
+    followings_read_failed = False
 
     if os.path.isfile(insta_followers_file):
         try:
@@ -16074,18 +16668,22 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             setup_name_fetch_pbar(follower_limit, "* Downloading Followers")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'follower'
-            followers = fetch_usernames_paginated(
-                bot,
-                get_generator_fn=lambda: follow_list_generator(bot, profile, 'followers', record_exposure=True, stop_event=stop_event),
-                max_per_batch=FOLLOWERS_PER_BATCH,
-                total_limit=FOLLOWER_LIMIT_TO_FETCH,
-                fetch_delay=FOLLOWER_DELAY_PER_BATCH,
-                advanced_fetch=ADVANCED_FOLLOWER_FETCH,
-                estimated_limit=follower_limit,
-                user=user,
-                stop_event=stop_event,
-                identities_counted_at_source=True,
-                record_failures=False,
+            followers = fetch_follow_list_retrying_incomplete(
+                "followers", user, followers_old if followers_baseline_available else None, follower_limit, "* Downloading Followers", stop_event, csv_file_name, insta_followers_file,
+                lambda: fetch_usernames_paginated(
+                    bot,
+                    get_generator_fn=lambda: follow_list_generator(bot, profile, 'followers', record_exposure=True, stop_event=stop_event),
+                    max_per_batch=FOLLOWERS_PER_BATCH,
+                    total_limit=FOLLOWER_LIMIT_TO_FETCH,
+                    fetch_delay=FOLLOWER_DELAY_PER_BATCH,
+                    advanced_fetch=ADVANCED_FOLLOWER_FETCH,
+                    estimated_limit=follower_limit,
+                    user=user,
+                    stop_event=stop_event,
+                    identities_counted_at_source=True,
+                    record_failures=False,
+                ),
+                counts=(followers_old_count, followers_count),
             )
             _thread_local.FETCH_TYPE = None
             end_time_dl = time.time()
@@ -16101,12 +16699,14 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             print(f"* Error while getting followers: {error_msg}")
             print_fix_hint(error_msg)
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
-            if threading.current_thread() is threading.main_thread():
-                sys.exit(1)
-            else:
-                return
+            # The saved list stays as it was and the run goes on to wait for the next check window, as a failed read in the loop does
+            followers = followers_old
+            followers_read_failed = True
+            print("* The followers list will be read again at the next check")
 
-        if not getattr(followers, 'complete', False):
+        if followers_read_failed:
+            pass
+        elif not getattr(followers, 'complete', False):
             print("* Incomplete followers list returned, baseline not saved")
         elif not followers and followers_count > 0:
             print("* Empty followers list returned, baseline not saved")
@@ -16125,7 +16725,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
     should_compare_followers = is_complete_username_baseline(followers, followers_count) and followers_baseline_available and ((followers_count != followers_old_count) or (FOLLOWERS_CHURN_DETECTION and followers != followers_old))
     if should_compare_followers and (followers != followers_old) and follow_lists_available(skip_session) and not skip_followers and follow_lists_viewable(can_view, skip_session) and ((followers and followers_count > 0) or (not followers and followers_count == 0)):
         if not skip_follow_changes:
-            added_followers_list, removed_followers_list, added_followers_list_html, removed_followers_list_html, added_followers_list_webhook, removed_followers_list_webhook, added_followers_mbody, removed_followers_mbody = compare_and_log_follower_changes(
+            added_followers_list, removed_followers_list, added_followers_list_html, removed_followers_list_html, added_followers_list_webhook, removed_followers_list_webhook, added_followers_mbody, removed_followers_mbody = compare_follow_lists(
                 user, "followers", followers_old, followers, csv_file_name
             )
 
@@ -16215,18 +16815,22 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             setup_name_fetch_pbar(followee_limit, "* Downloading Followings")
             start_time_dl = time.time()
             _thread_local.FETCH_TYPE = 'followee'
-            followings = fetch_usernames_paginated(
-                bot,
-                get_generator_fn=lambda: follow_list_generator(bot, profile, 'following', record_exposure=True, stop_event=stop_event),
-                max_per_batch=FOLLOWEES_PER_BATCH,
-                total_limit=FOLLOWEE_LIMIT_TO_FETCH,
-                fetch_delay=FOLLOWEE_DELAY_PER_BATCH,
-                advanced_fetch=ADVANCED_FOLLOWEE_FETCH,
-                estimated_limit=followee_limit,
-                user=user,
-                stop_event=stop_event,
-                identities_counted_at_source=True,
-                record_failures=False,
+            followings = fetch_follow_list_retrying_incomplete(
+                "followings", user, followings_old if followings_baseline_available else None, followee_limit, "* Downloading Followings", stop_event, csv_file_name, insta_followings_file,
+                lambda: fetch_usernames_paginated(
+                    bot,
+                    get_generator_fn=lambda: follow_list_generator(bot, profile, 'following', record_exposure=True, stop_event=stop_event),
+                    max_per_batch=FOLLOWEES_PER_BATCH,
+                    total_limit=FOLLOWEE_LIMIT_TO_FETCH,
+                    fetch_delay=FOLLOWEE_DELAY_PER_BATCH,
+                    advanced_fetch=ADVANCED_FOLLOWEE_FETCH,
+                    estimated_limit=followee_limit,
+                    user=user,
+                    stop_event=stop_event,
+                    identities_counted_at_source=True,
+                    record_failures=False,
+                ),
+                counts=(followings_old_count, followings_count),
             )
             _thread_local.FETCH_TYPE = None
             end_time_dl = time.time()
@@ -16242,12 +16846,14 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
             print(f"* Error while getting followings: {error_msg}")
             print_fix_hint(error_msg)
             update_ui_data(targets={user: {'status': 'Error: ' + error_msg}})
-            if threading.current_thread() is threading.main_thread():
-                sys.exit(1)
-            else:
-                return
+            # The saved list stays as it was and the run goes on to wait for the next check window, as a failed read in the loop does
+            followings = followings_old
+            followings_read_failed = True
+            print("* The followings list will be read again at the next check")
 
-        if not getattr(followings, 'complete', False):
+        if followings_read_failed:
+            pass
+        elif not getattr(followings, 'complete', False):
             print("* Incomplete followings list returned, baseline not saved")
         elif not followings and followings_count > 0:
             print("* Empty followings list returned, baseline not saved")
@@ -16265,7 +16871,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
     should_compare_followings = is_complete_username_baseline(followings, followings_count) and followings_baseline_available and ((followings_count != followings_old_count) or (FOLLOWERS_CHURN_DETECTION and followings != followings_old))
     if should_compare_followings and (followings != followings_old) and follow_lists_available(skip_session) and not skip_followings and follow_lists_viewable(can_view, skip_session) and ((followings and followings_count > 0) or (not followings and followings_count == 0)):
         if not skip_follow_changes:
-            added_followings_list, removed_followings_list, added_followings_list_html, removed_followings_list_html, added_followings_list_webhook, removed_followings_list_webhook, added_followings_mbody, removed_followings_mbody = compare_and_log_follower_changes(
+            added_followings_list, removed_followings_list, added_followings_list_html, removed_followings_list_html, added_followings_list_webhook, removed_followings_list_webhook, added_followings_mbody, removed_followings_mbody = compare_follow_lists(
                 user, "followings", followings_old, followings, csv_file_name
             )
 
@@ -17093,18 +17699,22 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         start_time_dl = time.time()
                         followings = []
                         _thread_local.FETCH_TYPE = 'followee'
-                        followings = fetch_usernames_paginated(
-                            bot,
-                            get_generator_fn=lambda bound_profile=profile: follow_list_generator(bot, bound_profile, 'following', record_exposure=True, stop_event=stop_event),
-                            max_per_batch=FOLLOWEES_PER_BATCH,
-                            total_limit=FOLLOWEE_LIMIT_TO_FETCH,
-                            fetch_delay=FOLLOWEE_DELAY_PER_BATCH,
-                            advanced_fetch=ADVANCED_FOLLOWEE_FETCH,
-                            estimated_limit=followee_limit,
-                            user=user,
-                            stop_event=stop_event,
-                            identities_counted_at_source=True,
-                            record_failures=False,
+                        followings = fetch_follow_list_retrying_incomplete(
+                            "followings", user, followings_old if followings_baseline_available else None, followee_limit, "* Downloading Followings", stop_event, csv_file_name, insta_followings_file,
+                            lambda bound_profile=profile, bound_limit=followee_limit: fetch_usernames_paginated(
+                                bot,
+                                get_generator_fn=lambda: follow_list_generator(bot, bound_profile, 'following', record_exposure=True, stop_event=stop_event),
+                                max_per_batch=FOLLOWEES_PER_BATCH,
+                                total_limit=FOLLOWEE_LIMIT_TO_FETCH,
+                                fetch_delay=FOLLOWEE_DELAY_PER_BATCH,
+                                advanced_fetch=ADVANCED_FOLLOWEE_FETCH,
+                                estimated_limit=bound_limit,
+                                user=user,
+                                stop_event=stop_event,
+                                identities_counted_at_source=True,
+                                record_failures=False,
+                            ),
+                            counts=(followings_old_count, followings_count),
                         )
                         _thread_local.FETCH_TYPE = None
                         end_time_dl = time.time()
@@ -17145,7 +17755,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                     else:
                         if followings_baseline_available:
                             if not skip_follow_changes:
-                                added_followings_list, removed_followings_list, added_followings_list_html, removed_followings_list_html, added_followings_list_webhook, removed_followings_list_webhook, added_followings_mbody, removed_followings_mbody = compare_and_log_follower_changes(
+                                added_followings_list, removed_followings_list, added_followings_list_html, removed_followings_list_html, added_followings_list_webhook, removed_followings_list_webhook, added_followings_mbody, removed_followings_mbody = compare_follow_lists(
                                     user, "followings", followings_old, followings, csv_file_name
                                 )
                                 followings_list_comparison_complete = getattr(followings, 'complete', False)
@@ -17240,18 +17850,22 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                         start_time_dl = time.time()
                         followers = []
                         _thread_local.FETCH_TYPE = 'follower'
-                        followers = fetch_usernames_paginated(
-                            bot,
-                            get_generator_fn=lambda bound_profile=profile: follow_list_generator(bot, bound_profile, 'followers', record_exposure=True, stop_event=stop_event),
-                            max_per_batch=FOLLOWERS_PER_BATCH,
-                            total_limit=FOLLOWER_LIMIT_TO_FETCH,
-                            fetch_delay=FOLLOWER_DELAY_PER_BATCH,
-                            advanced_fetch=ADVANCED_FOLLOWER_FETCH,
-                            estimated_limit=follower_limit,
-                            user=user,
-                            stop_event=stop_event,
-                            identities_counted_at_source=True,
-                            record_failures=False,
+                        followers = fetch_follow_list_retrying_incomplete(
+                            "followers", user, followers_old if followers_baseline_available else None, follower_limit, "* Downloading Followers", stop_event, csv_file_name, insta_followers_file,
+                            lambda bound_profile=profile, bound_limit=follower_limit: fetch_usernames_paginated(
+                                bot,
+                                get_generator_fn=lambda: follow_list_generator(bot, bound_profile, 'followers', record_exposure=True, stop_event=stop_event),
+                                max_per_batch=FOLLOWERS_PER_BATCH,
+                                total_limit=FOLLOWER_LIMIT_TO_FETCH,
+                                fetch_delay=FOLLOWER_DELAY_PER_BATCH,
+                                advanced_fetch=ADVANCED_FOLLOWER_FETCH,
+                                estimated_limit=bound_limit,
+                                user=user,
+                                stop_event=stop_event,
+                                identities_counted_at_source=True,
+                                record_failures=False,
+                            ),
+                            counts=(followers_old_count, followers_count),
                         )
                         _thread_local.FETCH_TYPE = None
                         end_time_dl = time.time()
@@ -17292,7 +17906,7 @@ def _run_instagram_monitor_pass(user, csv_file_name, skip_session, skip_follower
                     else:
                         if followers_baseline_available:
                             if not skip_follow_changes:
-                                added_followers_list, removed_followers_list, added_followers_list_html, removed_followers_list_html, added_followers_list_webhook, removed_followers_list_webhook, added_followers_mbody, removed_followers_mbody = compare_and_log_follower_changes(
+                                added_followers_list, removed_followers_list, added_followers_list_html, removed_followers_list_html, added_followers_list_webhook, removed_followers_list_webhook, added_followers_mbody, removed_followers_mbody = compare_follow_lists(
                                     user, "followers", followers_old, followers, csv_file_name
                                 )
                                 followers_list_comparison_complete = getattr(followers, 'complete', False)
@@ -20366,8 +20980,8 @@ def doctor_label_from_error(summary) -> str:
 def runtime_configuration_problems() -> Dict[str, str]:
     problems: Dict[str, str] = {}
     positive_numbers = (("INSTA_CHECK_INTERVAL", INSTA_CHECK_INTERVAL), ("CHECK_INTERNET_TIMEOUT", CHECK_INTERNET_TIMEOUT), ("FOLLOW_LIST_BROWSER_TIMEOUT", FOLLOW_LIST_BROWSER_TIMEOUT))
-    nonnegative_numbers = (("RANDOM_SLEEP_DIFF_LOW", RANDOM_SLEEP_DIFF_LOW), ("RANDOM_SLEEP_DIFF_HIGH", RANDOM_SLEEP_DIFF_HIGH), ("LIVENESS_CHECK_INTERVAL", LIVENESS_CHECK_INTERVAL), ("NEXT_OPERATION_DELAY", NEXT_OPERATION_DELAY), ("FOLLOWER_DELAY_PER_BATCH", FOLLOWER_DELAY_PER_BATCH), ("FOLLOWEE_DELAY_PER_BATCH", FOLLOWEE_DELAY_PER_BATCH), ("FOLLOW_LIST_BROWSER_SCROLL_DELAY", FOLLOW_LIST_BROWSER_SCROLL_DELAY), ("FOLLOW_LIST_BROWSER_LOGIN_WAIT", FOLLOW_LIST_BROWSER_LOGIN_WAIT), ("MULTI_TARGET_STAGGER", MULTI_TARGET_STAGGER), ("MULTI_TARGET_STAGGER_JITTER", MULTI_TARGET_STAGGER_JITTER))
-    nonnegative_integers = (("DAILY_HUMAN_HITS", DAILY_HUMAN_HITS), ("FOLLOWERS_PER_BATCH", FOLLOWERS_PER_BATCH), ("FOLLOWEES_PER_BATCH", FOLLOWEES_PER_BATCH), ("FOLLOWER_LIMIT_TO_FETCH", FOLLOWER_LIMIT_TO_FETCH), ("FOLLOWEE_LIMIT_TO_FETCH", FOLLOWEE_LIMIT_TO_FETCH), ("DAYS_BETWEEN", DAYS_BETWEEN), ("IDENTITY_BUDGET_PER_DAY", IDENTITY_BUDGET_PER_DAY), ("FOLLOW_LIST_BROWSER_PAGE_SIZE", FOLLOW_LIST_BROWSER_PAGE_SIZE), ("FOLLOW_LIST_BROWSER_REFETCH_TRIES", FOLLOW_LIST_BROWSER_REFETCH_TRIES))
+    nonnegative_numbers = (("RANDOM_SLEEP_DIFF_LOW", RANDOM_SLEEP_DIFF_LOW), ("RANDOM_SLEEP_DIFF_HIGH", RANDOM_SLEEP_DIFF_HIGH), ("LIVENESS_CHECK_INTERVAL", LIVENESS_CHECK_INTERVAL), ("NEXT_OPERATION_DELAY", NEXT_OPERATION_DELAY), ("FOLLOWER_DELAY_PER_BATCH", FOLLOWER_DELAY_PER_BATCH), ("FOLLOWEE_DELAY_PER_BATCH", FOLLOWEE_DELAY_PER_BATCH), ("FOLLOW_LIST_BROWSER_SCROLL_DELAY", FOLLOW_LIST_BROWSER_SCROLL_DELAY), ("FOLLOW_LIST_BROWSER_LOGIN_WAIT", FOLLOW_LIST_BROWSER_LOGIN_WAIT), ("FOLLOW_LIST_BROWSER_INCOMPLETE_WAIT", FOLLOW_LIST_BROWSER_INCOMPLETE_WAIT), ("FOLLOW_LIST_BROWSER_PAGE_RETRY_WAIT", FOLLOW_LIST_BROWSER_PAGE_RETRY_WAIT), ("FOLLOW_LIST_BROWSER_RESUME_WAIT", FOLLOW_LIST_BROWSER_RESUME_WAIT), ("FOLLOW_LIST_BROWSER_RESUME_AFTER", FOLLOW_LIST_BROWSER_RESUME_AFTER), ("MULTI_TARGET_STAGGER", MULTI_TARGET_STAGGER), ("MULTI_TARGET_STAGGER_JITTER", MULTI_TARGET_STAGGER_JITTER))
+    nonnegative_integers = (("DAILY_HUMAN_HITS", DAILY_HUMAN_HITS), ("FOLLOWERS_PER_BATCH", FOLLOWERS_PER_BATCH), ("FOLLOWEES_PER_BATCH", FOLLOWEES_PER_BATCH), ("FOLLOWER_LIMIT_TO_FETCH", FOLLOWER_LIMIT_TO_FETCH), ("FOLLOWEE_LIMIT_TO_FETCH", FOLLOWEE_LIMIT_TO_FETCH), ("DAYS_BETWEEN", DAYS_BETWEEN), ("IDENTITY_BUDGET_PER_DAY", IDENTITY_BUDGET_PER_DAY), ("FOLLOW_LIST_BROWSER_PAGE_SIZE", FOLLOW_LIST_BROWSER_PAGE_SIZE), ("FOLLOW_LIST_BROWSER_REFETCH_TRIES", FOLLOW_LIST_BROWSER_REFETCH_TRIES), ("FOLLOW_LIST_BROWSER_INCOMPLETE_RETRIES", FOLLOW_LIST_BROWSER_INCOMPLETE_RETRIES), ("FOLLOW_LIST_BROWSER_PAGE_RETRIES", FOLLOW_LIST_BROWSER_PAGE_RETRIES), ("FOLLOW_LIST_BROWSER_RESUME_TRIES", FOLLOW_LIST_BROWSER_RESUME_TRIES))
     hours = (("MIN_H1", MIN_H1), ("MAX_H1", MAX_H1), ("MIN_H2", MIN_H2), ("MAX_H2", MAX_H2))
     ports = (("SMTP_PORT", SMTP_PORT), ("WEB_DASHBOARD_PORT", WEB_DASHBOARD_PORT))
     for name, value in positive_numbers:

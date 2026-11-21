@@ -221,6 +221,205 @@ class TestATruncatedListDoesNotReplaceASavedBaseline:
         assert removals == [("followers", sorted(saved[80:]))]
 
 
+class TestAnIncompleteBrowserListIsReadAgain:
+    """A browser scan that stops short of the count used to end the start-up with an error. It is now read again, and then let go."""
+
+    # Drives the real startup pass against a saved list and a scan that stops short on every attempt
+    @staticmethod
+    def _run(monkeypatch, tmp_path, saved, partial_lists, reported_count, retries=1):
+        baseline = tmp_path / "target" / "json" / "instagram_target_followers.json"
+        baseline.parent.mkdir(parents=True, exist_ok=True)
+        baseline.write_text(json.dumps([len(saved), saved]), encoding="utf-8")
+        monkeypatch.setattr(im, "SKIP_FOLLOWERS", False, raising=False)
+        monkeypatch.setattr(im, "SKIP_FOLLOW_CHANGES", False, raising=False)
+        monkeypatch.setattr(im, "FOLLOW_LIST_BROWSER_INCOMPLETE_RETRIES", retries)
+        monkeypatch.setattr(im, "FOLLOW_LIST_BROWSER_INCOMPLETE_WAIT", 300)
+        alerts = []
+        waits = []
+        attempts = []
+        paused = []
+        monkeypatch.setattr(im, "send_notification_channels", lambda *args, **kwargs: alerts.append(args), raising=False)
+
+        # Stops short every time, with the names that attempt read
+        def fetch(*args, **kwargs):
+            names = partial_lists[min(len(attempts), len(partial_lists) - 1)]
+            attempts.append(names)
+            error = im.BrowserFollowListIncompleteError(f"The browser rendered only {len(names)} of about {reported_count} followers before the dialog stopped growing, so the list is incomplete", len(names), reported_count)
+            error.names = list(names)
+            raise error
+
+        # Records the pause before a retry, and ends the pass at the wait for the next check
+        def sleep(seconds, stop_event=None):
+            waits.append(seconds)
+            if seconds == 300:
+                paused.append(json.loads(baseline.read_text(encoding="utf-8")))
+            return seconds != 300
+
+        monkeypatch.setattr(im, "fetch_usernames_paginated", fetch, raising=False)
+        bot = SimpleNamespace(context=SimpleNamespace(_session=SimpleNamespace(), is_logged_in=True, iphone_headers={}), load_session_from_file=lambda *args: None)
+        profile = _profile()
+        profile.followers = reported_count
+        monkeypatch.setattr(im, "instaloader_client", lambda **kwargs: bot, raising=False)
+        monkeypatch.setattr(im, "profile_from_username_resilient", lambda _bot, username: profile, raising=False)
+        monkeypatch.setattr(im, "interruptible_sleep", sleep, raising=False)
+        im.instagram_monitor_user("target", str(tmp_path / "events.csv"), False, False, True, True, True, False, skip_follow_changes=False)
+        return json.loads(baseline.read_text(encoding="utf-8")), alerts, waits, attempts, paused
+
+    # The scan is read again after the pause, each attempt reports the names that are new, and the run goes on instead of ending
+    def test_each_attempt_reports_new_names_and_the_run_goes_on(self, monitored_account, tmp_path, capsys):
+        saved = [f"user{index}" for index in range(100)]
+        partial_lists = [saved[:60] + ["new_a"], saved[:70] + ["new_a", "new_b"]]
+        stored, alerts, waits, attempts, paused = self._run(monitored_account, tmp_path, saved, partial_lists, 102)
+
+        assert len(attempts) == 2 and waits[0] == 300.0
+        # The saved list file is left as it was while the monitor waits, so nothing is written to it until a list is complete
+        assert paused == [[100, saved]]
+        partial_alerts = [alert for alert in alerts if alert[1].endswith("(partial list)")]
+        assert [alert[1] for alert in partial_alerts] == ["Instagram user target has 1 new followers! (partial list)"] * 2
+        assert "new_a" in partial_alerts[0][2] and "new_b" not in partial_alerts[0][2]
+        assert "new_b" in partial_alerts[1][2] and "new_a" not in partial_alerts[1][2]
+        # The two accounts joined the saved list, and the ones the partial lists did not reach stayed in it
+        assert stored == [102, saved + ["new_a", "new_b"]]
+        output = capsys.readouterr().out
+        assert "Reading it again in 5 minutes (attempt 2 of 2)" in output
+        assert "Error while getting followers" not in output
+
+    # A list that stays short and adds nothing is let go: the saved list is kept, no error is reported and no alert is sent
+    def test_a_list_that_adds_nothing_is_let_go(self, monitored_account, tmp_path, capsys):
+        saved = [f"user{index}" for index in range(100)]
+        stored, alerts, waits, attempts, paused = self._run(monitored_account, tmp_path, saved, [saved[:60], saved[:70]], 102)
+
+        assert len(attempts) == 2 and waits[0] == 300.0
+        assert stored == [100, saved]
+        assert [alert for alert in alerts if alert[1].endswith("(partial list)")] == []
+        output = capsys.readouterr().out
+        assert "still incomplete at 70 of about 102 after 1 retry. That is not treated as a failure: the saved list is kept" in output
+        assert "Error while getting followers" not in output
+        assert "Incomplete followers list returned, baseline not saved" in output
+
+    # With no retries the scan is read once, and the shortfall is let go the same way
+    def test_without_retries_the_scan_is_read_once(self, monitored_account, tmp_path):
+        saved = [f"user{index}" for index in range(100)]
+        stored, _alerts, waits, attempts, _paused = self._run(monitored_account, tmp_path, saved, [saved[:60]], 102, retries=0)
+
+        assert len(attempts) == 1 and 300.0 not in waits
+        assert stored == [100, saved]
+
+    # With the ever-seen list on, the new accounts reach that file as they are found, and the saved list file is not touched
+    def test_ever_seen_records_new_accounts_and_leaves_the_saved_list(self, monitored_account, tmp_path):
+        monitored_account.setattr(im, "FOLLOW_LIST_EVER_SEEN", True)
+        saved = [f"user{index}" for index in range(100)]
+        partial_lists = [saved[:60] + ["new_a"], saved[:70] + ["new_a", "new_b"]]
+        stored, alerts, waits, attempts, paused = self._run(monitored_account, tmp_path, saved, partial_lists, 102)
+
+        ever_seen = tmp_path / "target" / "json" / "instagram_target_followers.ever_seen.json"
+        assert json.loads(ever_seen.read_text(encoding="utf-8")) == saved + ["new_a", "new_b"]
+        assert stored == [100, saved] and paused == [[100, saved]]
+        assert len([alert for alert in alerts if alert[1].endswith("(partial list)")]) == 2
+
+
+class TestAFailedStartupListReadWaitsForTheNextWindow:
+    """A list scan that fails at start-up used to end the whole monitor. It is now reported, and the run waits for the next window."""
+
+    # Drives the real startup pass against a saved list and a scan that fails outright
+    @staticmethod
+    def _run(monkeypatch, tmp_path, saved, reported_count):
+        baseline = tmp_path / "target" / "json" / "instagram_target_followers.json"
+        baseline.parent.mkdir(parents=True, exist_ok=True)
+        baseline.write_text(json.dumps([len(saved), saved]), encoding="utf-8")
+        monkeypatch.setattr(im, "SKIP_FOLLOWERS", False, raising=False)
+        monkeypatch.setattr(im, "SKIP_FOLLOW_CHANGES", False, raising=False)
+        waits = []
+
+        def fetch(*args, **kwargs):
+            raise im.BrowserFollowListError("Instagram's follower list dialog could not be read for target: the profile's followers control could not be clicked")
+
+        # Ends the pass at the wait for the next check
+        def sleep(seconds, stop_event=None):
+            waits.append(seconds)
+            return True
+
+        monkeypatch.setattr(im, "fetch_usernames_paginated", fetch, raising=False)
+        bot = SimpleNamespace(context=SimpleNamespace(_session=SimpleNamespace(), is_logged_in=True, iphone_headers={}), load_session_from_file=lambda *args: None)
+        profile = _profile()
+        profile.followers = reported_count
+        monkeypatch.setattr(im, "instaloader_client", lambda **kwargs: bot, raising=False)
+        monkeypatch.setattr(im, "profile_from_username_resilient", lambda _bot, username: profile, raising=False)
+        monkeypatch.setattr(im, "interruptible_sleep", sleep, raising=False)
+        im.instagram_monitor_user("target", str(tmp_path / "events.csv"), False, False, True, True, True, False, skip_follow_changes=False)
+        return json.loads(baseline.read_text(encoding="utf-8")), waits
+
+    # The error is reported, the monitor does not exit, the saved list is kept and the run reaches the wait for the next check
+    def test_the_error_is_reported_and_the_run_goes_on(self, monitored_account, tmp_path, capsys):
+        saved = [f"user{index}" for index in range(100)]
+
+        stored, waits = self._run(monitored_account, tmp_path, saved, 101)
+
+        output = capsys.readouterr().out
+        assert "Error while getting followers: BrowserFollowListError" in output
+        assert "The followers list will be read again at the next check" in output
+        assert "Incomplete followers list returned" not in output
+        assert stored == [100, saved]
+        assert waits
+
+
+class TestEverSeenInTheComparison:
+    """With the ever-seen list on, an account the list already held is not reported as added again, and removals are the saved list's."""
+
+    # Drives the real startup pass against a saved list and an ever-seen list, with a complete list that comes back
+    @staticmethod
+    def _run(monkeypatch, tmp_path, saved, ever_seen, fetched, reported_count):
+        folder = tmp_path / "target" / "json"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "instagram_target_followers.json").write_text(json.dumps([len(saved), saved]), encoding="utf-8")
+        if ever_seen is not None:
+            (folder / "instagram_target_followers.ever_seen.json").write_text(json.dumps(ever_seen), encoding="utf-8")
+        monkeypatch.setattr(im, "SKIP_FOLLOWERS", False, raising=False)
+        monkeypatch.setattr(im, "SKIP_FOLLOW_CHANGES", False, raising=False)
+        monkeypatch.setattr(im, "FOLLOW_LIST_EVER_SEEN", True)
+        compared = []
+
+        # Records what the comparison was asked to report, as additions and removals
+        def compare(user, kind, old, new, csv_file):
+            compared.append((sorted(set(new) - set(old)), sorted(set(old) - set(new))))
+            return ("", "", "", "", "", "", "", "")
+
+        monkeypatch.setattr(im, "compare_and_log_follower_changes", compare, raising=False)
+
+        def fetch(*args, **kwargs):
+            result = im.PaginatedUsernameResult(fetched)
+            result.complete = True
+            return result
+
+        monkeypatch.setattr(im, "fetch_usernames_paginated", fetch, raising=False)
+        bot = SimpleNamespace(context=SimpleNamespace(_session=SimpleNamespace(), is_logged_in=True, iphone_headers={}), load_session_from_file=lambda *args: None)
+        profile = _profile()
+        profile.followers = reported_count
+        monkeypatch.setattr(im, "instaloader_client", lambda **kwargs: bot, raising=False)
+        monkeypatch.setattr(im, "profile_from_username_resilient", lambda _bot, username: profile, raising=False)
+        monkeypatch.setattr(im, "interruptible_sleep", lambda *args, **kwargs: True, raising=False)
+        im.instagram_monitor_user("target", str(tmp_path / "events.csv"), False, False, True, True, True, False, skip_follow_changes=False)
+        return compared, json.loads((folder / "instagram_target_followers.ever_seen.json").read_text(encoding="utf-8"))
+
+    # An account that came back is not added again, a first-time account is, and one that left is reported removed
+    def test_a_returning_account_is_not_added_again(self, monitored_account, tmp_path):
+        saved = [f"user{index}" for index in range(100)]
+        fetched = saved[1:] + ["came_back", "brand_new"]
+        compared, ever_seen = self._run(monitored_account, tmp_path, saved, saved + ["came_back"], fetched, 101)
+
+        assert compared == [(["brand_new"], ["user0"])]
+        # Nothing was dropped from the list of accounts ever seen, including the one that left, and the new one joined it
+        assert ever_seen == saved + ["came_back", "brand_new"]
+
+    # With no ever-seen list yet it starts from the saved list, so what was saved is known and only new accounts are reported
+    def test_the_list_starts_from_the_saved_list(self, monitored_account, tmp_path):
+        saved = [f"user{index}" for index in range(100)]
+        compared, ever_seen = self._run(monitored_account, tmp_path, saved, None, saved + ["brand_new"], 101)
+
+        assert compared == [(["brand_new"], [])]
+        assert ever_seen == saved + ["brand_new"]
+
+
 class TestFirstCheckWait:
     """The days chosen at startup for the first check are the wait before the first request, after the set-up has run."""
 

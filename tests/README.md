@@ -48,6 +48,7 @@ installed copy of the package.
 | `test_privacy.py` | `apply_privacy_substitutions` (string/dict/list recursion, invalid entries) |
 | `test_notifications.py` | Webhook URL validation, Discord markdown escaping, credential masking, payload templating |
 | `test_webhook_delivery.py` | `send_webhook` payload formatting, gates and retry behavior with fake HTTP |
+| `test_incomplete_follow_list.py` | Reading a browser follow list again after the scan stopped short of the count: the pause and retries, the alert for each attempt's new accounts, the list let go without an error, the error that carries the names read, the two settings, and the ever-seen list: its file, its use in the retry and in the comparison of added and removed accounts |
 | `test_paginated_fetching.py` | `fetch_usernames_paginated` batching, limits, completion state and stop-event behavior |
 | `test_profile_resolution.py` | Resolving a target through search (or its public profile page once search answers 404) and GraphQL instead of the retired profile endpoint, id caching and the failure class that keeps the account running |
 | `test_instaloader_compatibility.py` | The tool's patches on Instaloader methods passing through arguments that newer Instaloader releases add |

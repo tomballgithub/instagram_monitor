@@ -216,13 +216,14 @@ class TestDialogHarvest:
 
         assert list(im_module.harvest_follow_list_dialog(page, 0, stop_event=stop_event)) == [["a"]]
 
-    # Each scroll is followed by the configured pause
+    # Each scroll is followed by the configured pause, which is a short hold on the reading status plus the cooldown
     def test_each_scroll_waits_the_configured_delay(self, im_module):
         page = FakePage([["a"], ["a", "b"]])
 
         list(im_module.harvest_follow_list_dialog(page, 1.5, stall_limit=2))
 
-        assert page.waits and set(page.waits) == {1500}
+        assert page.waits and len(page.waits) % 2 == 0
+        assert all(abs(hold + cooldown - 1500) <= 1 for hold, cooldown in zip(page.waits[0::2], page.waits[1::2], strict=True))
 
 
 class TestPageStateGuard:
@@ -286,7 +287,7 @@ class TestDialogOpening:
         if click_fails:
             page.locator.return_value.or_.return_value.first.click.side_effect = cause
         else:
-            page.wait_for_selector.side_effect = cause
+            page.wait_for_function.side_effect = cause
 
         with pytest.raises(im_module.BrowserFollowListError) as raised:
             im_module.open_browser_follow_list_dialog(page, "target.user", "following")
@@ -296,6 +297,72 @@ class TestDialogOpening:
         assert raised.value.__cause__ is cause
         assert im_module.classify_failure_class(str(raised.value)) == "schema_change"
 
+    # The wait is for any link on screen in any dialog, so a hidden link that comes first cannot hold it up
+    def test_the_wait_accepts_any_visible_link(self, im_module):
+        page = Mock(url="https://www.instagram.com/target.user/")
+
+        im_module.open_browser_follow_list_dialog(page, "target.user", "followers")
+
+        page.wait_for_function.assert_called_once_with(im_module.BROWSER_DIALOG_LINKS_JS)
+        assert "getClientRects" in im_module.BROWSER_DIALOG_LINKS_JS and "some(" in im_module.BROWSER_DIALOG_LINKS_JS
+        page.wait_for_selector.assert_not_called()
+
+    # The error says how long it waited and what the page held, so a slow list and a layout change read differently
+    @pytest.mark.parametrize("state, said", [
+        ({"dialogs": 0, "links": 0, "visible": 0}, "no dialog was on the page"),
+        ({"dialogs": 1, "links": 0, "visible": 0}, "1 dialog on the page held 0 profile links, 0 of them on screen"),
+        ({"dialogs": 2, "links": 12, "visible": 0}, "2 dialogs on the page held 12 profile links, 0 of them on screen"),
+        ({"dialogs": 1, "links": 1, "visible": 1}, "1 dialog on the page held 1 profile link, 1 of them on screen"),
+    ])
+    def test_the_error_says_what_the_page_held(self, im_module, monkeypatch, state, said):
+        monkeypatch.setattr(im_module, "FOLLOW_LIST_BROWSER_TIMEOUT", 45)
+        page = Mock(url="https://www.instagram.com/target.user/")
+        page.wait_for_function.side_effect = RuntimeError("timed out")
+        page.evaluate.return_value = state
+
+        with pytest.raises(im_module.BrowserFollowListError) as raised:
+            im_module.open_browser_follow_list_dialog(page, "target.user", "followers")
+
+        assert str(raised.value).endswith(f"no profile links appeared after clicking the followers control within 45 seconds ({said})")
+        assert im_module.classify_failure_class(str(raised.value)) == "schema_change"
+
+    # A page with no follow link and no sign-in form had not loaded its header, which can be retried. A page that has the
+    # links but could not be clicked is a layout change, and a sign-in page is not a slow load, so neither is marked as retryable
+    @pytest.mark.parametrize("state, not_loaded, said", [
+        ({"path": "/target.user/", "links": [], "form": False}, True, "page /target.user/, no link on the page mentions follow"),
+        ({"path": "/target.user/", "links": ["226 followers", "4,848 following"], "form": False}, False, "links mentioning follow: '226 followers', '4,848 following'"),
+        ({"path": "/accounts/login/", "links": [], "form": True}, False, "and a password field is shown"),
+    ])
+    def test_a_failed_click_says_whether_the_page_loaded(self, im_module, state, not_loaded, said):
+        page = Mock(url="https://www.instagram.com/target.user/")
+        page.locator.return_value.or_.return_value.first.click.side_effect = RuntimeError("Locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting")
+        page.evaluate.return_value = state
+
+        with pytest.raises(im_module.BrowserFollowListError) as raised:
+            im_module.open_browser_follow_list_dialog(page, "target.user", "followers")
+
+        assert isinstance(raised.value, im_module.BrowserFollowListNotLoadedError) is not_loaded
+        assert "(Locator.click: Timeout 30000ms exceeded.;" in str(raised.value) and said in str(raised.value)
+        assert "Call log" not in str(raised.value)
+
+    # A page that cannot be read adds nothing, and a failed click is not described as an empty dialog
+    def test_an_unreadable_page_adds_nothing(self, im_module):
+        page = Mock(url="https://www.instagram.com/target.user/")
+        page.wait_for_function.side_effect = RuntimeError("timed out")
+        page.evaluate.side_effect = RuntimeError("page closed")
+
+        with pytest.raises(im_module.BrowserFollowListError) as raised:
+            im_module.open_browser_follow_list_dialog(page, "target.user", "followers")
+        assert str(raised.value).endswith("no profile links appeared after clicking the followers control within 30 seconds")
+
+        clicking = Mock(url="https://www.instagram.com/target.user/")
+        clicking.locator.return_value.or_.return_value.first.click.side_effect = RuntimeError("no control")
+        with pytest.raises(im_module.BrowserFollowListError) as raised:
+            im_module.open_browser_follow_list_dialog(clicking, "target.user", "followers")
+        assert str(raised.value).endswith("the profile's followers control could not be clicked (no control)")
+        assert not isinstance(raised.value, im_module.BrowserFollowListNotLoadedError)
+        clicking.evaluate.assert_called_once_with(im_module.BROWSER_CONTROL_PROBE_JS)
+
     # A redirect during either opening step retains the account-level failure instead of layout advice
     @pytest.mark.parametrize("click_fails", [False, True])
     @pytest.mark.parametrize("path, failure_class", [("challenge/", "challenge"), ("accounts/login/", "auth_expired")])
@@ -304,7 +371,7 @@ class TestDialogOpening:
         if click_fails:
             page.locator.return_value.or_.return_value.first.click.side_effect = RuntimeError("selector failed")
         else:
-            page.wait_for_selector.side_effect = RuntimeError("selector failed")
+            page.wait_for_function.side_effect = RuntimeError("selector failed")
 
         with pytest.raises(im_module.BrowserFollowListError) as raised:
             im_module.open_browser_follow_list_dialog(page, "target.user", "followers")
