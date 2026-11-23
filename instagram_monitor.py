@@ -554,6 +554,15 @@ VERIFY_SSL = True
 # Whether webhook requests should use the proxy
 PROXY_WEBHOOKS = False
 
+# Whether the profile picture is downloaded through the proxy
+# Set this to False when the proxy refuses Instagram's image servers, which a Bright Data zone without KYC verification does with HTTP 402
+# False sends the profile picture download directly, so Instagram's image server sees this machine's own address
+PROXY_PROFILE_PICTURE = True
+
+# Whether post, reel and story media are downloaded through the proxy
+# Set this to False for the same reason as PROXY_PROFILE_PICTURE, which has the same effect on the address the image server sees
+PROXY_MEDIA = True
+
 # Optional desktop browser user agent
 #
 # When importing Firefox cookies this should match the Firefox user agent
@@ -1000,6 +1009,8 @@ PROXY_URL = ""
 PROXY_CERT_PATH = ""
 VERIFY_SSL = True
 PROXY_WEBHOOKS = False
+PROXY_PROFILE_PICTURE = True
+PROXY_MEDIA = True
 CONTAINER_FIREFOX_HOSTS = {
     "macos": ("macOS", '"${HOME}/Library/Application Support/Firefox/Profiles:/home/instagram/.mozilla/firefox:ro"'),
     "linux": ("Linux with a standard Firefox package", '"$HOME/.mozilla/firefox:/home/instagram/.mozilla/firefox:ro"'),
@@ -8171,26 +8182,58 @@ def is_valid_downloaded_media(filename, content_type):
     return False
 
 
-# Downloads validated media to a bounded temporary file then atomically replaces the destination
-def save_pic_video(image_video_url, image_video_file_name, custom_mdate_ts=0):
+# Returns the proxies and the certificate check for one media download, which goes direct when its setting leaves the proxy out
+def media_request_settings(through_proxy: bool):
+    if PROXY_ENABLED and through_proxy:
+        return get_proxies(), get_proxies_ssl()
+    return {}, VERIFY_SSL
+
+
+# Names what a proxy said when it refused a request, from the headers Bright Data sets on a refusal
+# x-brd-err-code and x-brd-error say which policy refused it, such as one that blocks a site for a zone without identity verification,
+# and Proxy-Status gives the short form. The same text under two names is shown once, and the result is empty when none is present
+def proxy_refusal_details(headers) -> str:
+    seen = []
+    for name in ('x-brd-err-code', 'x-brd-error', 'x-brd-err-msg', 'proxy-status'):
+        try:
+            value = headers.get(name)
+        except Exception:
+            value = None
+        text = ' '.join(str(value).split()) if value else ''
+        if text and all(text != other for _, other in seen):
+            seen.append((name, text[:400]))
+    return '; '.join(f"{name}: {text}" for name, text in seen)
+
+
+# Downloads validated media to a bounded temporary file then atomically replaces the destination.
+# Returns None on success or the reason the download failed
+# through_proxy False sends the request straight to the server even while a proxy is configured
+def download_media(image_video_url, image_video_file_name, custom_mdate_ts=0, through_proxy: bool = True) -> Optional[str]:
     temporary_path = None
     image_video_response = None
     expected_bytes = None
+    url_parts = urlsplit(str(image_video_url))
+    # Named verify, the name the TLS sweep in the tests accepts for the certificate decision
+    media_proxies, verify = media_request_settings(through_proxy)
     try:
         # Certificate verification follows VERIFY_SSL, which the local operator turns off only for an intercepting network
 
         # codeql[py/request-without-cert-validation]
-        image_video_response = req.get(image_video_url, headers={'User-Agent': USER_AGENT}, timeout=FUNCTION_TIMEOUT, stream=True, verify=get_proxies_ssl(), proxies=get_proxies())
+        image_video_response = req.get(image_video_url, headers={'User-Agent': USER_AGENT}, timeout=FUNCTION_TIMEOUT, stream=True, verify=verify, proxies=media_proxies)
         if image_video_response.status_code != 200:
-            return False
+            refusal = proxy_refusal_details(image_video_response.headers)
+            return f"{url_parts.hostname or 'the server'} answered HTTP {image_video_response.status_code}" + (f" ({refusal})" if refusal else "")
+        too_large = f"the file is larger than {MEDIA_DOWNLOAD_MAX_BYTES // (1024 * 1024)} MiB"
         content_length = image_video_response.headers.get('content-length')
         if content_length:
             try:
                 expected_bytes = int(content_length)
-                if expected_bytes < 0 or expected_bytes > MEDIA_DOWNLOAD_MAX_BYTES:
-                    return False
             except (TypeError, ValueError):
-                return False
+                expected_bytes = -1
+            if expected_bytes < 0:
+                return f"the reply has an invalid content length ({content_length})"
+            if expected_bytes > MEDIA_DOWNLOAD_MAX_BYTES:
+                return too_large
         url_time = image_video_response.headers.get('last-modified')
         url_time_in_tz_ts = 0
         if url_time and not custom_mdate_ts:
@@ -8211,24 +8254,27 @@ def save_pic_video(image_video_url, image_video_file_name, custom_mdate_ts=0):
                     continue
                 downloaded_bytes += len(chunk)
                 if downloaded_bytes > MEDIA_DOWNLOAD_MAX_BYTES:
-                    return False
+                    return too_large
                 handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
         content_encoding = str(image_video_response.headers.get('content-encoding') or '').strip().lower()
         if expected_bytes is not None and content_encoding in ('', 'identity') and downloaded_bytes != expected_bytes:
-            return False
-        if not is_valid_downloaded_media(temporary_path, image_video_response.headers.get('content-type')):
-            return False
+            return f"the download stopped after {downloaded_bytes} of {expected_bytes} bytes"
+        content_type = image_video_response.headers.get('content-type')
+        if not is_valid_downloaded_media(temporary_path, content_type):
+            return f"the reply is not an image or video (content type {content_type or 'missing'})"
         os.replace(temporary_path, destination)
         temporary_path = None
         if url_time_in_tz_ts and not custom_mdate_ts:
             os.utime(destination, (url_time_in_tz_ts, url_time_in_tz_ts))
         elif custom_mdate_ts:
             os.utime(destination, (custom_mdate_ts, custom_mdate_ts))
-        return True
-    except Exception:
-        return False
+        return None
+    except Exception as error:
+        # A requests error quotes the URL path and the CDN's signed query, which is long and of no use to the reader
+        reason = format_error_message(error)
+        return reason.replace(f"?{url_parts.query}", "") if url_parts.query else reason
     finally:
         if image_video_response is not None:
             try:
@@ -8240,6 +8286,25 @@ def save_pic_video(image_video_url, image_video_file_name, custom_mdate_ts=0):
                 os.remove(temporary_path)
             except OSError:
                 pass
+
+
+# Downloads validated media and reports whether it was saved, printing the failure reason in debug mode
+# Post, reel and story media go through the proxy unless PROXY_MEDIA is off
+def save_pic_video(image_video_url, image_video_file_name, custom_mdate_ts=0) -> bool:
+    if PROXY_MEDIA:
+        reason = download_media(image_video_url, image_video_file_name, custom_mdate_ts)
+    else:
+        reason = download_media(image_video_url, image_video_file_name, custom_mdate_ts, through_proxy=False)
+    if reason is not None:
+        debug_print("Media download", file=os.path.basename(str(image_video_file_name)), outcome="failed", error=reason)
+    return reason is None
+
+
+# Downloads the profile picture and returns None on success or the reason it failed, through the proxy unless PROXY_PROFILE_PICTURE is off
+def download_profile_picture(profile_image_url, file_name) -> Optional[str]:
+    if PROXY_PROFILE_PICTURE:
+        return download_media(profile_image_url, file_name)
+    return download_media(profile_image_url, file_name, through_proxy=False)
 
 
 # Displays one saved image in the terminal through the configured imgcat binary, with optional spacing around it
@@ -8323,7 +8388,8 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
 
     # Profile pic does not exist in the filesystem
     if not os.path.isfile(profile_pic_file):
-        if save_pic_video(profile_image_url, profile_pic_file):
+        download_error = download_profile_picture(profile_image_url, profile_pic_file)
+        if download_error is None:
             profile_pic_mdate_dt = datetime.fromtimestamp(int(os.path.getmtime(profile_pic_file)), local_timezone())
 
             if profile_pic_file_empty and os.path.isfile(profile_pic_file_empty):
@@ -8355,7 +8421,7 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
             except Exception as e:
                 print_recovery_error(e, context="file_write", summary=f"Could not write the CSV entry to '{csv_file_name}': {e}")
         else:
-            print(f"* Error saving profile picture !{new_line}")
+            print(f"* Error saving profile picture: {download_error}{new_line}")
 
         if func_ver == 2:
             print(f"\nCheck interval:\t\t\t\t{check_window_text()}")
@@ -8372,7 +8438,8 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
         m_body_html_pic_saved_text = ""
         profile_pic_mdate_dt = datetime.fromtimestamp(int(os.path.getmtime(profile_pic_file)), local_timezone())
         profile_pic_mdate = get_short_date_from_ts(profile_pic_mdate_dt, True)
-        if save_pic_video(profile_image_url, profile_pic_file_tmp):
+        download_error = download_profile_picture(profile_image_url, profile_pic_file_tmp)
+        if download_error is None:
             profile_pic_tmp_mdate_dt = datetime.fromtimestamp(int(os.path.getmtime(profile_pic_file_tmp)), local_timezone())
             if profile_pic_file_empty and os.path.isfile(profile_pic_file_empty):
                 debug_print("Comparing current profile picture with empty template...")
@@ -8496,7 +8563,8 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
                     except Exception:
                         pass
         else:
-            print_recovery_error("Error while checking if the profile picture has changed !")
+            # Not classified by its text, since a CDN status or file error says nothing about the session or the IP
+            print_recovery_advice(make_recovery_advice("unknown", f"Error while checking if the profile picture has changed: {download_error}", "Open an issue with this output if the failure continues", True))
             if func_ver == 2:
                 print(f"\nCheck interval:\t\t\t\t{check_window_text()}")
                 print_cur_ts()
@@ -18881,7 +18949,7 @@ def doctor_monitoring_overrides(args):
                 parts.append(f"{option}={value}")
             else:
                 parts.extend((option, str(value)))
-    switches = (("status_notification", "--notify-status", True), ("followers_notification", "--notify-followers", True), ("error_notification", "--no-error-notify", False), ("webhook_enabled", "--webhook", True), ("no_webhook", "--no-webhook", True), ("webhook_status", "--webhook-status", True), ("webhook_followers", "--webhook-followers", True), ("webhook_errors", "--webhook-errors", True), ("skip_session", "--skip-session", True), ("skip_followers", "--skip-followers", True), ("skip_followings", "--skip-followings", True), ("followers_churn", "--followers-churn", True), ("skip_follow_changes", "--skip-follow-changes", True), ("skip_getting_story_details", "--skip-story-details", True), ("skip_getting_posts_details", "--skip-post-details", True), ("get_more_post_details", "--more-post-details", True), ("be_human", "--be-human", True), ("enable_jitter", "--enable-jitter", True), ("proxy_enabled", "--enable-proxy", True), ("proxy_webhooks", "--enable-proxy-webhooks", True), ("dashboard", "--dashboard", True), ("disable_dashboard", "--no-dashboard", True), ("web_dashboard", "--web-dashboard", True), ("no_web_dashboard", "--no-web-dashboard", True), ("do_not_detect_changed_profile_pic", "--no-profile-pic-detect", False), ("fetch_reels", "--fetch-reels", True), ("fetch_reels", "--no-fetch-reels", False), ("detect_collab_posts", "--no-detect-collab-posts", False), ("disable_logging", "--disable-logging", True), ("no_color", "--no-color", True), ("verbose_mode", "--verbose", True), ("debug_mode", "--debug", True))
+    switches = (("status_notification", "--notify-status", True), ("followers_notification", "--notify-followers", True), ("error_notification", "--no-error-notify", False), ("webhook_enabled", "--webhook", True), ("no_webhook", "--no-webhook", True), ("webhook_status", "--webhook-status", True), ("webhook_followers", "--webhook-followers", True), ("webhook_errors", "--webhook-errors", True), ("skip_session", "--skip-session", True), ("skip_followers", "--skip-followers", True), ("skip_followings", "--skip-followings", True), ("followers_churn", "--followers-churn", True), ("skip_follow_changes", "--skip-follow-changes", True), ("skip_getting_story_details", "--skip-story-details", True), ("skip_getting_posts_details", "--skip-post-details", True), ("get_more_post_details", "--more-post-details", True), ("be_human", "--be-human", True), ("enable_jitter", "--enable-jitter", True), ("proxy_enabled", "--enable-proxy", True), ("proxy_webhooks", "--enable-proxy-webhooks", True), ("proxy_profile_picture", "--no-proxy-profile-picture", False), ("proxy_media", "--no-proxy-media", False), ("dashboard", "--dashboard", True), ("disable_dashboard", "--no-dashboard", True), ("web_dashboard", "--web-dashboard", True), ("no_web_dashboard", "--no-web-dashboard", True), ("do_not_detect_changed_profile_pic", "--no-profile-pic-detect", False), ("fetch_reels", "--fetch-reels", True), ("fetch_reels", "--no-fetch-reels", False), ("detect_collab_posts", "--no-detect-collab-posts", False), ("disable_logging", "--disable-logging", True), ("no_color", "--no-color", True), ("verbose_mode", "--verbose", True), ("debug_mode", "--debug", True))
     for name, option, selected in switches:
         if getattr(args, name, None) is selected:
             parts.append(option)
@@ -21216,6 +21284,7 @@ def doctor_proxy_checks() -> List[DoctorCheck]:
     if not PROXY_ENABLED:
         return [make_doctor_check("Configuration", "PASS", "Proxy is disabled", "Instagram requests leave this machine directly")]
     detail = f"Destination: {proxy_destination_display()}. Webhooks: {'through the proxy' if PROXY_WEBHOOKS else 'sent directly'}"
+    detail += f". Profile picture: {'through the proxy' if PROXY_PROFILE_PICTURE else 'sent directly'}. Post, reel and story media: {'through the proxy' if PROXY_MEDIA else 'sent directly'}"
     if PROXY_CERT_PATH:
         detail += f". Certificate: {PROXY_CERT_PATH}"
     return [make_doctor_check("Configuration", "PASS", "Instagram requests go through a proxy", detail)] + doctor_browser_proxy_certificate_checks()
@@ -21719,7 +21788,7 @@ def run_main():
     global CLI_CONFIG_PATH, CONFIG_DISCOVERY_DISABLED, CONFIG_DISCOVERED_IN_CWD, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_REMINDER_SECONDS, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, DETECT_COLLAB_POSTS, FETCH_REELS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, HTTP_BACKEND, CURL_CFFI_IMPERSONATE, FOLLOW_LIST_SOURCE, IDENTITY_BUDGET_PER_DAY, IDENTITY_BUDGET_AUTODISABLED_REASON, CIRCUIT_BREAKER, CIRCUIT_BREAKER_AUTODISABLED_REASON, BE_HUMAN, ENABLE_JITTER, START_TIME_SCRIPT
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_PROVIDER, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H, TRUNCATE_CHARS
-    global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, ADVANCED_FOLLOWER_FETCH, ADVANCED_FOLLOWEE_FETCH
+    global PROXY_ENABLED, PROXY_URL, PROXY_CERT_PATH, PROXY_WEBHOOKS, PROXY_PROFILE_PICTURE, PROXY_MEDIA, ADVANCED_FOLLOWER_FETCH, ADVANCED_FOLLOWEE_FETCH
     global SECRET_SOURCES, EXPORTED_SECRET_KEYS
 
     if "--generate-config" in sys.argv and not any(flag in sys.argv for flag in SECRET_ACTION_FLAGS):
@@ -22212,6 +22281,20 @@ def run_main():
         default=None,
         help="Enable use of proxy for webhook POST requests"
     )
+    session_opts.add_argument(
+        "--no-proxy-profile-picture",
+        dest="proxy_profile_picture",
+        action="store_false",
+        default=None,
+        help="Download the profile picture directly instead of through the proxy"
+    )
+    session_opts.add_argument(
+        "--no-proxy-media",
+        dest="proxy_media",
+        action="store_false",
+        default=None,
+        help="Download post, reel and story media directly instead of through the proxy"
+    )
 
     # Features & output
     term_opts = parser.add_argument_group("Terminal dashboard")
@@ -22621,6 +22704,12 @@ def run_main():
 
     if args.proxy_webhooks is True:
         PROXY_WEBHOOKS = True
+
+    if args.proxy_profile_picture is False:
+        PROXY_PROFILE_PICTURE = False
+
+    if args.proxy_media is False:
+        PROXY_MEDIA = False
 
     PROXY_STARTUP_ERRORS[:] = proxy_configuration_problems()
     if PROXY_STARTUP_ERRORS:
@@ -23252,6 +23341,8 @@ def run_main():
         summary_rows.append(StartupSummaryRow("  Proxy URL", str(mask_url_credentials(PROXY_URL))[:50], concise=True))
         summary_rows.append(StartupSummaryRow("  Proxy Certificate", PROXY_CERT_PATH or "-", concise=True))
         summary_rows.append(StartupSummaryRow("  Proxy for Webhooks", "Enabled" if PROXY_WEBHOOKS else "Disabled", concise=True))
+        summary_rows.append(StartupSummaryRow("  Proxy for Profile Picture", "Enabled" if PROXY_PROFILE_PICTURE else "Disabled", concise=True))
+        summary_rows.append(StartupSummaryRow("  Proxy for Media", "Enabled" if PROXY_MEDIA else "Disabled", concise=True))
 
     summary_rows.extend(_startup_environment_rows(env_path))
 

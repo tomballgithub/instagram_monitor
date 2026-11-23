@@ -220,6 +220,29 @@ class TestSecretTrace:
         assert "No private settings were resolved from config, dotenv, environment or the command line" in output
 
 
+class TestProxyMediaChoice:
+    # A run with nothing set leaves both downloads on the proxy, as before the settings existed
+    def test_a_run_with_nothing_set_keeps_both_on_the_proxy(self, im_module, monkeypatch, tmp_path, restored_globals):
+        run_startup(im_module, monkeypatch, tmp_path)
+
+        assert im_module.PROXY_PROFILE_PICTURE is True
+        assert im_module.PROXY_MEDIA is True
+
+    # The configuration file turns either one off on its own
+    @pytest.mark.parametrize("line, picture, media", [("PROXY_PROFILE_PICTURE = False", False, True), ("PROXY_MEDIA = False", True, False)])
+    def test_the_config_file_turns_each_off(self, im_module, monkeypatch, tmp_path, restored_globals, line, picture, media):
+        run_startup(im_module, monkeypatch, tmp_path, config_text=line + "\n")
+
+        assert (im_module.PROXY_PROFILE_PICTURE, im_module.PROXY_MEDIA) == (picture, media)
+
+    # The command line turns either one off on its own, over a configuration file that leaves it on
+    @pytest.mark.parametrize("flag, picture, media", [("--no-proxy-profile-picture", False, True), ("--no-proxy-media", True, False)])
+    def test_the_command_line_turns_each_off(self, im_module, monkeypatch, tmp_path, restored_globals, flag, picture, media):
+        run_startup(im_module, monkeypatch, tmp_path, argv=(flag,), config_text="PROXY_PROFILE_PICTURE = True\nPROXY_MEDIA = True\n")
+
+        assert (im_module.PROXY_PROFILE_PICTURE, im_module.PROXY_MEDIA) == (picture, media)
+
+
 class TestEarlyStartupTimestamps:
     # LOCAL_TIMEZONE still holds the 'Auto' sentinel until it is resolved, which is not a zone pytz can build
     def test_a_timestamp_survives_the_unresolved_timezone(self, im_module, monkeypatch):

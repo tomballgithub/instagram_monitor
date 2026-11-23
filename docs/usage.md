@@ -685,6 +685,7 @@ Additional options:
 
 - `PROXY_CERT_PATH` or `--proxy-cert` selects a local CA certificate for HTTP clients. It applies only while [TLS verification](configuration.md#tls-verification) is on. Browser follower lists use the browser's trust store instead, as described under [Browser Proxy Certificates](troubleshooting.md#browser-proxy-certificates). On Windows a run that reads follower lists with the browser through a proxy stops at startup unless the CA in this file is already in the Windows trust store, so import it there and keep this setting for the HTTP clients
 - `PROXY_WEBHOOKS` or `--enable-proxy-webhooks` also sends webhook requests through the proxy. It is off by default because some proxies do not allow these requests
+- `PROXY_PROFILE_PICTURE` and `PROXY_MEDIA` choose whether the profile picture and the post, reel and story media go through the proxy. Both are on by default. Set one to `False`, or pass `--no-proxy-profile-picture` or `--no-proxy-media`, to download it directly, which a proxy that refuses Instagram's image servers needs. A Bright Data zone without KYC verification answers those downloads with HTTP 402 and `policy_20140`. A direct download shows this machine's own address to the image server, and nothing else changes: Instagram requests still use the proxy
 - `IP_ADDRESS_URL` selects one trusted IP lookup URL or an ordered non-empty list of fallback URLs
 
 `PROXY_URL` may contain a username and password. The tool masks it in output. Store it through an [environment variable or `.env` file](configuration.md#storing-secrets).
@@ -696,6 +697,8 @@ PROXY_ENABLED = True
 PROXY_URL = "http://user:pass@host:port"
 PROXY_CERT_PATH = ""
 PROXY_WEBHOOKS = False
+PROXY_PROFILE_PICTURE = True
+PROXY_MEDIA = True
 IP_ADDRESS_URL = [
     "https://checkip.amazonaws.com",
     "https://api.ipify.org?format=json",
@@ -879,7 +882,7 @@ The directory layout depends on the number of targets:
 
 Summary messages and errors that apply to the whole process are written to every active target log.
 
-Media downloads are limited to 100 MiB. Failed or invalid downloads leave any previously saved file intact.
+Media downloads are limited to 100 MiB. Failed or invalid downloads leave any previously saved file intact. A failed profile picture download names its cause, such as the HTTP status or a file error. When a Bright Data proxy refuses the request, the policy it names (`x-brd-err-code`, `x-brd-error`, `Proxy-Status`) is shown after the status. `--debug` prints the cause for other media downloads.
 
 <a id="detection-of-changed-profile-pictures"></a>
 ## Detection of Changed Profile Pictures
